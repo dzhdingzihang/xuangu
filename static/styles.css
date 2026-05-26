@@ -282,6 +282,71 @@ main {
   gap: 16px;
 }
 
+.history-panel {
+  margin: 16px 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
+.history-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.history-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 78px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: var(--text);
+  padding: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-item.active {
+  border-color: var(--blue);
+  background: #eef4ff;
+}
+
+.history-item strong,
+.history-item small,
+.history-meta b,
+.history-meta small {
+  display: block;
+}
+
+.history-item strong {
+  margin-bottom: 5px;
+  font-size: 15px;
+}
+
+.history-item small,
+.history-meta small,
+.history-empty {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.history-meta {
+  min-width: 96px;
+  text-align: right;
+}
+
+.history-meta b {
+  color: var(--blue-dark);
+  font-size: 17px;
+  margin-bottom: 5px;
+}
+
 .table-panel,
 .side-panel {
   padding: 18px;
@@ -406,7 +471,8 @@ td strong {
 @media (max-width: 1080px) {
   .topbar,
   .decision-grid,
-  .content-grid {
+  .content-grid,
+  .history-list {
     grid-template-columns: 1fr;
   }
 

@@ -113,6 +113,73 @@ def default_signal_date(today: dt.date | None = None) -> dt.date:
     return today
 
 
+def parse_cache_name(path: pathlib.Path) -> tuple[str, str] | None:
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.json", path.name)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def summarize_pick(pick: dict) -> dict:
+    decision = pick.get("decision") or {}
+    primary = decision.get("primary") or decision.get("blocked_candidate")
+    summary = {
+        "target_date": pick.get("target_date"),
+        "signal_date": pick.get("signal_date"),
+        "generated_at": pick.get("generated_at"),
+        "action": decision.get("action"),
+        "title": decision.get("title"),
+        "message": decision.get("message"),
+        "has_primary": bool(decision.get("primary")),
+    }
+    if primary:
+        summary.update(
+            {
+                "code": primary.get("code"),
+                "name": primary.get("name"),
+                "confidence": primary.get("confidence"),
+                "estimated_2d_range": (primary.get("estimated_2d_range") or {}).get("text"),
+                "score": primary.get("score"),
+                "reason_tags": primary.get("reason_tags"),
+            }
+        )
+    return summary
+
+
+def history_payload(limit: int = 30) -> dict:
+    rows = []
+    for path in PICKS.glob("*.json"):
+        parsed = parse_cache_name(path)
+        if not parsed:
+            continue
+        try:
+            pick = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if pick.get("model_version") != MODEL_VERSION:
+            continue
+        summary = summarize_pick(pick)
+        summary["cache_key"] = path.name
+        rows.append(summary)
+    rows.sort(key=lambda item: (item.get("target_date") or "", item.get("generated_at") or ""), reverse=True)
+
+    latest = None
+    latest_path = PICKS / "latest.json"
+    if latest_path.exists():
+        try:
+            latest_pick = json.loads(latest_path.read_text(encoding="utf-8"))
+            if latest_pick.get("model_version") == MODEL_VERSION:
+                latest = summarize_pick(latest_pick)
+        except Exception:
+            latest = None
+    return {
+        "ok": True,
+        "time": now_cn().isoformat(timespec="seconds"),
+        "latest": latest,
+        "history": rows[:limit],
+    }
+
+
 def safe_float(value, default: float = 0.0) -> float:
     try:
         if value in (None, "", "-"):
@@ -805,6 +872,22 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_json(run_selector(date_text=date_text, force=force))
             except Exception as exc:
                 self.send_json({"error": str(exc), "disclaimer": "数据源暂不可用，请稍后重试。"}, 500)
+            return
+        if parsed.path == "/api/history":
+            query = urllib.parse.parse_qs(parsed.query)
+            limit = int(query.get("limit", ["30"])[0])
+            self.send_json(history_payload(limit=max(1, min(limit, 90))))
+            return
+        if parsed.path == "/api/latest":
+            latest = PICKS / "latest.json"
+            if not latest.exists():
+                self.send_json({"error": "暂无历史决策缓存"}, 404)
+                return
+            payload = json.loads(latest.read_text(encoding="utf-8"))
+            if payload.get("model_version") != MODEL_VERSION:
+                self.send_json({"error": "历史缓存模型版本已过期"}, 409)
+                return
+            self.send_json(payload)
             return
         if parsed.path == "/api/status":
             latest = PICKS / "latest.json"

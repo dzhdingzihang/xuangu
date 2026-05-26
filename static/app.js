@@ -11,11 +11,15 @@ const els = {
   rangeMetric: document.getElementById("rangeMetric"),
   stopMetric: document.getElementById("stopMetric"),
   poolMetric: document.getElementById("poolMetric"),
+  historyStatus: document.getElementById("historyStatus"),
+  historyList: document.getElementById("historyList"),
   candidateRows: document.getElementById("candidateRows"),
   chanRules: document.getElementById("chanRules"),
   marketBlock: document.getElementById("marketBlock"),
   industryBlock: document.getElementById("industryBlock"),
 };
+
+const LOCAL_HISTORY_KEY = "chan-stock-history-v1";
 
 function todayText() {
   const d = new Date();
@@ -42,6 +46,70 @@ function li(text) {
   const item = document.createElement("li");
   item.textContent = text;
   return item;
+}
+
+function summarizeClientPick(data) {
+  const decision = data.decision || {};
+  const primary = decision.primary || decision.blocked_candidate;
+  const summary = {
+    target_date: data.target_date,
+    signal_date: data.signal_date,
+    generated_at: data.generated_at,
+    action: decision.action,
+    title: decision.title,
+    message: decision.message,
+    has_primary: Boolean(decision.primary),
+    local_key: `${data.target_date}_${data.signal_date}`,
+  };
+  if (primary) {
+    summary.code = primary.code;
+    summary.name = primary.name;
+    summary.confidence = primary.confidence;
+    summary.estimated_2d_range = primary.estimated_2d_range && primary.estimated_2d_range.text;
+    summary.score = primary.score;
+    summary.reason_tags = primary.reason_tags;
+  }
+  return summary;
+}
+
+function readLocalHistory() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LOCAL_HISTORY_KEY) || "{}");
+    return raw && typeof raw === "object" ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeLocalHistory(history) {
+  localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(history));
+}
+
+function storeLocalPick(data) {
+  if (!data || !data.target_date || !data.signal_date) return;
+  const history = readLocalHistory();
+  history[`${data.target_date}_${data.signal_date}`] = data;
+  writeLocalHistory(history);
+}
+
+function localSummaries() {
+  return Object.entries(readLocalHistory())
+    .map(([key, value]) => ({ ...summarizeClientPick(value), local_key: key }))
+    .sort((a, b) => `${b.target_date || ""}${b.generated_at || ""}`.localeCompare(`${a.target_date || ""}${a.generated_at || ""}`));
+}
+
+function mergeHistory(serverRows) {
+  const merged = new Map();
+  (serverRows || []).forEach((item) => {
+    merged.set(`${item.target_date}_${item.signal_date}`, item);
+  });
+  localSummaries().forEach((item) => {
+    const key = `${item.target_date}_${item.signal_date}`;
+    merged.set(key, { ...item, ...(merged.get(key) || {}) });
+  });
+  return [...merged.values()].sort((a, b) =>
+    `${b.target_date || ""}${b.generated_at || ""}`.localeCompare(`${a.target_date || ""}${a.generated_at || ""}`),
+  );
 }
 
 function renderPrimary(data) {
@@ -172,9 +240,83 @@ function render(data) {
   renderIndustry(data);
 }
 
-async function load(force = false) {
-  els.actionBadge.className = "status";
-  els.actionBadge.textContent = "计算中";
+function historyTitle(item) {
+  if (!item) return "暂无历史记录";
+  if (!item.has_primary) return `${item.target_date} 空仓`;
+  return `${item.target_date} ${item.name} ${item.code}`;
+}
+
+function renderHistory(history, currentTarget) {
+  clearList(els.historyList);
+  if (!history.length) {
+    const empty = document.createElement("div");
+    empty.className = "history-empty";
+    empty.textContent = "还没有历史缓存。首次计算完成后，会自动保存到这里。";
+    els.historyList.append(empty);
+    els.historyStatus.textContent = "0 条";
+    return;
+  }
+  els.historyStatus.textContent = `${history.length} 条`;
+  history.forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `history-item ${item.target_date === currentTarget ? "active" : ""}`;
+    button.innerHTML = `
+      <span>
+        <strong>${historyTitle(item)}</strong>
+        <small>${item.title || "--"} · 信号日 ${item.signal_date || "--"} · ${item.generated_at || "--"}</small>
+      </span>
+      <span class="history-meta">
+        <b>${item.confidence ? `${item.confidence}%` : "--"}</b>
+        <small>${item.estimated_2d_range || item.message || "--"}</small>
+      </span>
+    `;
+    button.addEventListener("click", async () => {
+      els.dateInput.value = item.target_date;
+      const localPick = readLocalHistory()[`${item.target_date}_${item.signal_date}`];
+      if (localPick) {
+        render(localPick);
+        renderHistory(history, item.target_date);
+        return;
+      }
+      await load(false, { showBusy: false });
+    });
+    els.historyList.append(button);
+  });
+}
+
+async function loadHistory() {
+  const response = await fetch("/api/history?limit=45");
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "历史记录读取失败");
+  payload.history = mergeHistory(payload.history || []);
+  renderHistory(payload.history, els.dateInput.value);
+  return payload;
+}
+
+async function loadLatestSnapshot() {
+  const response = await fetch("/api/latest");
+  const data = await response.json();
+  if (!response.ok) {
+    const localLatest = localSummaries()[0];
+    const localPick = localLatest && readLocalHistory()[localLatest.local_key];
+    if (!localPick) throw new Error(data.error || "暂无历史决策缓存");
+    render(localPick);
+    els.actionBadge.textContent = `${localPick.decision.title} · 本地历史`;
+    return localPick;
+  }
+  render(data);
+  storeLocalPick(data);
+  els.actionBadge.textContent = `${data.decision.title} · 历史缓存`;
+  return data;
+}
+
+async function load(force = false, options = {}) {
+  const showBusy = options.showBusy !== false;
+  if (showBusy) {
+    els.actionBadge.className = "status";
+    els.actionBadge.textContent = force ? "重算中" : "计算中";
+  }
   const params = new URLSearchParams();
   if (els.dateInput.value) params.set("date", els.dateInput.value);
   if (force) params.set("force", "1");
@@ -184,13 +326,29 @@ async function load(force = false) {
     throw new Error(data.error || "数据源暂不可用");
   }
   render(data);
+  storeLocalPick(data);
+  loadHistory().catch(() => {});
 }
 
 els.dateInput.value = todayText();
 els.refreshBtn.addEventListener("click", () => load(false).catch(alert));
 els.forceBtn.addEventListener("click", () => load(true).catch(alert));
-load(false).catch((error) => {
-  els.actionBadge.className = "status no-trade";
-  els.actionBadge.textContent = "失败";
-  els.primaryBlock.innerHTML = `<p class="decision-copy">${error.message}</p>`;
-});
+loadHistory()
+  .then(async (payload) => {
+    const today = els.dateInput.value;
+    const cachedToday = (payload.history || []).some((item) => item.target_date === today);
+    if (cachedToday) {
+      return load(false, { showBusy: false });
+    }
+    if (payload.latest) {
+      els.historyStatus.textContent = "先显示最近缓存，后台计算今日";
+      await loadLatestSnapshot().catch(() => {});
+    }
+    return load(false, { showBusy: !payload.latest });
+  })
+  .catch(() => load(false))
+  .catch((error) => {
+    els.actionBadge.className = "status no-trade";
+    els.actionBadge.textContent = "失败";
+    els.primaryBlock.innerHTML = `<p class="decision-copy">${error.message}</p>`;
+  });

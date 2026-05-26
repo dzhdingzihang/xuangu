@@ -1,0 +1,15 @@
+name: Prewarm Render selector
+
+on:
+  schedule:
+    - cron: "20 0 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  prewarm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake service and build daily pick
+        run: |
+          curl --fail --show-error --location --max-time 180 \
+            "https://chan-stock-selector.onrender.com/api/pick?force=1"
