@@ -92,6 +92,10 @@ function storeLocalPick(data) {
   writeLocalHistory(history);
 }
 
+function renderLocalHistory() {
+  renderHistory(mergeHistory([]), els.dateInput.value);
+}
+
 function localSummaries() {
   return Object.entries(readLocalHistory())
     .map(([key, value]) => ({ ...summarizeClientPick(value), local_key: key }))
@@ -307,6 +311,7 @@ async function loadLatestSnapshot() {
   }
   render(data);
   storeLocalPick(data);
+  renderLocalHistory();
   els.actionBadge.textContent = `${data.decision.title} · 历史缓存`;
   return data;
 }
@@ -327,7 +332,10 @@ async function load(force = false, options = {}) {
   }
   render(data);
   storeLocalPick(data);
-  loadHistory().catch(() => {});
+  renderLocalHistory();
+  loadHistory().catch(() => {
+    els.historyStatus.textContent = "已显示本地历史";
+  });
 }
 
 els.dateInput.value = todayText();
@@ -346,7 +354,10 @@ loadHistory()
     }
     return load(false, { showBusy: !payload.latest });
   })
-  .catch(() => load(false))
+  .catch(() => {
+    renderLocalHistory();
+    return load(false);
+  })
   .catch((error) => {
     els.actionBadge.className = "status no-trade";
     els.actionBadge.textContent = "失败";
