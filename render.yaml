@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: chan-stock-selector
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/status
+    autoDeploy: true
+    envVars:
+      - key: TZ
+        value: Asia/Shanghai
+      - key: CHAN_MAX_KLINE_CHECKS
+        value: "20"

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>缠论量化选股</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>缠论量化选股</h1>
+          <p id="subtitle">每天 08:30，用前一交易日收盘数据选择 2 日持有标的</p>
+        </div>
+        <div class="toolbar">
+          <label>
+            目标日
+            <input id="dateInput" type="date" />
+          </label>
+          <button id="refreshBtn" type="button">刷新</button>
+          <button id="forceBtn" type="button">强制重算</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="decision-grid">
+          <article class="decision-panel" id="decisionPanel">
+            <div class="panel-head">
+              <span class="label">决策</span>
+              <span class="status" id="actionBadge">加载中</span>
+            </div>
+            <div id="primaryBlock" class="primary-block">
+              <div class="skeleton line"></div>
+              <div class="skeleton title"></div>
+              <div class="skeleton row"></div>
+            </div>
+          </article>
+
+          <article class="reason-panel">
+            <div class="panel-head">
+              <span class="label">选择理由</span>
+              <span id="signalDate" class="muted"></span>
+            </div>
+            <ul id="reasons" class="reason-list"></ul>
+          </article>
+        </section>
+
+        <section class="metrics-strip">
+          <div class="metric">
+            <span>预测准确率</span>
+            <strong id="confidenceMetric">--</strong>
+          </div>
+          <div class="metric">
+            <span>2 日涨幅预估</span>
+            <strong id="rangeMetric">--</strong>
+          </div>
+          <div class="metric">
+            <span>止损线</span>
+            <strong id="stopMetric">--</strong>
+          </div>
+          <div class="metric">
+            <span>样本池</span>
+            <strong id="poolMetric">--</strong>
+          </div>
+        </section>
+
+        <section class="content-grid">
+          <article class="table-panel">
+            <div class="panel-head">
+              <span class="label">候选排序</span>
+              <span class="muted">分数越高，只代表 2 日窗口信号越强</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>排名</th>
+                    <th>股票</th>
+                    <th>评分</th>
+                    <th>胜率</th>
+                    <th>预估</th>
+                    <th>成交/换手</th>
+                    <th>题材</th>
+                    <th>风险</th>
+                  </tr>
+                </thead>
+                <tbody id="candidateRows"></tbody>
+              </table>
+            </div>
+          </article>
+
+          <aside class="side-stack">
+            <article class="side-panel">
+              <div class="panel-head">
+                <span class="label">缠论映射</span>
+              </div>
+              <ul id="chanRules" class="compact-list"></ul>
+            </article>
+            <article class="side-panel">
+              <div class="panel-head">
+                <span class="label">市场环境</span>
+              </div>
+              <div id="marketBlock" class="market-block"></div>
+            </article>
+            <article class="side-panel">
+              <div class="panel-head">
+                <span class="label">行业热度</span>
+              </div>
+              <div id="industryBlock" class="industry-block"></div>
+            </article>
+          </aside>
+        </section>
+
+        <section class="risk-band">
+          <strong>风控规则</strong>
+          <span>只持有 2 个交易日；买入后跌破止损线或 MA10 失守即退出；若系统显示“今日不交易”，默认空仓。</span>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
