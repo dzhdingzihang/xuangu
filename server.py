@@ -33,7 +33,7 @@ CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "chan-selector-2026-05-25.2"
+MODEL_VERSION = "chan-selector-2026-06-03.2"
 
 for path in (CACHE, PICKS):
     path.mkdir(parents=True, exist_ok=True)
@@ -50,10 +50,10 @@ CHAN_RULES = {
     ],
     "quant_mapping": [
         "女上位: MA5 > MA10，且最好 MA10 > MA20。",
-        "二买: 多头均线后第一次回踩 MA5/MA10 不破并重新收回。",
-        "三买: 突破近 20 日箱体或中枢后，回踩不跌回箱体上沿。",
+        "二买: 多头均线后第一次回踩 MA5/MA10 不破并重新收回，优先选择偏离 MA10 不大的标的。",
+        "三买: 突破近 20 日箱体或中枢后，回踩不跌回箱体上沿；只突破不回踩不追。",
         "背驰: 价格创新低但 MACD 柱改善，作为二买/反转加分。",
-        "卖点/风控: 跌破 MA10 或买入后两日未兑现强度时退出。",
+        "卖点/风控: 涨停后大幅高开不追；跌破 MA10 或买入后两日未兑现强度时退出。",
     ],
 }
 
@@ -131,6 +131,7 @@ def summarize_pick(pick: dict) -> dict:
         "title": decision.get("title"),
         "message": decision.get("message"),
         "has_primary": bool(decision.get("primary")),
+        "model_version": pick.get("model_version"),
     }
     if primary:
         summary.update(
@@ -156,8 +157,6 @@ def history_payload(limit: int = 30) -> dict:
             pick = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if pick.get("model_version") != MODEL_VERSION:
-            continue
         summary = summarize_pick(pick)
         summary["cache_key"] = path.name
         rows.append(summary)
@@ -168,8 +167,7 @@ def history_payload(limit: int = 30) -> dict:
     if latest_path.exists():
         try:
             latest_pick = json.loads(latest_path.read_text(encoding="utf-8"))
-            if latest_pick.get("model_version") == MODEL_VERSION:
-                latest = summarize_pick(latest_pick)
+            latest = summarize_pick(latest_pick)
         except Exception:
             latest = None
     return {
@@ -238,6 +236,81 @@ def find_hot_pool(signal_day: dt.date) -> tuple[str, list[dict]]:
                 pass
         day = previous_weekday(day)
     return signal_day.isoformat(), []
+
+
+def load_broad_market_pool(limit: int = 260) -> list[dict]:
+    rows: list[dict] = []
+    page_size = 80
+    pages = max(1, min(5, math.ceil(limit / page_size)))
+    fields = "f2,f3,f6,f8,f12,f14,f20,f21,f23"
+    for page in range(1, pages + 1):
+        try:
+            data = http_get_json(
+                "https://push2.eastmoney.com/api/qt/clist/get",
+                {
+                    "pn": str(page),
+                    "pz": str(page_size),
+                    "po": "1",
+                    "np": "1",
+                    "fltt": "2",
+                    "invt": "2",
+                    "fid": "f6",
+                    "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+                    "fields": fields,
+                },
+                timeout=12,
+            )
+        except Exception:
+            continue
+        for item in (data.get("data") or {}).get("diff", []) or []:
+            code = str(item.get("f12") or "")
+            name = str(item.get("f14") or "")
+            if not code or "ST" in name.upper() or code.startswith(("8", "4", "9")):
+                continue
+            change_pct = safe_float(item.get("f3"))
+            amount_yi = safe_float(item.get("f6")) / 100000000
+            turnover_pct = safe_float(item.get("f8"))
+            price = safe_float(item.get("f2"))
+            pb = safe_float(item.get("f23"))
+            if price <= 0 or amount_yi < 5:
+                continue
+            if change_pct < 0.8 or change_pct >= 8.8:
+                continue
+            if turnover_pct < 1.2 or turnover_pct > 18:
+                continue
+            if pb > 18:
+                continue
+            rows.append(
+                {
+                    "code": code,
+                    "reason": "全市场稳健候选",
+                    "source": "eastmoney_broad",
+                    "broad_amount_yi": round(amount_yi, 2),
+                    "broad_change_pct": change_pct,
+                    "broad_turnover_pct": turnover_pct,
+                }
+            )
+            if len(rows) >= limit:
+                return rows
+        time.sleep(0.1)
+    return rows
+
+
+def merge_candidate_pools(event_rows: list[dict], broad_rows: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for row in broad_rows + event_rows:
+        code = row.get("code")
+        if not code:
+            continue
+        if code not in merged:
+            merged[code] = dict(row)
+            continue
+        previous_reason = merged[code].get("reason") or ""
+        current_reason = row.get("reason") or ""
+        if current_reason and current_reason not in previous_reason:
+            merged[code]["reason"] = "、".join([part for part in [previous_reason, current_reason] if part])
+        merged[code].update({key: value for key, value in row.items() if value not in ("", None)})
+    return list(merged.values())
 
 
 def tencent_quote(codes: list[str]) -> dict[str, dict]:
@@ -511,6 +584,12 @@ def mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def pct_change(current: float, base: float) -> float:
+    if not base:
+        return 0.0
+    return (current / base - 1) * 100
+
+
 def chan_signal(kline: list[dict]) -> dict:
     if len(kline) < 32:
         return {
@@ -530,16 +609,27 @@ def chan_signal(kline: list[dict]) -> dict:
     ma20 = mean(closes[-20:])
     ma30 = mean(closes[-30:])
     hist = macd_hist(closes)
+    distance_ma5 = pct_change(last["close"], ma5)
+    distance_ma10 = pct_change(last["close"], ma10)
+    distance_ma20 = pct_change(last["close"], ma20)
+    pct_3d = pct_change(last["close"], closes[-4]) if len(closes) >= 4 else 0.0
+    pct_5d = pct_change(last["close"], closes[-6]) if len(closes) >= 6 else 0.0
+    pct_10d = pct_change(last["close"], closes[-11]) if len(closes) >= 11 else 0.0
+    day_range = max(last["high"] - last["low"], 0.001)
+    close_position = (last["close"] - last["low"]) / day_range
+    upper_shadow_pct = pct_change(last["high"], last["close"])
+    last_change = last.get("change_pct", 0.0)
 
     score = 0.0
     signals: list[str] = []
     warnings: list[str] = []
+    setup_flags: list[str] = []
 
     if ma5 > ma10:
-        score += 8
+        score += 6
         signals.append("女上位: MA5 在 MA10 之上")
     if last["close"] > ma5 > ma10 > ma20:
-        score += 12
+        score += 8
         signals.append("多头排列: 收盘价站上 MA5/10/20")
     if last["close"] >= ma10 * 0.985:
         score += 6
@@ -551,7 +641,8 @@ def chan_signal(kline: list[dict]) -> dict:
     recent_pullback = min(lows[-6:-1]) <= ma10 * 1.025
     recover_ma5 = last["close"] > ma5 and last["close"] > closes[-2]
     if ma5 > ma10 and recent_pullback and recover_ma5:
-        score += 16
+        score += 22
+        setup_flags.append("second_buy")
         signals.append("二买近似: 多头后回踩 MA5/MA10 并重新收回")
 
     box_high = max(highs[-25:-5])
@@ -559,10 +650,11 @@ def chan_signal(kline: list[dict]) -> dict:
     recent_low = min(lows[-5:])
     if last["close"] > box_high * 1.01 and recent_low > box_high * 0.985:
         score += 18
+        setup_flags.append("third_buy")
         signals.append("三买近似: 突破近 20 日中枢后回试不破")
     elif last["close"] >= max(highs[-21:-1]) * 0.995:
-        score += 9
-        signals.append("中枢离开: 收盘接近或突破 20 日高点")
+        score += 2
+        warnings.append("只接近或突破 20 日高点，未出现明确回踩确认")
 
     if len(hist) > 28:
         prev_window = list(range(max(0, len(lows) - 28), max(0, len(lows) - 12)))
@@ -576,19 +668,38 @@ def chan_signal(kline: list[dict]) -> dict:
 
     if len(hist) > 8 and last["close"] >= max(highs[-21:-1]) * 0.995:
         if hist[-1] < hist[-2] < hist[-3] and hist[-1] > 0:
-            score -= 7
+            score -= 12
             warnings.append("新高附近 MACD 柱缩短，谨防短线顶背驰")
 
     if last["volume"] > 0 and mean(vols[-6:-1]) > 0:
         vol_ratio = last["volume"] / mean(vols[-6:-1])
-        if 1.15 <= vol_ratio <= 3.8:
-            score += min(10, vol_ratio * 3)
+        if 1.05 <= vol_ratio <= 2.6:
+            score += min(8, vol_ratio * 3)
             signals.append(f"量能确认: 较 5 日均量 {vol_ratio:.1f} 倍")
-        elif vol_ratio > 4.8:
-            warnings.append("放量过猛，可能接近短线兑现点")
-            score -= 4
+        elif vol_ratio > 2.6:
+            warnings.append("放量偏猛，次日容易分歧")
+            score -= min(18, (vol_ratio - 2.6) * 5)
     else:
         vol_ratio = 0
+
+    if not setup_flags:
+        score -= 16
+        warnings.append("没有二买/三买确认，容易变成追涨交易")
+    if distance_ma10 > 9:
+        score -= min(26, (distance_ma10 - 9) * 2.2)
+        warnings.append(f"偏离 MA10 {distance_ma10:.1f}%，追高风险上升")
+    elif 0 <= distance_ma10 <= 5:
+        score += 8
+        signals.append("成本位置: 距 MA10 不远，二日风控更可控")
+    if pct_5d > 18:
+        score -= min(24, (pct_5d - 18) * 1.2)
+        warnings.append(f"5 日累计涨幅 {pct_5d:.1f}%，短线兑现压力偏大")
+    if last_change >= 9.5:
+        score -= 14
+        warnings.append("信号日接近涨停，次日追高性价比下降")
+    if upper_shadow_pct > 3.5 and close_position < 0.68:
+        score -= 10
+        warnings.append("上影线较长，资金分歧偏大")
 
     return {
         "score": round(score, 2),
@@ -602,6 +713,15 @@ def chan_signal(kline: list[dict]) -> dict:
             "box_high": round(box_high, 3),
             "box_low": round(box_low, 3),
             "volume_ratio_5d": round(vol_ratio, 2),
+            "distance_ma5_pct": round(distance_ma5, 2),
+            "distance_ma10_pct": round(distance_ma10, 2),
+            "distance_ma20_pct": round(distance_ma20, 2),
+            "pct_3d": round(pct_3d, 2),
+            "pct_5d": round(pct_5d, 2),
+            "pct_10d": round(pct_10d, 2),
+            "close_position": round(close_position, 2),
+            "upper_shadow_pct": round(upper_shadow_pct, 2),
+            "setup_flags": setup_flags,
             "last_kline_date": last["date"],
         },
     }
@@ -619,28 +739,50 @@ def preliminary_score(hot: dict, quote: dict, dragon: dict | None) -> dict:
     turnover = quote["turnover_pct"]
     change_pct = quote["change_pct"]
     score = 0.0
-    score += min(max(change_pct, 0), 20) * 1.35
+    if 1.5 <= change_pct <= 7.5:
+        score += 14 + change_pct * 1.1
+    elif 7.5 < change_pct <= 11:
+        score += 18 - (change_pct - 7.5) * 1.4
+    elif 11 < change_pct <= 16:
+        score += 8 - (change_pct - 11) * 1.8
+    elif change_pct > 16:
+        score -= min(22, (change_pct - 16) * 2.8)
+    else:
+        score += max(change_pct, -6) * 1.2
     score += min(max(math.log10(max(amount_yi, 0.2)) * 12, 0), 24)
-    score += max(0, 12 - abs(turnover - 12) * 0.55)
-    score += min(max(quote["vol_ratio"], 0), 4) * 2.8
+    score += max(0, 14 - abs(turnover - 9) * 0.9)
+    if 0.8 <= quote["vol_ratio"] <= 2.4:
+        score += 8 - abs(quote["vol_ratio"] - 1.4) * 2
+    elif quote["vol_ratio"] > 2.4:
+        score -= min(16, (quote["vol_ratio"] - 2.4) * 5)
     score += t_score
 
     dtb_net = 0.0
     if dragon:
         dtb_net = dragon.get("net_buy_wan", 0.0)
         if dtb_net > 0:
-            score += min(math.log10(dtb_net + 1) * 7.5, 32)
+            score += min(math.log10(dtb_net + 1) * 4.8, 18)
         else:
             score -= 8
 
     risk_flags = []
     if quote["limit_up"] and abs(quote["price"] - quote["limit_up"]) < 0.02:
-        score += 5
+        risk_flags.append("信号日涨停，次日追高风险")
+        score -= 12
         if abs(quote["open"] - quote["limit_up"]) < 0.02 and abs(quote["low"] - quote["limit_up"]) < 0.02:
             risk_flags.append("一字涨停，次日可买性差")
-            score -= 10
-    if turnover > 30:
+            score -= 22
+    if change_pct >= 18.5:
+        risk_flags.append("20cm 大涨后，二日持有回撤风险高")
+        score -= 12
+    elif change_pct >= 9.5:
+        risk_flags.append("10cm 涨停后，隔日接力不确定")
+        score -= 8
+    if turnover > 24:
         risk_flags.append("换手过高，分歧剧烈")
+        score -= 14
+    elif turnover > 18:
+        risk_flags.append("换手偏高，次日易分歧")
         score -= 7
     if amount_yi < 2:
         risk_flags.append("成交额不足 2 亿")
@@ -662,22 +804,22 @@ def preliminary_score(hot: dict, quote: dict, dragon: dict | None) -> dict:
 
 
 def candidate_confidence(score: float, risk_count: int, market_risk: str) -> int:
-    confidence = 50 + (score - 65) * 0.43
-    confidence -= min(risk_count * 3, 12)
+    confidence = 48 + (score - 60) * 0.34
+    confidence -= min(risk_count * 4, 18)
     if market_risk == "medium":
-        confidence -= 3
+        confidence -= 5
     elif market_risk == "high":
-        confidence -= 8
-    return int(max(42, min(76, round(confidence))))
+        confidence -= 12
+    return int(max(38, min(72, round(confidence))))
 
 
 def estimate_range(confidence: int, technical: float, theme: float, risk_count: int) -> dict:
-    if confidence < 60:
-        low, high = -3.2, 3.0
+    if confidence < 62:
+        low, high = -4.0, 2.4
     else:
-        low = max(-2.8, -1.2 + (confidence - 60) * 0.05 - risk_count * 0.28)
-        high = 2.2 + (confidence - 60) * 0.23 + technical * 0.035 + theme * 0.08
-        high = min(high, 18.0)
+        low = max(-3.2, -1.8 + (confidence - 62) * 0.04 - risk_count * 0.32)
+        high = 1.8 + (confidence - 62) * 0.18 + technical * 0.028 + theme * 0.045
+        high = min(high, 9.0)
     return {
         "low_pct": round(low, 1),
         "high_pct": round(high, 1),
@@ -704,16 +846,31 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
 
     preliminary.sort(key=lambda item: item["pre_score"], reverse=True)
     final = []
-    max_kline_checks = int(os.environ.get("CHAN_MAX_KLINE_CHECKS", "20"))
+    max_kline_checks = int(os.environ.get("CHAN_MAX_KLINE_CHECKS", "60"))
     for item in preliminary[:max_kline_checks]:
         quote = item["quote"]
         code = quote["code"]
         kline = stock_kline(code)
         chan = chan_signal(kline)
+        metrics = chan.get("metrics") or {}
         total = item["pre_score"] + chan["score"]
         risk_flags = list(item["risk_flags"]) + chan["warnings"]
+        setup_flags = metrics.get("setup_flags") or []
+        hard_risks = 0
+        if not setup_flags:
+            hard_risks += 1
+        if metrics.get("distance_ma10_pct", 0) > 10:
+            hard_risks += 1
+        if quote["change_pct"] >= 9.5:
+            hard_risks += 1
+        if quote["turnover_pct"] > 24:
+            hard_risks += 1
+        if quote["vol_ratio"] > 3:
+            hard_risks += 1
         if quote["turnover_pct"] > 24 and quote["change_pct"] >= 19:
-            risk_flags.append("20cm 高换手，适合观察分歧承接")
+            risk_flags.append("20cm 高换手，仅适合观察分歧承接")
+        if hard_risks:
+            total -= hard_risks * 8
         confidence = candidate_confidence(total, len(risk_flags), market.get("risk", "unknown"))
         est = estimate_range(confidence, chan["score"], item["theme_score"], len(risk_flags))
         stop_loss = max(quote["limit_down"], quote["price"] * 0.965)
@@ -742,6 +899,8 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
                 "score": round(total, 2),
                 "pre_score": item["pre_score"],
                 "chan_score": chan["score"],
+                "setup_flags": setup_flags,
+                "hard_risk_count": hard_risks,
                 "confidence": confidence,
                 "estimated_2d_range": est,
                 "stop_loss": round(stop_loss, 2),
@@ -754,7 +913,13 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
             }
         )
 
-    final.sort(key=lambda item: item["score"], reverse=True)
+    final.sort(
+        key=lambda item: (
+            item.get("hard_risk_count", 0),
+            -item["confidence"],
+            -item["score"],
+        )
+    )
     return {
         "candidates": final,
         "raw_pool_size": len(hot_rows),
@@ -772,16 +937,23 @@ def make_decision(candidates: list[dict], market: dict) -> dict:
             "primary": None,
             "watchlist": [],
         }
+    candidates = sorted(candidates, key=lambda item: (item.get("hard_risk_count", 0), -item["confidence"], -item["score"]))
     primary = candidates[0]
     blockers = []
     if market.get("risk") == "high":
         blockers.append("指数环境触发高风险拦截")
-    if primary["confidence"] < 64:
-        blockers.append("预测胜率低于 64%")
-    if len(primary["risk_flags"]) >= 4:
+    if primary["confidence"] < 66:
+        blockers.append("预测胜率低于 66%")
+    if primary.get("hard_risk_count", 0) >= 2:
+        blockers.append("硬风险项过多，不适合 2 日持有")
+    if len(primary["risk_flags"]) >= 3:
         blockers.append("候选股风险标签过多")
     if primary["amount_yi"] < 2.5:
         blockers.append("成交额不足，承接不够")
+    if primary["change_pct"] >= 9.5:
+        blockers.append("信号日已接近涨停，次日追高性价比不足")
+    if primary["estimated_2d_range"]["low_pct"] <= -3.0:
+        blockers.append("预估下行空间过大")
 
     if blockers:
         return {
@@ -795,7 +967,7 @@ def make_decision(candidates: list[dict], market: dict) -> dict:
     return {
         "action": "BUY_CANDIDATE",
         "title": "今日主选",
-        "message": "满足缠论结构、题材强度、资金确认和风控阈值。",
+        "message": "满足二日持有的结构确认、回撤约束和风控阈值。",
         "primary": primary,
         "watchlist": candidates[1:9],
     }
@@ -811,7 +983,9 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         if cached.get("model_version") == MODEL_VERSION:
             return cached
 
-    hot_date, hot_rows = find_hot_pool(signal_day)
+    hot_date, event_rows = find_hot_pool(signal_day)
+    broad_rows = load_broad_market_pool()
+    hot_rows = merge_candidate_pools(event_rows, broad_rows)
     market = index_quotes()
     industries = industry_heat()
     scored = score_candidates(hot_date, hot_rows, market)
@@ -829,6 +1003,8 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "industry_heat": industries,
         "stats": {
             "hot_pool_size": scored["raw_pool_size"],
+            "event_pool_size": len(event_rows),
+            "broad_pool_size": len(broad_rows),
             "scored_size": scored["scored_size"],
             "dragon_count": scored["dragon_count"],
         },
@@ -884,9 +1060,6 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": "暂无历史决策缓存"}, 404)
                 return
             payload = json.loads(latest.read_text(encoding="utf-8"))
-            if payload.get("model_version") != MODEL_VERSION:
-                self.send_json({"error": "历史缓存模型版本已过期"}, 409)
-                return
             self.send_json(payload)
             return
         if parsed.path == "/api/status":

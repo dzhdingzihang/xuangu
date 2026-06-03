@@ -153,7 +153,7 @@ function renderPrimary(data) {
       <p class="decision-copy">${decision.message} ${data.holding_plan}</p>
       <div class="price-row">
         <div class="price-cell"><span>收盘价</span><strong>${primary.price.toFixed(2)}</strong></div>
-        <div class="price-cell"><span>5/25涨跌</span><strong class="${pctClass(primary.change_pct)}">${signed(primary.change_pct)}</strong></div>
+        <div class="price-cell"><span>信号日涨跌</span><strong class="${pctClass(primary.change_pct)}">${signed(primary.change_pct)}</strong></div>
         <div class="price-cell"><span>止损</span><strong class="green">${primary.stop_loss.toFixed(2)}</strong></div>
         <div class="price-cell"><span>参考止盈</span><strong class="red">${primary.take_profit_reference.toFixed(2)}</strong></div>
       </div>
@@ -268,7 +268,7 @@ function renderHistory(history, currentTarget) {
     button.innerHTML = `
       <span>
         <strong>${historyTitle(item)}</strong>
-        <small>${item.title || "--"} · 信号日 ${item.signal_date || "--"} · ${item.generated_at || "--"}</small>
+        <small>${item.title || "--"} · 信号日 ${item.signal_date || "--"} · ${item.model_version || "--"}</small>
       </span>
       <span class="history-meta">
         <b>${item.confidence ? `${item.confidence}%` : "--"}</b>
