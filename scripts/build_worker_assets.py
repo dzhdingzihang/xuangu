@@ -19,8 +19,11 @@ def copy_tree(source: pathlib.Path, target: pathlib.Path) -> None:
 
 
 def main() -> None:
+    if PUBLIC.exists():
+        shutil.rmtree(PUBLIC)
     PUBLIC.mkdir(exist_ok=True)
-    copy_tree(STATIC, PUBLIC)
+    shutil.copy2(STATIC / "index.html", PUBLIC / "index.html")
+    copy_tree(STATIC, PUBLIC / "static")
 
     public_picks = PUBLIC / "data" / "picks"
     public_picks.mkdir(parents=True, exist_ok=True)
