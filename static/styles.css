@@ -291,6 +291,70 @@ main {
   padding: 18px;
 }
 
+.market-tabs-panel {
+  margin: 16px 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
+.market-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.market-tab {
+  display: grid;
+  gap: 9px;
+  min-height: 138px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: var(--text);
+  padding: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.market-tab.active {
+  border-color: var(--blue);
+  background: #eef4ff;
+}
+
+.tab-head,
+.tab-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.market-tab strong {
+  font-size: 18px;
+}
+
+.market-tab b {
+  font-size: 12px;
+}
+
+.market-tab span,
+.market-tab small,
+.market-tab em {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  font-style: normal;
+}
+
+.market-tab > span:nth-child(2) {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 800;
+}
+
 .history-list {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -472,7 +536,8 @@ td strong {
   .topbar,
   .decision-grid,
   .content-grid,
-  .history-list {
+  .history-list,
+  .market-tabs {
     grid-template-columns: 1fr;
   }
 

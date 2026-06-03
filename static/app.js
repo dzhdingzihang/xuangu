@@ -17,9 +17,13 @@ const els = {
   chanRules: document.getElementById("chanRules"),
   marketBlock: document.getElementById("marketBlock"),
   industryBlock: document.getElementById("industryBlock"),
+  marketTabs: document.getElementById("marketTabs"),
 };
 
 const LOCAL_HISTORY_KEY = "chan-stock-history-v1";
+const MARKET_ORDER = ["a_share", "hk", "us"];
+let activeMarket = "a_share";
+let currentData = null;
 
 function todayText() {
   const d = new Date();
@@ -117,7 +121,7 @@ function mergeHistory(serverRows) {
 }
 
 function renderPrimary(data) {
-  const { decision } = data;
+  const { decision } = selectedMarket(data);
   const primary = decision.primary;
   els.actionBadge.className = `status ${decision.action === "BUY_CANDIDATE" ? "buy" : "no-trade"}`;
   els.actionBadge.textContent = decision.title;
@@ -166,9 +170,10 @@ function renderPrimary(data) {
 
 function renderReasons(data) {
   clearList(els.reasons);
-  const primary = data.decision.primary || data.decision.blocked_candidate;
+  const decision = selectedMarket(data).decision;
+  const primary = decision.primary || decision.blocked_candidate;
   if (!primary) {
-    els.reasons.append(li(data.decision.message));
+    els.reasons.append(li(decision.message));
     return;
   }
   primary.reasons.forEach((reason) => els.reasons.append(li(reason)));
@@ -176,7 +181,8 @@ function renderReasons(data) {
 }
 
 function renderTable(data) {
-  const rows = [data.decision.primary, ...(data.decision.watchlist || [])].filter(Boolean);
+  const decision = selectedMarket(data).decision || {};
+  const rows = [decision.primary, ...(decision.watchlist || [])].filter(Boolean);
   clearList(els.candidateRows);
   rows.forEach((row, index) => {
     const tr = document.createElement("tr");
@@ -186,11 +192,11 @@ function renderTable(data) {
     tr.innerHTML = `
       <td>${index + 1}</td>
       <td><strong>${row.name}</strong><span class="muted">${row.code}</span></td>
-      <td>${row.score.toFixed(1)}<br><span class="muted">缠 ${row.chan_score.toFixed(1)}</span></td>
+      <td>${row.score.toFixed(1)}<br><span class="muted">缠 ${row.chan_score.toFixed(1)} / S ${(row.serenity_score || (row.serenity && row.serenity.score) || 0).toFixed(1)}</span></td>
       <td>${row.confidence}%</td>
       <td>${row.estimated_2d_range.text}</td>
-      <td>${row.amount_yi.toFixed(1)} 亿<br><span class="muted">换手 ${row.turnover_pct.toFixed(1)}%</span></td>
-      <td><div class="tagline">${row.reason_tags || "无题材标签"}</div></td>
+      <td>${row.amount_yi ? `${row.amount_yi.toFixed(1)} 亿` : "见行情"}<br><span class="muted">${row.turnover_pct ? `换手 ${row.turnover_pct.toFixed(1)}%` : `量比 ${row.vol_ratio || "--"}`}</span></td>
+      <td><div class="tagline">${row.role || row.reason_tags || "无题材标签"}</div></td>
       <td><div class="risk-tags">${risks}</div></td>
     `;
     els.candidateRows.append(tr);
@@ -200,6 +206,7 @@ function renderTable(data) {
 function renderRules(data) {
   clearList(els.chanRules);
   data.chan_rules.quant_mapping.forEach((rule) => els.chanRules.append(li(rule)));
+  ((data.serenity_rules && data.serenity_rules.principles) || []).forEach((rule) => els.chanRules.append(li(`Serenity: ${rule}`)));
 }
 
 function renderMarket(data) {
@@ -233,15 +240,56 @@ function renderIndustry(data) {
 }
 
 function render(data) {
+  currentData = data;
+  if (!data.markets || !data.markets[activeMarket]) activeMarket = "a_share";
+  const section = selectedMarket(data);
   els.subtitle.textContent = `${data.target_date} 开盘计划，基于 ${data.signal_date} 收盘数据；持有窗口到 ${data.next_trade_date}`;
-  els.signalDate.textContent = `信号日 ${data.signal_date}`;
-  els.poolMetric.textContent = `${data.stats.hot_pool_size}/${data.stats.scored_size}`;
+  els.signalDate.textContent = `${section.label || "A股"} · 信号日 ${data.signal_date}`;
+  els.poolMetric.textContent = `${section.stats.raw_pool_size}/${section.stats.scored_size}`;
+  renderMarketTabs(data);
   renderPrimary(data);
   renderReasons(data);
   renderTable(data);
   renderRules(data);
   renderMarket(data);
   renderIndustry(data);
+}
+
+function selectedMarket(data) {
+  if (!data.markets) {
+    return { key: "a_share", label: "A股", decision: data.decision, stats: data.stats || {}, description: "" };
+  }
+  return data.markets[activeMarket] || data.markets.a_share;
+}
+
+function renderMarketTabs(data) {
+  clearList(els.marketTabs);
+  const markets = data.markets || { a_share: selectedMarket(data) };
+  MARKET_ORDER.filter((key) => markets[key]).forEach((key) => {
+    const section = markets[key];
+    const decision = section.decision || {};
+    const primary = decision.primary || decision.blocked_candidate;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `market-tab ${key === activeMarket ? "active" : ""}`;
+    button.innerHTML = `
+      <span class="tab-head">
+        <strong>${section.label}</strong>
+        <b class="${decision.action === "BUY_CANDIDATE" ? "red" : "muted"}">${decision.title || "--"}</b>
+      </span>
+      <span>${primary ? `${primary.name} ${primary.code}` : "空仓优先"}</span>
+      <small>${section.description || ""}</small>
+      <span class="tab-foot">
+        <em>胜率 ${primary ? `${primary.confidence}%` : "--"}</em>
+        <em>${primary && primary.estimated_2d_range ? primary.estimated_2d_range.text : "--"}</em>
+      </span>
+    `;
+    button.addEventListener("click", () => {
+      activeMarket = key;
+      render(data);
+    });
+    els.marketTabs.append(button);
+  });
 }
 
 function historyTitle(item) {

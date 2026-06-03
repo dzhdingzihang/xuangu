@@ -3,7 +3,7 @@ const JSON_HEADERS = {
   "cache-control": "no-store",
 };
 
-const MODEL_VERSION = "chan-selector-2026-06-03.2";
+const MODEL_VERSION = "chan-selector-2026-06-03.3";
 
 function json(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
