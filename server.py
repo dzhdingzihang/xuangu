@@ -33,7 +33,7 @@ CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "chan-selector-2026-06-03.3"
+MODEL_VERSION = "chan-selector-2026-06-03.4"
 
 for path in (CACHE, PICKS):
     path.mkdir(parents=True, exist_ok=True)
@@ -140,6 +140,36 @@ SERENITY_UNIVERSES = {
 }
 
 SERENITY_A_BY_CODE = {item["symbol"]: item for item in SERENITY_UNIVERSES["a_share"]}
+
+SERENITY_MARKET_POLICY = {
+    "a_share": {
+        "lens_weight": 1.25,
+        "chan_weight": 0.75,
+        "hard_penalty": 8,
+        "threshold": 62,
+        "ma10_limit": 12.0,
+        "pct5_limit": 20.0,
+        "change_limit": 10.5,
+    },
+    "hk": {
+        "lens_weight": 1.0,
+        "chan_weight": 0.86,
+        "hard_penalty": 9,
+        "threshold": 64,
+        "ma10_limit": 10.0,
+        "pct5_limit": 16.0,
+        "change_limit": 8.5,
+    },
+    "us": {
+        "lens_weight": 1.0,
+        "chan_weight": 0.86,
+        "hard_penalty": 9,
+        "threshold": 66,
+        "ma10_limit": 10.0,
+        "pct5_limit": 22.0,
+        "change_limit": 14.0,
+    },
+}
 
 
 def now_cn() -> dt.datetime:
@@ -1057,6 +1087,7 @@ def quote_from_kline(kline: list[dict]) -> dict:
 
 
 def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
+    policy = SERENITY_MARKET_POLICY.get(market_key, SERENITY_MARKET_POLICY["hk"])
     final = []
     for candidate in candidates:
         symbol = candidate["symbol"]
@@ -1073,25 +1104,25 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         metrics = chan.get("metrics") or {}
         lens_score, lens_reasons, lens_risks = serenity_lens_score(candidate)
         setup_flags = metrics.get("setup_flags") or []
-        total = lens_score + chan["score"] * 0.86
+        total = lens_score * policy["lens_weight"] + chan["score"] * policy["chan_weight"]
         risk_flags = list(lens_risks) + chan["warnings"]
         hard_risks = 0
         if not setup_flags:
             hard_risks += 1
-        if metrics.get("distance_ma10_pct", 0) > 11:
+        if metrics.get("distance_ma10_pct", 0) > policy["ma10_limit"]:
             hard_risks += 1
             risk_flags.append("偏离 MA10 过大，不适合追涨")
-        if quote["pct_5d"] > (22 if market_key == "us" else 16):
+        if quote["pct_5d"] > policy["pct5_limit"]:
             hard_risks += 1
             risk_flags.append(f"5日涨幅 {quote['pct_5d']:.1f}%，短线兑现压力高")
-        if quote["change_pct"] > (14 if market_key == "us" else 8.5):
+        if quote["change_pct"] > policy["change_limit"]:
             hard_risks += 1
             risk_flags.append("信号日涨幅过大，隔日追高风险")
         if quote["vol_ratio"] > 3:
             risk_flags.append("放量过猛，容易出现分歧")
             total -= 5
         if hard_risks:
-            total -= hard_risks * 8
+            total -= hard_risks * policy["hard_penalty"]
         confidence = serenity_confidence(total, len(risk_flags), market_key)
         est = serenity_estimate_range(confidence, total, len(risk_flags), market_key)
         stop_loss = quote["price"] * (0.955 if market_key == "us" else 0.965)
@@ -1136,6 +1167,7 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                     "role": candidate.get("role", ""),
                     "principles": lens_reasons,
                     "risks": lens_risks,
+                    "policy": policy,
                 },
             }
         )
@@ -1155,7 +1187,7 @@ def make_serenity_decision(candidates: list[dict], market_key: str) -> dict:
         }
     primary = candidates[0]
     blockers = []
-    threshold = 65 if market_key == "a_share" else 64
+    threshold = SERENITY_MARKET_POLICY.get(market_key, SERENITY_MARKET_POLICY["hk"])["threshold"]
     if primary["confidence"] < threshold:
         blockers.append(f"Serenity+技术综合胜率低于 {threshold}%")
     if primary.get("hard_risk_count", 0) >= 2:

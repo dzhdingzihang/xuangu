@@ -362,6 +362,7 @@ async function loadLatestSnapshot() {
     els.actionBadge.textContent = `${localPick.decision.title} · 本地历史`;
     return localPick;
   }
+  if (data.target_date) els.dateInput.value = data.target_date;
   render(data);
   storeLocalPick(data);
   renderLocalHistory();
@@ -396,9 +397,11 @@ els.refreshBtn.addEventListener("click", () => load(false).catch(alert));
 els.forceBtn.addEventListener("click", () => load(true).catch(alert));
 loadHistory()
   .then(async (payload) => {
-    const today = els.dateInput.value;
-    const cachedToday = (payload.history || []).some((item) => item.target_date === today);
-    if (cachedToday) {
+    const latestTarget = payload.latest && payload.latest.target_date;
+    if (latestTarget) els.dateInput.value = latestTarget;
+    const requested = els.dateInput.value;
+    const cachedRequested = (payload.history || []).some((item) => item.target_date === requested);
+    if (cachedRequested) {
       return load(false, { showBusy: false });
     }
     if (payload.latest) {
