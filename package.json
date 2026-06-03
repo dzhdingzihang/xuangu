@@ -1,0 +1,15 @@
+{
+  "name": "chan-stock-selector-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "python3 scripts/build_worker_assets.py",
+    "dev": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "check": "npm run build && wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "^4.19.1"
+  }
+}

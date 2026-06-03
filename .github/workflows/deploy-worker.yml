@@ -1,0 +1,48 @@
+name: Deploy Cloudflare Worker
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "20 0 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate daily pick snapshot
+        run: python server.py --once --force
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build Worker assets
+        run: npm run build
+
+      - name: Commit generated snapshot
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update daily pick snapshot"
+          file_pattern: data/picks/*.json
+
+      - name: Deploy Worker
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
