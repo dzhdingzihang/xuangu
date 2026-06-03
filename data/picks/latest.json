@@ -1,6 +1,6 @@
 {
   "model_version": "chan-selector-2026-06-03.3",
-  "generated_at": "2026-06-03T23:43:32+08:00",
+  "generated_at": "2026-06-03T23:45:59+08:00",
   "target_date": "2026-06-04",
   "next_trade_date": "2026-06-05",
   "signal_date": "2026-06-03",
@@ -8,55 +8,76 @@
   "decision": {
     "action": "NO_TRADE",
     "title": "今日不交易",
-    "message": "预测胜率低于 66%；硬风险项过多，不适合 2 日持有；候选股风险标签过多；信号日已接近涨停，次日追高性价比不足；预估下行空间过大",
+    "message": "预测胜率低于 66%",
     "primary": null,
     "blocked_candidate": {
-      "code": "002156",
-      "name": "通富微电",
-      "price": 70.22,
-      "change_pct": 9.99,
-      "amount_yi": 122.84,
-      "turnover_pct": 11.63,
-      "vol_ratio": 0.89,
-      "float_mcap_yi": 1065.66,
-      "reason_tags": "CPO封装+AMD产业链+存储芯片封测",
-      "theme_tags": [
-        "存储芯片",
-        "CPO"
-      ],
-      "score": 48.13,
-      "pre_score": 64.13,
-      "chan_score": 0,
+      "code": "000519",
+      "name": "中兵红箭",
+      "price": 20.22,
+      "change_pct": 4.07,
+      "amount_yi": 23.58,
+      "turnover_pct": 8.44,
+      "vol_ratio": 1.25,
+      "float_mcap_yi": 281.58,
+      "reason_tags": "全市场稳健候选",
+      "theme_tags": [],
+      "score": 101.9,
+      "pre_score": 56.14,
+      "chan_score": 45.76,
       "serenity_score": 0.0,
-      "setup_flags": [],
-      "hard_risk_count": 2,
-      "confidence": 38,
+      "setup_flags": [
+        "second_buy"
+      ],
+      "hard_risk_count": 0,
+      "confidence": 62,
       "estimated_2d_range": {
-        "low_pct": -4.0,
-        "high_pct": 2.4,
-        "text": "-4.0% ~ +2.4%"
+        "low_pct": -1.8,
+        "high_pct": 3.1,
+        "text": "-1.8% ~ +3.1%"
       },
-      "stop_loss": 67.76,
-      "take_profit_reference": 71.91,
-      "dragon_net_wan": 162241.5,
-      "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
+      "stop_loss": 19.51,
+      "take_profit_reference": 20.85,
+      "dragon_net_wan": 0.0,
+      "dragon_reason": "",
       "reasons": [
-        "题材命中: 存储芯片、CPO",
-        "龙虎榜净买入约 162242 万",
-        "流动性: 成交 122.8 亿，换手 11.6%"
+        "女上位: MA5 在 MA10 之上",
+        "多头排列: 收盘价站上 MA5/10/20",
+        "持股线: 未有效跌破 MA10",
+        "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+        "流动性: 成交 23.6 亿，换手 8.4%"
       ],
-      "risk_flags": [
-        "信号日涨停，次日追高风险",
-        "10cm 涨停后，隔日接力不确定",
-        "K线样本不足，缠论结构信号降权"
-      ],
+      "risk_flags": [],
       "chan": {
-        "score": 0,
-        "signals": [],
-        "warnings": [
-          "K线样本不足，缠论结构信号降权"
+        "score": 45.76,
+        "signals": [
+          "女上位: MA5 在 MA10 之上",
+          "多头排列: 收盘价站上 MA5/10/20",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "量能确认: 较 5 日均量 1.3 倍"
         ],
-        "metrics": {}
+        "warnings": [],
+        "metrics": {
+          "ma5": 19.624,
+          "ma10": 18.845,
+          "ma20": 18.35,
+          "ma30": 18.133,
+          "box_high": 18.99,
+          "box_low": 16.8,
+          "volume_ratio_5d": 1.25,
+          "distance_ma5_pct": 3.04,
+          "distance_ma10_pct": 7.3,
+          "distance_ma20_pct": 10.19,
+          "pct_3d": 2.8,
+          "pct_5d": 11.34,
+          "pct_10d": 15.68,
+          "close_position": 0.79,
+          "upper_shadow_pct": 1.53,
+          "setup_flags": [
+            "second_buy"
+          ],
+          "last_kline_date": "2026-06-03"
+        }
       },
       "serenity": {
         "score": 0.0,
@@ -67,52 +88,561 @@
     },
     "watchlist": [
       {
-        "code": "002156",
-        "name": "通富微电",
-        "price": 70.22,
-        "change_pct": 9.99,
-        "amount_yi": 122.84,
-        "turnover_pct": 11.63,
-        "vol_ratio": 0.89,
-        "float_mcap_yi": 1065.66,
-        "reason_tags": "CPO封装+AMD产业链+存储芯片封测",
-        "theme_tags": [
-          "存储芯片",
-          "CPO"
-        ],
-        "score": 48.13,
-        "pre_score": 64.13,
-        "chan_score": 0,
+        "code": "000519",
+        "name": "中兵红箭",
+        "price": 20.22,
+        "change_pct": 4.07,
+        "amount_yi": 23.58,
+        "turnover_pct": 8.44,
+        "vol_ratio": 1.25,
+        "float_mcap_yi": 281.58,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 101.9,
+        "pre_score": 56.14,
+        "chan_score": 45.76,
         "serenity_score": 0.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 38,
+        "setup_flags": [
+          "second_buy"
+        ],
+        "hard_risk_count": 0,
+        "confidence": 62,
+        "estimated_2d_range": {
+          "low_pct": -1.8,
+          "high_pct": 3.1,
+          "text": "-1.8% ~ +3.1%"
+        },
+        "stop_loss": 19.51,
+        "take_profit_reference": 20.85,
+        "dragon_net_wan": 0.0,
+        "dragon_reason": "",
+        "reasons": [
+          "女上位: MA5 在 MA10 之上",
+          "多头排列: 收盘价站上 MA5/10/20",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "流动性: 成交 23.6 亿，换手 8.4%"
+        ],
+        "risk_flags": [],
+        "chan": {
+          "score": 45.76,
+          "signals": [
+            "女上位: MA5 在 MA10 之上",
+            "多头排列: 收盘价站上 MA5/10/20",
+            "持股线: 未有效跌破 MA10",
+            "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+            "量能确认: 较 5 日均量 1.3 倍"
+          ],
+          "warnings": [],
+          "metrics": {
+            "ma5": 19.624,
+            "ma10": 18.845,
+            "ma20": 18.35,
+            "ma30": 18.133,
+            "box_high": 18.99,
+            "box_low": 16.8,
+            "volume_ratio_5d": 1.25,
+            "distance_ma5_pct": 3.04,
+            "distance_ma10_pct": 7.3,
+            "distance_ma20_pct": 10.19,
+            "pct_3d": 2.8,
+            "pct_5d": 11.34,
+            "pct_10d": 15.68,
+            "close_position": 0.79,
+            "upper_shadow_pct": 1.53,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "last_kline_date": "2026-06-03"
+          }
+        },
+        "serenity": {
+          "score": 0.0,
+          "role": "",
+          "principles": [],
+          "risks": []
+        }
+      },
+      {
+        "code": "300679",
+        "name": "电连技术",
+        "price": 60.0,
+        "change_pct": 3.08,
+        "amount_yi": 21.68,
+        "turnover_pct": 10.03,
+        "vol_ratio": 1.32,
+        "float_mcap_yi": 254.89,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 102.29,
+        "pre_score": 54.33,
+        "chan_score": 47.96,
+        "serenity_score": 0.0,
+        "setup_flags": [
+          "second_buy"
+        ],
+        "hard_risk_count": 0,
+        "confidence": 58,
         "estimated_2d_range": {
           "low_pct": -4.0,
           "high_pct": 2.4,
           "text": "-4.0% ~ +2.4%"
         },
-        "stop_loss": 67.76,
-        "take_profit_reference": 71.91,
-        "dragon_net_wan": 162241.5,
-        "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
+        "stop_loss": 57.9,
+        "take_profit_reference": 61.44,
+        "dragon_net_wan": 0.0,
+        "dragon_reason": "",
         "reasons": [
-          "题材命中: 存储芯片、CPO",
-          "龙虎榜净买入约 162242 万",
-          "流动性: 成交 122.8 亿，换手 11.6%"
+          "女上位: MA5 在 MA10 之上",
+          "多头排列: 收盘价站上 MA5/10/20",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "流动性: 成交 21.7 亿，换手 10.0%"
         ],
         "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "K线样本不足，缠论结构信号降权"
+          "只接近或突破 20 日高点，未出现明确回踩确认"
         ],
         "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
+          "score": 47.96,
+          "signals": [
+            "女上位: MA5 在 MA10 之上",
+            "多头排列: 收盘价站上 MA5/10/20",
+            "持股线: 未有效跌破 MA10",
+            "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+            "量能确认: 较 5 日均量 1.3 倍"
           ],
-          "metrics": {}
+          "warnings": [
+            "只接近或突破 20 日高点，未出现明确回踩确认"
+          ],
+          "metrics": {
+            "ma5": 57.19,
+            "ma10": 55.048,
+            "ma20": 54.153,
+            "ma30": 50.783,
+            "box_high": 57.51,
+            "box_low": 42.76,
+            "volume_ratio_5d": 1.32,
+            "distance_ma5_pct": 4.91,
+            "distance_ma10_pct": 9.0,
+            "distance_ma20_pct": 10.8,
+            "pct_3d": 7.2,
+            "pct_5d": 14.05,
+            "pct_10d": 10.38,
+            "close_position": 0.47,
+            "upper_shadow_pct": 3.17,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "last_kline_date": "2026-06-03"
+          }
+        },
+        "serenity": {
+          "score": 0.0,
+          "role": "",
+          "principles": [],
+          "risks": []
+        }
+      },
+      {
+        "code": "002456",
+        "name": "欧菲光",
+        "price": 9.82,
+        "change_pct": 3.15,
+        "amount_yi": 22.4,
+        "turnover_pct": 6.9,
+        "vol_ratio": 1.22,
+        "float_mcap_yi": 329.78,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 101.09,
+        "pre_score": 53.42,
+        "chan_score": 47.67,
+        "serenity_score": 0.0,
+        "setup_flags": [
+          "second_buy"
+        ],
+        "hard_risk_count": 0,
+        "confidence": 58,
+        "estimated_2d_range": {
+          "low_pct": -4.0,
+          "high_pct": 2.4,
+          "text": "-4.0% ~ +2.4%"
+        },
+        "stop_loss": 9.48,
+        "take_profit_reference": 10.06,
+        "dragon_net_wan": 0.0,
+        "dragon_reason": "",
+        "reasons": [
+          "女上位: MA5 在 MA10 之上",
+          "多头排列: 收盘价站上 MA5/10/20",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "流动性: 成交 22.4 亿，换手 6.9%"
+        ],
+        "risk_flags": [
+          "只接近或突破 20 日高点，未出现明确回踩确认"
+        ],
+        "chan": {
+          "score": 47.67,
+          "signals": [
+            "女上位: MA5 在 MA10 之上",
+            "多头排列: 收盘价站上 MA5/10/20",
+            "持股线: 未有效跌破 MA10",
+            "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+            "量能确认: 较 5 日均量 1.2 倍"
+          ],
+          "warnings": [
+            "只接近或突破 20 日高点，未出现明确回踩确认"
+          ],
+          "metrics": {
+            "ma5": 9.484,
+            "ma10": 9.283,
+            "ma20": 9.085,
+            "ma30": 9.069,
+            "box_high": 9.49,
+            "box_low": 8.36,
+            "volume_ratio_5d": 1.22,
+            "distance_ma5_pct": 3.54,
+            "distance_ma10_pct": 5.78,
+            "distance_ma20_pct": 8.08,
+            "pct_3d": 9.6,
+            "pct_5d": 4.8,
+            "pct_10d": 13.92,
+            "close_position": 0.71,
+            "upper_shadow_pct": 1.53,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "last_kline_date": "2026-06-03"
+          }
+        },
+        "serenity": {
+          "score": 0.0,
+          "role": "",
+          "principles": [],
+          "risks": []
+        }
+      },
+      {
+        "code": "688308",
+        "name": "欧科亿",
+        "price": 148.0,
+        "change_pct": 6.8,
+        "amount_yi": 20.09,
+        "turnover_pct": 8.6,
+        "vol_ratio": 0.95,
+        "float_mcap_yi": 235.0,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 89.86,
+        "pre_score": 57.86,
+        "chan_score": 32.0,
+        "serenity_score": 0.0,
+        "setup_flags": [
+          "second_buy"
+        ],
+        "hard_risk_count": 0,
+        "confidence": 54,
+        "estimated_2d_range": {
+          "low_pct": -4.0,
+          "high_pct": 2.4,
+          "text": "-4.0% ~ +2.4%"
+        },
+        "stop_loss": 142.82,
+        "take_profit_reference": 151.55,
+        "dragon_net_wan": 0.0,
+        "dragon_reason": "",
+        "reasons": [
+          "女上位: MA5 在 MA10 之上",
+          "多头排列: 收盘价站上 MA5/10/20",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "流动性: 成交 20.1 亿，换手 8.6%"
+        ],
+        "risk_flags": [
+          "上影线较长，资金分歧偏大"
+        ],
+        "chan": {
+          "score": 32.0,
+          "signals": [
+            "女上位: MA5 在 MA10 之上",
+            "多头排列: 收盘价站上 MA5/10/20",
+            "持股线: 未有效跌破 MA10",
+            "二买近似: 多头后回踩 MA5/MA10 并重新收回"
+          ],
+          "warnings": [
+            "上影线较长，资金分歧偏大"
+          ],
+          "metrics": {
+            "ma5": 145.278,
+            "ma10": 138.96,
+            "ma20": 123.338,
+            "ma30": 113.651,
+            "box_high": 150.48,
+            "box_low": 85.25,
+            "volume_ratio_5d": 0.95,
+            "distance_ma5_pct": 1.87,
+            "distance_ma10_pct": 6.51,
+            "distance_ma20_pct": 20.0,
+            "pct_3d": 0.58,
+            "pct_5d": 1.93,
+            "pct_10d": 33.57,
+            "close_position": 0.59,
+            "upper_shadow_pct": 6.19,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "last_kline_date": "2026-06-03"
+          }
+        },
+        "serenity": {
+          "score": 0.0,
+          "role": "",
+          "principles": [],
+          "risks": []
+        }
+      },
+      {
+        "code": "002171",
+        "name": "楚江新材",
+        "price": 12.88,
+        "change_pct": 7.6,
+        "amount_yi": 23.01,
+        "turnover_pct": 11.01,
+        "vol_ratio": 2.5,
+        "float_mcap_yi": 209.03,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 89.23,
+        "pre_score": 45.89,
+        "chan_score": 43.34,
+        "serenity_score": 0.0,
+        "setup_flags": [
+          "second_buy"
+        ],
+        "hard_risk_count": 0,
+        "confidence": 50,
+        "estimated_2d_range": {
+          "low_pct": -4.0,
+          "high_pct": 2.4,
+          "text": "-4.0% ~ +2.4%"
+        },
+        "stop_loss": 12.43,
+        "take_profit_reference": 13.19,
+        "dragon_net_wan": 0.0,
+        "dragon_reason": "",
+        "reasons": [
+          "女上位: MA5 在 MA10 之上",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "量能确认: 较 5 日均量 2.5 倍",
+          "流动性: 成交 23.0 亿，换手 11.0%"
+        ],
+        "risk_flags": [
+          "只接近或突破 20 日高点，未出现明确回踩确认",
+          "偏离 MA10 9.1%，追高风险上升"
+        ],
+        "chan": {
+          "score": 43.34,
+          "signals": [
+            "女上位: MA5 在 MA10 之上",
+            "持股线: 未有效跌破 MA10",
+            "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+            "量能确认: 较 5 日均量 2.5 倍"
+          ],
+          "warnings": [
+            "只接近或突破 20 日高点，未出现明确回踩确认",
+            "偏离 MA10 9.1%，追高风险上升"
+          ],
+          "metrics": {
+            "ma5": 12.154,
+            "ma10": 11.809,
+            "ma20": 11.819,
+            "ma30": 11.761,
+            "box_high": 12.7,
+            "box_low": 10.76,
+            "volume_ratio_5d": 2.5,
+            "distance_ma5_pct": 5.97,
+            "distance_ma10_pct": 9.07,
+            "distance_ma20_pct": 8.97,
+            "pct_3d": 8.05,
+            "pct_5d": 10.27,
+            "pct_10d": 14.29,
+            "close_position": 0.72,
+            "upper_shadow_pct": 2.25,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "last_kline_date": "2026-06-03"
+          }
+        },
+        "serenity": {
+          "score": 0.0,
+          "role": "",
+          "principles": [],
+          "risks": []
+        }
+      },
+      {
+        "code": "600459",
+        "name": "贵研铂业",
+        "price": 24.2,
+        "change_pct": 3.2,
+        "amount_yi": 23.57,
+        "turnover_pct": 12.77,
+        "vol_ratio": 2.08,
+        "float_mcap_yi": 199.23,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 85.56,
+        "pre_score": 51.23,
+        "chan_score": 42.33,
+        "serenity_score": 0.0,
+        "setup_flags": [
+          "second_buy"
+        ],
+        "hard_risk_count": 1,
+        "confidence": 45,
+        "estimated_2d_range": {
+          "low_pct": -4.0,
+          "high_pct": 2.4,
+          "text": "-4.0% ~ +2.4%"
+        },
+        "stop_loss": 23.35,
+        "take_profit_reference": 24.78,
+        "dragon_net_wan": 0.0,
+        "dragon_reason": "",
+        "reasons": [
+          "女上位: MA5 在 MA10 之上",
+          "多头排列: 收盘价站上 MA5/10/20",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "流动性: 成交 23.6 亿，换手 12.8%"
+        ],
+        "risk_flags": [
+          "只接近或突破 20 日高点，未出现明确回踩确认",
+          "偏离 MA10 12.4%，追高风险上升",
+          "5 日累计涨幅 18.3%，短线兑现压力偏大"
+        ],
+        "chan": {
+          "score": 42.33,
+          "signals": [
+            "女上位: MA5 在 MA10 之上",
+            "多头排列: 收盘价站上 MA5/10/20",
+            "持股线: 未有效跌破 MA10",
+            "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+            "量能确认: 较 5 日均量 2.1 倍"
+          ],
+          "warnings": [
+            "只接近或突破 20 日高点，未出现明确回踩确认",
+            "偏离 MA10 12.4%，追高风险上升",
+            "5 日累计涨幅 18.3%，短线兑现压力偏大"
+          ],
+          "metrics": {
+            "ma5": 22.592,
+            "ma10": 21.527,
+            "ma20": 21.107,
+            "ma30": 21.105,
+            "box_high": 22.11,
+            "box_low": 18.79,
+            "volume_ratio_5d": 2.08,
+            "distance_ma5_pct": 7.12,
+            "distance_ma10_pct": 12.42,
+            "distance_ma20_pct": 14.66,
+            "pct_3d": 12.61,
+            "pct_5d": 18.34,
+            "pct_10d": 22.53,
+            "close_position": 0.47,
+            "upper_shadow_pct": 3.39,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "last_kline_date": "2026-06-03"
+          }
+        },
+        "serenity": {
+          "score": 0.0,
+          "role": "",
+          "principles": [],
+          "risks": []
+        }
+      },
+      {
+        "code": "000582",
+        "name": "北部湾港",
+        "price": 14.91,
+        "change_pct": 6.12,
+        "amount_yi": 22.5,
+        "turnover_pct": 7.07,
+        "vol_ratio": 1.74,
+        "float_mcap_yi": 375.3,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 81.53,
+        "pre_score": 56.54,
+        "chan_score": 32.99,
+        "serenity_score": 0.0,
+        "setup_flags": [
+          "second_buy"
+        ],
+        "hard_risk_count": 1,
+        "confidence": 43,
+        "estimated_2d_range": {
+          "low_pct": -4.0,
+          "high_pct": 2.4,
+          "text": "-4.0% ~ +2.4%"
+        },
+        "stop_loss": 14.39,
+        "take_profit_reference": 15.27,
+        "dragon_net_wan": 0.0,
+        "dragon_reason": "",
+        "reasons": [
+          "女上位: MA5 在 MA10 之上",
+          "多头排列: 收盘价站上 MA5/10/20",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "流动性: 成交 22.5 亿，换手 7.1%"
+        ],
+        "risk_flags": [
+          "只接近或突破 20 日高点，未出现明确回踩确认",
+          "偏离 MA10 11.8%，追高风险上升",
+          "上影线较长，资金分歧偏大"
+        ],
+        "chan": {
+          "score": 32.99,
+          "signals": [
+            "女上位: MA5 在 MA10 之上",
+            "多头排列: 收盘价站上 MA5/10/20",
+            "持股线: 未有效跌破 MA10",
+            "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+            "量能确认: 较 5 日均量 1.7 倍"
+          ],
+          "warnings": [
+            "只接近或突破 20 日高点，未出现明确回踩确认",
+            "偏离 MA10 11.8%，追高风险上升",
+            "上影线较长，资金分歧偏大"
+          ],
+          "metrics": {
+            "ma5": 13.822,
+            "ma10": 13.332,
+            "ma20": 12.921,
+            "ma30": 12.309,
+            "box_high": 14.18,
+            "box_low": 10.73,
+            "volume_ratio_5d": 1.74,
+            "distance_ma5_pct": 7.87,
+            "distance_ma10_pct": 11.84,
+            "distance_ma20_pct": 15.39,
+            "pct_3d": 9.87,
+            "pct_5d": 10.86,
+            "pct_10d": 19.57,
+            "close_position": 0.63,
+            "upper_shadow_pct": 3.69,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "last_kline_date": "2026-06-03"
+          }
         },
         "serenity": {
           "score": 0.0,
@@ -135,13 +665,15 @@
           "机器人",
           "商业航天"
         ],
-        "score": 38.76,
+        "score": 71.05,
         "pre_score": 54.76,
-        "chan_score": 0,
+        "chan_score": 24.29,
         "serenity_score": 0.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 38,
+        "setup_flags": [
+          "second_buy"
+        ],
+        "hard_risk_count": 1,
+        "confidence": 40,
         "estimated_2d_range": {
           "low_pct": -4.0,
           "high_pct": 2.4,
@@ -154,105 +686,42 @@
         "reasons": [
           "题材命中: 机器人、商业航天",
           "龙虎榜净买入约 37778 万",
+          "女上位: MA5 在 MA10 之上",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "量能确认: 较 5 日均量 1.4 倍",
           "流动性: 成交 16.2 亿，换手 5.5%"
         ],
         "risk_flags": [
           "信号日涨停，次日追高风险",
           "10cm 涨停后，隔日接力不确定",
-          "K线样本不足，缠论结构信号降权"
-        ],
-        "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
-          ],
-          "metrics": {}
-        },
-        "serenity": {
-          "score": 0.0,
-          "role": "",
-          "principles": [],
-          "risks": []
-        }
-      },
-      {
-        "code": "001896",
-        "name": "豫能控股",
-        "price": 20.08,
-        "change_pct": 10.03,
-        "amount_yi": 31.92,
-        "turnover_pct": 10.78,
-        "vol_ratio": 0.74,
-        "float_mcap_yi": 306.38,
-        "reason_tags": "参股算力+火电+河南国资",
-        "theme_tags": [
-          "算力"
-        ],
-        "score": 37.91,
-        "pre_score": 47.41,
-        "chan_score": 6.5,
-        "serenity_score": 0.0,
-        "setup_flags": [
-          "second_buy"
-        ],
-        "hard_risk_count": 2,
-        "confidence": 38,
-        "estimated_2d_range": {
-          "low_pct": -4.0,
-          "high_pct": 2.4,
-          "text": "-4.0% ~ +2.4%"
-        },
-        "stop_loss": 19.38,
-        "take_profit_reference": 20.56,
-        "dragon_net_wan": 69434.0,
-        "dragon_reason": "连续三个交易日内，涨幅偏离值累计达到20%的证券",
-        "reasons": [
-          "题材命中: 算力",
-          "龙虎榜净买入约 69434 万",
-          "女上位: MA5 在 MA10 之上",
-          "多头排列: 收盘价站上 MA5/10/20",
-          "持股线: 未有效跌破 MA10",
-          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
-          "流动性: 成交 31.9 亿，换手 10.8%"
-        ],
-        "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "只接近或突破 20 日高点，未出现明确回踩确认",
-          "偏离 MA10 18.6%，追高风险上升",
-          "5 日累计涨幅 27.6%，短线兑现压力偏大",
           "信号日接近涨停，次日追高性价比下降"
         ],
         "chan": {
-          "score": 6.5,
+          "score": 24.29,
           "signals": [
             "女上位: MA5 在 MA10 之上",
-            "多头排列: 收盘价站上 MA5/10/20",
             "持股线: 未有效跌破 MA10",
             "二买近似: 多头后回踩 MA5/MA10 并重新收回",
-            "MACD背驰改善: 低点附近绿柱力度收敛"
+            "量能确认: 较 5 日均量 1.4 倍"
           ],
           "warnings": [
-            "只接近或突破 20 日高点，未出现明确回踩确认",
-            "偏离 MA10 18.6%，追高风险上升",
-            "5 日累计涨幅 27.6%，短线兑现压力偏大",
             "信号日接近涨停，次日追高性价比下降"
           ],
           "metrics": {
-            "ma5": 17.608,
-            "ma10": 16.938,
-            "ma20": 16.595,
-            "ma30": 16.69,
-            "box_high": 19.4,
-            "box_low": 14.38,
-            "volume_ratio_5d": 0.74,
-            "distance_ma5_pct": 14.04,
-            "distance_ma10_pct": 18.55,
-            "distance_ma20_pct": 21.0,
-            "pct_3d": 22.66,
-            "pct_5d": 27.57,
-            "pct_10d": 34.95,
+            "ma5": 53.528,
+            "ma10": 53.522,
+            "ma20": 54.547,
+            "ma30": 53.929,
+            "box_high": 61.06,
+            "box_low": 49.2,
+            "volume_ratio_5d": 1.43,
+            "distance_ma5_pct": 6.45,
+            "distance_ma10_pct": 6.46,
+            "distance_ma20_pct": 4.46,
+            "pct_3d": 7.51,
+            "pct_5d": 10.4,
+            "pct_10d": 11.57,
             "close_position": 1.0,
             "upper_shadow_pct": 0.0,
             "setup_flags": [
@@ -260,271 +729,6 @@
             ],
             "last_kline_date": "2026-06-03"
           }
-        },
-        "serenity": {
-          "score": 0.0,
-          "role": "",
-          "principles": [],
-          "risks": []
-        }
-      },
-      {
-        "code": "000700",
-        "name": "模塑科技",
-        "price": 16.58,
-        "change_pct": 10.02,
-        "amount_yi": 23.89,
-        "turnover_pct": 16.13,
-        "vol_ratio": 1.75,
-        "float_mcap_yi": 152.21,
-        "reason_tags": "金融资产出售+人形机器人+保险杠龙头",
-        "theme_tags": [
-          "机器人",
-          "人形机器人"
-        ],
-        "score": 36.89,
-        "pre_score": 52.89,
-        "chan_score": 0,
-        "serenity_score": 0.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 38,
-        "estimated_2d_range": {
-          "low_pct": -4.0,
-          "high_pct": 2.4,
-          "text": "-4.0% ~ +2.4%"
-        },
-        "stop_loss": 16.0,
-        "take_profit_reference": 16.98,
-        "dragon_net_wan": 18402.5,
-        "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
-        "reasons": [
-          "题材命中: 机器人、人形机器人",
-          "龙虎榜净买入约 18402 万",
-          "流动性: 成交 23.9 亿，换手 16.1%"
-        ],
-        "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "K线样本不足，缠论结构信号降权"
-        ],
-        "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
-          ],
-          "metrics": {}
-        },
-        "serenity": {
-          "score": 0.0,
-          "role": "",
-          "principles": [],
-          "risks": []
-        }
-      },
-      {
-        "code": "600936",
-        "name": "北投科技",
-        "price": 6.51,
-        "change_pct": 9.97,
-        "amount_yi": 12.52,
-        "turnover_pct": 11.82,
-        "vol_ratio": 1.6,
-        "float_mcap_yi": 108.78,
-        "reason_tags": "AI应用+机器人概念+智慧交通+广西国资",
-        "theme_tags": [
-          "机器人"
-        ],
-        "score": 33.27,
-        "pre_score": 49.27,
-        "chan_score": 0,
-        "serenity_score": 0.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 38,
-        "estimated_2d_range": {
-          "low_pct": -4.0,
-          "high_pct": 2.4,
-          "text": "-4.0% ~ +2.4%"
-        },
-        "stop_loss": 6.28,
-        "take_profit_reference": 6.67,
-        "dragon_net_wan": 7791.9,
-        "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
-        "reasons": [
-          "题材命中: 机器人",
-          "龙虎榜净买入约 7792 万",
-          "流动性: 成交 12.5 亿，换手 11.8%"
-        ],
-        "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "K线样本不足，缠论结构信号降权"
-        ],
-        "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
-          ],
-          "metrics": {}
-        },
-        "serenity": {
-          "score": 0.0,
-          "role": "",
-          "principles": [],
-          "risks": []
-        }
-      },
-      {
-        "code": "002167",
-        "name": "东方锆业",
-        "price": 14.73,
-        "change_pct": 10.01,
-        "amount_yi": 11.27,
-        "turnover_pct": 10.38,
-        "vol_ratio": 1.35,
-        "float_mcap_yi": 114.11,
-        "reason_tags": "定增通过+固态电池+锆产品",
-        "theme_tags": [],
-        "score": 29.77,
-        "pre_score": 45.77,
-        "chan_score": 0,
-        "serenity_score": 0.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 38,
-        "estimated_2d_range": {
-          "low_pct": -4.0,
-          "high_pct": 2.4,
-          "text": "-4.0% ~ +2.4%"
-        },
-        "stop_loss": 14.21,
-        "take_profit_reference": 15.08,
-        "dragon_net_wan": 18824.1,
-        "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
-        "reasons": [
-          "龙虎榜净买入约 18824 万",
-          "流动性: 成交 11.3 亿，换手 10.4%"
-        ],
-        "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "K线样本不足，缠论结构信号降权"
-        ],
-        "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
-          ],
-          "metrics": {}
-        },
-        "serenity": {
-          "score": 0.0,
-          "role": "",
-          "principles": [],
-          "risks": []
-        }
-      },
-      {
-        "code": "603311",
-        "name": "金海高科",
-        "price": 37.51,
-        "change_pct": 10.0,
-        "amount_yi": 7.59,
-        "turnover_pct": 8.97,
-        "vol_ratio": 1.3,
-        "float_mcap_yi": 88.48,
-        "reason_tags": "控制权变更+新能源车过滤+空气过滤+大飞机",
-        "theme_tags": [],
-        "score": 27.57,
-        "pre_score": 43.57,
-        "chan_score": 0,
-        "serenity_score": 0.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 38,
-        "estimated_2d_range": {
-          "low_pct": -4.0,
-          "high_pct": 2.4,
-          "text": "-4.0% ~ +2.4%"
-        },
-        "stop_loss": 36.2,
-        "take_profit_reference": 38.41,
-        "dragon_net_wan": 3066.1,
-        "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
-        "reasons": [
-          "龙虎榜净买入约 3066 万",
-          "流动性: 成交 7.6 亿，换手 9.0%"
-        ],
-        "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "K线样本不足，缠论结构信号降权"
-        ],
-        "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
-          ],
-          "metrics": {}
-        },
-        "serenity": {
-          "score": 0.0,
-          "role": "",
-          "principles": [],
-          "risks": []
-        }
-      },
-      {
-        "code": "601208",
-        "name": "东材科技",
-        "price": 56.49,
-        "change_pct": 10.01,
-        "amount_yi": 79.08,
-        "turnover_pct": 14.05,
-        "vol_ratio": 1.63,
-        "float_mcap_yi": 570.65,
-        "reason_tags": "高速树脂+AI算力+项目投产+一季报增长",
-        "theme_tags": [
-          "AI算力",
-          "算力"
-        ],
-        "score": 27.26,
-        "pre_score": 43.26,
-        "chan_score": 0,
-        "serenity_score": 0.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 38,
-        "estimated_2d_range": {
-          "low_pct": -4.0,
-          "high_pct": 2.4,
-          "text": "-4.0% ~ +2.4%"
-        },
-        "stop_loss": 54.51,
-        "take_profit_reference": 57.85,
-        "dragon_net_wan": 0.0,
-        "dragon_reason": "",
-        "reasons": [
-          "题材命中: AI算力、算力",
-          "流动性: 成交 79.1 亿，换手 14.1%"
-        ],
-        "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "K线样本不足，缠论结构信号降权"
-        ],
-        "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
-          ],
-          "metrics": {}
         },
         "serenity": {
           "score": 0.0,
@@ -543,55 +747,76 @@
       "decision": {
         "action": "NO_TRADE",
         "title": "今日不交易",
-        "message": "预测胜率低于 66%；硬风险项过多，不适合 2 日持有；候选股风险标签过多；信号日已接近涨停，次日追高性价比不足；预估下行空间过大",
+        "message": "预测胜率低于 66%",
         "primary": null,
         "blocked_candidate": {
-          "code": "002156",
-          "name": "通富微电",
-          "price": 70.22,
-          "change_pct": 9.99,
-          "amount_yi": 122.84,
-          "turnover_pct": 11.63,
-          "vol_ratio": 0.89,
-          "float_mcap_yi": 1065.66,
-          "reason_tags": "CPO封装+AMD产业链+存储芯片封测",
-          "theme_tags": [
-            "存储芯片",
-            "CPO"
-          ],
-          "score": 48.13,
-          "pre_score": 64.13,
-          "chan_score": 0,
+          "code": "000519",
+          "name": "中兵红箭",
+          "price": 20.22,
+          "change_pct": 4.07,
+          "amount_yi": 23.58,
+          "turnover_pct": 8.44,
+          "vol_ratio": 1.25,
+          "float_mcap_yi": 281.58,
+          "reason_tags": "全市场稳健候选",
+          "theme_tags": [],
+          "score": 101.9,
+          "pre_score": 56.14,
+          "chan_score": 45.76,
           "serenity_score": 0.0,
-          "setup_flags": [],
-          "hard_risk_count": 2,
-          "confidence": 38,
+          "setup_flags": [
+            "second_buy"
+          ],
+          "hard_risk_count": 0,
+          "confidence": 62,
           "estimated_2d_range": {
-            "low_pct": -4.0,
-            "high_pct": 2.4,
-            "text": "-4.0% ~ +2.4%"
+            "low_pct": -1.8,
+            "high_pct": 3.1,
+            "text": "-1.8% ~ +3.1%"
           },
-          "stop_loss": 67.76,
-          "take_profit_reference": 71.91,
-          "dragon_net_wan": 162241.5,
-          "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
+          "stop_loss": 19.51,
+          "take_profit_reference": 20.85,
+          "dragon_net_wan": 0.0,
+          "dragon_reason": "",
           "reasons": [
-            "题材命中: 存储芯片、CPO",
-            "龙虎榜净买入约 162242 万",
-            "流动性: 成交 122.8 亿，换手 11.6%"
+            "女上位: MA5 在 MA10 之上",
+            "多头排列: 收盘价站上 MA5/10/20",
+            "持股线: 未有效跌破 MA10",
+            "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+            "流动性: 成交 23.6 亿，换手 8.4%"
           ],
-          "risk_flags": [
-            "信号日涨停，次日追高风险",
-            "10cm 涨停后，隔日接力不确定",
-            "K线样本不足，缠论结构信号降权"
-          ],
+          "risk_flags": [],
           "chan": {
-            "score": 0,
-            "signals": [],
-            "warnings": [
-              "K线样本不足，缠论结构信号降权"
+            "score": 45.76,
+            "signals": [
+              "女上位: MA5 在 MA10 之上",
+              "多头排列: 收盘价站上 MA5/10/20",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "量能确认: 较 5 日均量 1.3 倍"
             ],
-            "metrics": {}
+            "warnings": [],
+            "metrics": {
+              "ma5": 19.624,
+              "ma10": 18.845,
+              "ma20": 18.35,
+              "ma30": 18.133,
+              "box_high": 18.99,
+              "box_low": 16.8,
+              "volume_ratio_5d": 1.25,
+              "distance_ma5_pct": 3.04,
+              "distance_ma10_pct": 7.3,
+              "distance_ma20_pct": 10.19,
+              "pct_3d": 2.8,
+              "pct_5d": 11.34,
+              "pct_10d": 15.68,
+              "close_position": 0.79,
+              "upper_shadow_pct": 1.53,
+              "setup_flags": [
+                "second_buy"
+              ],
+              "last_kline_date": "2026-06-03"
+            }
           },
           "serenity": {
             "score": 0.0,
@@ -602,52 +827,561 @@
         },
         "watchlist": [
           {
-            "code": "002156",
-            "name": "通富微电",
-            "price": 70.22,
-            "change_pct": 9.99,
-            "amount_yi": 122.84,
-            "turnover_pct": 11.63,
-            "vol_ratio": 0.89,
-            "float_mcap_yi": 1065.66,
-            "reason_tags": "CPO封装+AMD产业链+存储芯片封测",
-            "theme_tags": [
-              "存储芯片",
-              "CPO"
-            ],
-            "score": 48.13,
-            "pre_score": 64.13,
-            "chan_score": 0,
+            "code": "000519",
+            "name": "中兵红箭",
+            "price": 20.22,
+            "change_pct": 4.07,
+            "amount_yi": 23.58,
+            "turnover_pct": 8.44,
+            "vol_ratio": 1.25,
+            "float_mcap_yi": 281.58,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 101.9,
+            "pre_score": 56.14,
+            "chan_score": 45.76,
             "serenity_score": 0.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 38,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "hard_risk_count": 0,
+            "confidence": 62,
+            "estimated_2d_range": {
+              "low_pct": -1.8,
+              "high_pct": 3.1,
+              "text": "-1.8% ~ +3.1%"
+            },
+            "stop_loss": 19.51,
+            "take_profit_reference": 20.85,
+            "dragon_net_wan": 0.0,
+            "dragon_reason": "",
+            "reasons": [
+              "女上位: MA5 在 MA10 之上",
+              "多头排列: 收盘价站上 MA5/10/20",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "流动性: 成交 23.6 亿，换手 8.4%"
+            ],
+            "risk_flags": [],
+            "chan": {
+              "score": 45.76,
+              "signals": [
+                "女上位: MA5 在 MA10 之上",
+                "多头排列: 收盘价站上 MA5/10/20",
+                "持股线: 未有效跌破 MA10",
+                "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+                "量能确认: 较 5 日均量 1.3 倍"
+              ],
+              "warnings": [],
+              "metrics": {
+                "ma5": 19.624,
+                "ma10": 18.845,
+                "ma20": 18.35,
+                "ma30": 18.133,
+                "box_high": 18.99,
+                "box_low": 16.8,
+                "volume_ratio_5d": 1.25,
+                "distance_ma5_pct": 3.04,
+                "distance_ma10_pct": 7.3,
+                "distance_ma20_pct": 10.19,
+                "pct_3d": 2.8,
+                "pct_5d": 11.34,
+                "pct_10d": 15.68,
+                "close_position": 0.79,
+                "upper_shadow_pct": 1.53,
+                "setup_flags": [
+                  "second_buy"
+                ],
+                "last_kline_date": "2026-06-03"
+              }
+            },
+            "serenity": {
+              "score": 0.0,
+              "role": "",
+              "principles": [],
+              "risks": []
+            }
+          },
+          {
+            "code": "300679",
+            "name": "电连技术",
+            "price": 60.0,
+            "change_pct": 3.08,
+            "amount_yi": 21.68,
+            "turnover_pct": 10.03,
+            "vol_ratio": 1.32,
+            "float_mcap_yi": 254.89,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 102.29,
+            "pre_score": 54.33,
+            "chan_score": 47.96,
+            "serenity_score": 0.0,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "hard_risk_count": 0,
+            "confidence": 58,
             "estimated_2d_range": {
               "low_pct": -4.0,
               "high_pct": 2.4,
               "text": "-4.0% ~ +2.4%"
             },
-            "stop_loss": 67.76,
-            "take_profit_reference": 71.91,
-            "dragon_net_wan": 162241.5,
-            "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
+            "stop_loss": 57.9,
+            "take_profit_reference": 61.44,
+            "dragon_net_wan": 0.0,
+            "dragon_reason": "",
             "reasons": [
-              "题材命中: 存储芯片、CPO",
-              "龙虎榜净买入约 162242 万",
-              "流动性: 成交 122.8 亿，换手 11.6%"
+              "女上位: MA5 在 MA10 之上",
+              "多头排列: 收盘价站上 MA5/10/20",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "流动性: 成交 21.7 亿，换手 10.0%"
             ],
             "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "K线样本不足，缠论结构信号降权"
+              "只接近或突破 20 日高点，未出现明确回踩确认"
             ],
             "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
+              "score": 47.96,
+              "signals": [
+                "女上位: MA5 在 MA10 之上",
+                "多头排列: 收盘价站上 MA5/10/20",
+                "持股线: 未有效跌破 MA10",
+                "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+                "量能确认: 较 5 日均量 1.3 倍"
               ],
-              "metrics": {}
+              "warnings": [
+                "只接近或突破 20 日高点，未出现明确回踩确认"
+              ],
+              "metrics": {
+                "ma5": 57.19,
+                "ma10": 55.048,
+                "ma20": 54.153,
+                "ma30": 50.783,
+                "box_high": 57.51,
+                "box_low": 42.76,
+                "volume_ratio_5d": 1.32,
+                "distance_ma5_pct": 4.91,
+                "distance_ma10_pct": 9.0,
+                "distance_ma20_pct": 10.8,
+                "pct_3d": 7.2,
+                "pct_5d": 14.05,
+                "pct_10d": 10.38,
+                "close_position": 0.47,
+                "upper_shadow_pct": 3.17,
+                "setup_flags": [
+                  "second_buy"
+                ],
+                "last_kline_date": "2026-06-03"
+              }
+            },
+            "serenity": {
+              "score": 0.0,
+              "role": "",
+              "principles": [],
+              "risks": []
+            }
+          },
+          {
+            "code": "002456",
+            "name": "欧菲光",
+            "price": 9.82,
+            "change_pct": 3.15,
+            "amount_yi": 22.4,
+            "turnover_pct": 6.9,
+            "vol_ratio": 1.22,
+            "float_mcap_yi": 329.78,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 101.09,
+            "pre_score": 53.42,
+            "chan_score": 47.67,
+            "serenity_score": 0.0,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "hard_risk_count": 0,
+            "confidence": 58,
+            "estimated_2d_range": {
+              "low_pct": -4.0,
+              "high_pct": 2.4,
+              "text": "-4.0% ~ +2.4%"
+            },
+            "stop_loss": 9.48,
+            "take_profit_reference": 10.06,
+            "dragon_net_wan": 0.0,
+            "dragon_reason": "",
+            "reasons": [
+              "女上位: MA5 在 MA10 之上",
+              "多头排列: 收盘价站上 MA5/10/20",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "流动性: 成交 22.4 亿，换手 6.9%"
+            ],
+            "risk_flags": [
+              "只接近或突破 20 日高点，未出现明确回踩确认"
+            ],
+            "chan": {
+              "score": 47.67,
+              "signals": [
+                "女上位: MA5 在 MA10 之上",
+                "多头排列: 收盘价站上 MA5/10/20",
+                "持股线: 未有效跌破 MA10",
+                "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+                "量能确认: 较 5 日均量 1.2 倍"
+              ],
+              "warnings": [
+                "只接近或突破 20 日高点，未出现明确回踩确认"
+              ],
+              "metrics": {
+                "ma5": 9.484,
+                "ma10": 9.283,
+                "ma20": 9.085,
+                "ma30": 9.069,
+                "box_high": 9.49,
+                "box_low": 8.36,
+                "volume_ratio_5d": 1.22,
+                "distance_ma5_pct": 3.54,
+                "distance_ma10_pct": 5.78,
+                "distance_ma20_pct": 8.08,
+                "pct_3d": 9.6,
+                "pct_5d": 4.8,
+                "pct_10d": 13.92,
+                "close_position": 0.71,
+                "upper_shadow_pct": 1.53,
+                "setup_flags": [
+                  "second_buy"
+                ],
+                "last_kline_date": "2026-06-03"
+              }
+            },
+            "serenity": {
+              "score": 0.0,
+              "role": "",
+              "principles": [],
+              "risks": []
+            }
+          },
+          {
+            "code": "688308",
+            "name": "欧科亿",
+            "price": 148.0,
+            "change_pct": 6.8,
+            "amount_yi": 20.09,
+            "turnover_pct": 8.6,
+            "vol_ratio": 0.95,
+            "float_mcap_yi": 235.0,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 89.86,
+            "pre_score": 57.86,
+            "chan_score": 32.0,
+            "serenity_score": 0.0,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "hard_risk_count": 0,
+            "confidence": 54,
+            "estimated_2d_range": {
+              "low_pct": -4.0,
+              "high_pct": 2.4,
+              "text": "-4.0% ~ +2.4%"
+            },
+            "stop_loss": 142.82,
+            "take_profit_reference": 151.55,
+            "dragon_net_wan": 0.0,
+            "dragon_reason": "",
+            "reasons": [
+              "女上位: MA5 在 MA10 之上",
+              "多头排列: 收盘价站上 MA5/10/20",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "流动性: 成交 20.1 亿，换手 8.6%"
+            ],
+            "risk_flags": [
+              "上影线较长，资金分歧偏大"
+            ],
+            "chan": {
+              "score": 32.0,
+              "signals": [
+                "女上位: MA5 在 MA10 之上",
+                "多头排列: 收盘价站上 MA5/10/20",
+                "持股线: 未有效跌破 MA10",
+                "二买近似: 多头后回踩 MA5/MA10 并重新收回"
+              ],
+              "warnings": [
+                "上影线较长，资金分歧偏大"
+              ],
+              "metrics": {
+                "ma5": 145.278,
+                "ma10": 138.96,
+                "ma20": 123.338,
+                "ma30": 113.651,
+                "box_high": 150.48,
+                "box_low": 85.25,
+                "volume_ratio_5d": 0.95,
+                "distance_ma5_pct": 1.87,
+                "distance_ma10_pct": 6.51,
+                "distance_ma20_pct": 20.0,
+                "pct_3d": 0.58,
+                "pct_5d": 1.93,
+                "pct_10d": 33.57,
+                "close_position": 0.59,
+                "upper_shadow_pct": 6.19,
+                "setup_flags": [
+                  "second_buy"
+                ],
+                "last_kline_date": "2026-06-03"
+              }
+            },
+            "serenity": {
+              "score": 0.0,
+              "role": "",
+              "principles": [],
+              "risks": []
+            }
+          },
+          {
+            "code": "002171",
+            "name": "楚江新材",
+            "price": 12.88,
+            "change_pct": 7.6,
+            "amount_yi": 23.01,
+            "turnover_pct": 11.01,
+            "vol_ratio": 2.5,
+            "float_mcap_yi": 209.03,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 89.23,
+            "pre_score": 45.89,
+            "chan_score": 43.34,
+            "serenity_score": 0.0,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "hard_risk_count": 0,
+            "confidence": 50,
+            "estimated_2d_range": {
+              "low_pct": -4.0,
+              "high_pct": 2.4,
+              "text": "-4.0% ~ +2.4%"
+            },
+            "stop_loss": 12.43,
+            "take_profit_reference": 13.19,
+            "dragon_net_wan": 0.0,
+            "dragon_reason": "",
+            "reasons": [
+              "女上位: MA5 在 MA10 之上",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "量能确认: 较 5 日均量 2.5 倍",
+              "流动性: 成交 23.0 亿，换手 11.0%"
+            ],
+            "risk_flags": [
+              "只接近或突破 20 日高点，未出现明确回踩确认",
+              "偏离 MA10 9.1%，追高风险上升"
+            ],
+            "chan": {
+              "score": 43.34,
+              "signals": [
+                "女上位: MA5 在 MA10 之上",
+                "持股线: 未有效跌破 MA10",
+                "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+                "量能确认: 较 5 日均量 2.5 倍"
+              ],
+              "warnings": [
+                "只接近或突破 20 日高点，未出现明确回踩确认",
+                "偏离 MA10 9.1%，追高风险上升"
+              ],
+              "metrics": {
+                "ma5": 12.154,
+                "ma10": 11.809,
+                "ma20": 11.819,
+                "ma30": 11.761,
+                "box_high": 12.7,
+                "box_low": 10.76,
+                "volume_ratio_5d": 2.5,
+                "distance_ma5_pct": 5.97,
+                "distance_ma10_pct": 9.07,
+                "distance_ma20_pct": 8.97,
+                "pct_3d": 8.05,
+                "pct_5d": 10.27,
+                "pct_10d": 14.29,
+                "close_position": 0.72,
+                "upper_shadow_pct": 2.25,
+                "setup_flags": [
+                  "second_buy"
+                ],
+                "last_kline_date": "2026-06-03"
+              }
+            },
+            "serenity": {
+              "score": 0.0,
+              "role": "",
+              "principles": [],
+              "risks": []
+            }
+          },
+          {
+            "code": "600459",
+            "name": "贵研铂业",
+            "price": 24.2,
+            "change_pct": 3.2,
+            "amount_yi": 23.57,
+            "turnover_pct": 12.77,
+            "vol_ratio": 2.08,
+            "float_mcap_yi": 199.23,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 85.56,
+            "pre_score": 51.23,
+            "chan_score": 42.33,
+            "serenity_score": 0.0,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "hard_risk_count": 1,
+            "confidence": 45,
+            "estimated_2d_range": {
+              "low_pct": -4.0,
+              "high_pct": 2.4,
+              "text": "-4.0% ~ +2.4%"
+            },
+            "stop_loss": 23.35,
+            "take_profit_reference": 24.78,
+            "dragon_net_wan": 0.0,
+            "dragon_reason": "",
+            "reasons": [
+              "女上位: MA5 在 MA10 之上",
+              "多头排列: 收盘价站上 MA5/10/20",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "流动性: 成交 23.6 亿，换手 12.8%"
+            ],
+            "risk_flags": [
+              "只接近或突破 20 日高点，未出现明确回踩确认",
+              "偏离 MA10 12.4%，追高风险上升",
+              "5 日累计涨幅 18.3%，短线兑现压力偏大"
+            ],
+            "chan": {
+              "score": 42.33,
+              "signals": [
+                "女上位: MA5 在 MA10 之上",
+                "多头排列: 收盘价站上 MA5/10/20",
+                "持股线: 未有效跌破 MA10",
+                "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+                "量能确认: 较 5 日均量 2.1 倍"
+              ],
+              "warnings": [
+                "只接近或突破 20 日高点，未出现明确回踩确认",
+                "偏离 MA10 12.4%，追高风险上升",
+                "5 日累计涨幅 18.3%，短线兑现压力偏大"
+              ],
+              "metrics": {
+                "ma5": 22.592,
+                "ma10": 21.527,
+                "ma20": 21.107,
+                "ma30": 21.105,
+                "box_high": 22.11,
+                "box_low": 18.79,
+                "volume_ratio_5d": 2.08,
+                "distance_ma5_pct": 7.12,
+                "distance_ma10_pct": 12.42,
+                "distance_ma20_pct": 14.66,
+                "pct_3d": 12.61,
+                "pct_5d": 18.34,
+                "pct_10d": 22.53,
+                "close_position": 0.47,
+                "upper_shadow_pct": 3.39,
+                "setup_flags": [
+                  "second_buy"
+                ],
+                "last_kline_date": "2026-06-03"
+              }
+            },
+            "serenity": {
+              "score": 0.0,
+              "role": "",
+              "principles": [],
+              "risks": []
+            }
+          },
+          {
+            "code": "000582",
+            "name": "北部湾港",
+            "price": 14.91,
+            "change_pct": 6.12,
+            "amount_yi": 22.5,
+            "turnover_pct": 7.07,
+            "vol_ratio": 1.74,
+            "float_mcap_yi": 375.3,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 81.53,
+            "pre_score": 56.54,
+            "chan_score": 32.99,
+            "serenity_score": 0.0,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "hard_risk_count": 1,
+            "confidence": 43,
+            "estimated_2d_range": {
+              "low_pct": -4.0,
+              "high_pct": 2.4,
+              "text": "-4.0% ~ +2.4%"
+            },
+            "stop_loss": 14.39,
+            "take_profit_reference": 15.27,
+            "dragon_net_wan": 0.0,
+            "dragon_reason": "",
+            "reasons": [
+              "女上位: MA5 在 MA10 之上",
+              "多头排列: 收盘价站上 MA5/10/20",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "流动性: 成交 22.5 亿，换手 7.1%"
+            ],
+            "risk_flags": [
+              "只接近或突破 20 日高点，未出现明确回踩确认",
+              "偏离 MA10 11.8%，追高风险上升",
+              "上影线较长，资金分歧偏大"
+            ],
+            "chan": {
+              "score": 32.99,
+              "signals": [
+                "女上位: MA5 在 MA10 之上",
+                "多头排列: 收盘价站上 MA5/10/20",
+                "持股线: 未有效跌破 MA10",
+                "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+                "量能确认: 较 5 日均量 1.7 倍"
+              ],
+              "warnings": [
+                "只接近或突破 20 日高点，未出现明确回踩确认",
+                "偏离 MA10 11.8%，追高风险上升",
+                "上影线较长，资金分歧偏大"
+              ],
+              "metrics": {
+                "ma5": 13.822,
+                "ma10": 13.332,
+                "ma20": 12.921,
+                "ma30": 12.309,
+                "box_high": 14.18,
+                "box_low": 10.73,
+                "volume_ratio_5d": 1.74,
+                "distance_ma5_pct": 7.87,
+                "distance_ma10_pct": 11.84,
+                "distance_ma20_pct": 15.39,
+                "pct_3d": 9.87,
+                "pct_5d": 10.86,
+                "pct_10d": 19.57,
+                "close_position": 0.63,
+                "upper_shadow_pct": 3.69,
+                "setup_flags": [
+                  "second_buy"
+                ],
+                "last_kline_date": "2026-06-03"
+              }
             },
             "serenity": {
               "score": 0.0,
@@ -670,13 +1404,15 @@
               "机器人",
               "商业航天"
             ],
-            "score": 38.76,
+            "score": 71.05,
             "pre_score": 54.76,
-            "chan_score": 0,
+            "chan_score": 24.29,
             "serenity_score": 0.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 38,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "hard_risk_count": 1,
+            "confidence": 40,
             "estimated_2d_range": {
               "low_pct": -4.0,
               "high_pct": 2.4,
@@ -689,105 +1425,42 @@
             "reasons": [
               "题材命中: 机器人、商业航天",
               "龙虎榜净买入约 37778 万",
+              "女上位: MA5 在 MA10 之上",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "量能确认: 较 5 日均量 1.4 倍",
               "流动性: 成交 16.2 亿，换手 5.5%"
             ],
             "risk_flags": [
               "信号日涨停，次日追高风险",
               "10cm 涨停后，隔日接力不确定",
-              "K线样本不足，缠论结构信号降权"
-            ],
-            "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
-              ],
-              "metrics": {}
-            },
-            "serenity": {
-              "score": 0.0,
-              "role": "",
-              "principles": [],
-              "risks": []
-            }
-          },
-          {
-            "code": "001896",
-            "name": "豫能控股",
-            "price": 20.08,
-            "change_pct": 10.03,
-            "amount_yi": 31.92,
-            "turnover_pct": 10.78,
-            "vol_ratio": 0.74,
-            "float_mcap_yi": 306.38,
-            "reason_tags": "参股算力+火电+河南国资",
-            "theme_tags": [
-              "算力"
-            ],
-            "score": 37.91,
-            "pre_score": 47.41,
-            "chan_score": 6.5,
-            "serenity_score": 0.0,
-            "setup_flags": [
-              "second_buy"
-            ],
-            "hard_risk_count": 2,
-            "confidence": 38,
-            "estimated_2d_range": {
-              "low_pct": -4.0,
-              "high_pct": 2.4,
-              "text": "-4.0% ~ +2.4%"
-            },
-            "stop_loss": 19.38,
-            "take_profit_reference": 20.56,
-            "dragon_net_wan": 69434.0,
-            "dragon_reason": "连续三个交易日内，涨幅偏离值累计达到20%的证券",
-            "reasons": [
-              "题材命中: 算力",
-              "龙虎榜净买入约 69434 万",
-              "女上位: MA5 在 MA10 之上",
-              "多头排列: 收盘价站上 MA5/10/20",
-              "持股线: 未有效跌破 MA10",
-              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
-              "流动性: 成交 31.9 亿，换手 10.8%"
-            ],
-            "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "只接近或突破 20 日高点，未出现明确回踩确认",
-              "偏离 MA10 18.6%，追高风险上升",
-              "5 日累计涨幅 27.6%，短线兑现压力偏大",
               "信号日接近涨停，次日追高性价比下降"
             ],
             "chan": {
-              "score": 6.5,
+              "score": 24.29,
               "signals": [
                 "女上位: MA5 在 MA10 之上",
-                "多头排列: 收盘价站上 MA5/10/20",
                 "持股线: 未有效跌破 MA10",
                 "二买近似: 多头后回踩 MA5/MA10 并重新收回",
-                "MACD背驰改善: 低点附近绿柱力度收敛"
+                "量能确认: 较 5 日均量 1.4 倍"
               ],
               "warnings": [
-                "只接近或突破 20 日高点，未出现明确回踩确认",
-                "偏离 MA10 18.6%，追高风险上升",
-                "5 日累计涨幅 27.6%，短线兑现压力偏大",
                 "信号日接近涨停，次日追高性价比下降"
               ],
               "metrics": {
-                "ma5": 17.608,
-                "ma10": 16.938,
-                "ma20": 16.595,
-                "ma30": 16.69,
-                "box_high": 19.4,
-                "box_low": 14.38,
-                "volume_ratio_5d": 0.74,
-                "distance_ma5_pct": 14.04,
-                "distance_ma10_pct": 18.55,
-                "distance_ma20_pct": 21.0,
-                "pct_3d": 22.66,
-                "pct_5d": 27.57,
-                "pct_10d": 34.95,
+                "ma5": 53.528,
+                "ma10": 53.522,
+                "ma20": 54.547,
+                "ma30": 53.929,
+                "box_high": 61.06,
+                "box_low": 49.2,
+                "volume_ratio_5d": 1.43,
+                "distance_ma5_pct": 6.45,
+                "distance_ma10_pct": 6.46,
+                "distance_ma20_pct": 4.46,
+                "pct_3d": 7.51,
+                "pct_5d": 10.4,
+                "pct_10d": 11.57,
                 "close_position": 1.0,
                 "upper_shadow_pct": 0.0,
                 "setup_flags": [
@@ -802,278 +1475,13 @@
               "principles": [],
               "risks": []
             }
-          },
-          {
-            "code": "000700",
-            "name": "模塑科技",
-            "price": 16.58,
-            "change_pct": 10.02,
-            "amount_yi": 23.89,
-            "turnover_pct": 16.13,
-            "vol_ratio": 1.75,
-            "float_mcap_yi": 152.21,
-            "reason_tags": "金融资产出售+人形机器人+保险杠龙头",
-            "theme_tags": [
-              "机器人",
-              "人形机器人"
-            ],
-            "score": 36.89,
-            "pre_score": 52.89,
-            "chan_score": 0,
-            "serenity_score": 0.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 38,
-            "estimated_2d_range": {
-              "low_pct": -4.0,
-              "high_pct": 2.4,
-              "text": "-4.0% ~ +2.4%"
-            },
-            "stop_loss": 16.0,
-            "take_profit_reference": 16.98,
-            "dragon_net_wan": 18402.5,
-            "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
-            "reasons": [
-              "题材命中: 机器人、人形机器人",
-              "龙虎榜净买入约 18402 万",
-              "流动性: 成交 23.9 亿，换手 16.1%"
-            ],
-            "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "K线样本不足，缠论结构信号降权"
-            ],
-            "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
-              ],
-              "metrics": {}
-            },
-            "serenity": {
-              "score": 0.0,
-              "role": "",
-              "principles": [],
-              "risks": []
-            }
-          },
-          {
-            "code": "600936",
-            "name": "北投科技",
-            "price": 6.51,
-            "change_pct": 9.97,
-            "amount_yi": 12.52,
-            "turnover_pct": 11.82,
-            "vol_ratio": 1.6,
-            "float_mcap_yi": 108.78,
-            "reason_tags": "AI应用+机器人概念+智慧交通+广西国资",
-            "theme_tags": [
-              "机器人"
-            ],
-            "score": 33.27,
-            "pre_score": 49.27,
-            "chan_score": 0,
-            "serenity_score": 0.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 38,
-            "estimated_2d_range": {
-              "low_pct": -4.0,
-              "high_pct": 2.4,
-              "text": "-4.0% ~ +2.4%"
-            },
-            "stop_loss": 6.28,
-            "take_profit_reference": 6.67,
-            "dragon_net_wan": 7791.9,
-            "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
-            "reasons": [
-              "题材命中: 机器人",
-              "龙虎榜净买入约 7792 万",
-              "流动性: 成交 12.5 亿，换手 11.8%"
-            ],
-            "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "K线样本不足，缠论结构信号降权"
-            ],
-            "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
-              ],
-              "metrics": {}
-            },
-            "serenity": {
-              "score": 0.0,
-              "role": "",
-              "principles": [],
-              "risks": []
-            }
-          },
-          {
-            "code": "002167",
-            "name": "东方锆业",
-            "price": 14.73,
-            "change_pct": 10.01,
-            "amount_yi": 11.27,
-            "turnover_pct": 10.38,
-            "vol_ratio": 1.35,
-            "float_mcap_yi": 114.11,
-            "reason_tags": "定增通过+固态电池+锆产品",
-            "theme_tags": [],
-            "score": 29.77,
-            "pre_score": 45.77,
-            "chan_score": 0,
-            "serenity_score": 0.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 38,
-            "estimated_2d_range": {
-              "low_pct": -4.0,
-              "high_pct": 2.4,
-              "text": "-4.0% ~ +2.4%"
-            },
-            "stop_loss": 14.21,
-            "take_profit_reference": 15.08,
-            "dragon_net_wan": 18824.1,
-            "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
-            "reasons": [
-              "龙虎榜净买入约 18824 万",
-              "流动性: 成交 11.3 亿，换手 10.4%"
-            ],
-            "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "K线样本不足，缠论结构信号降权"
-            ],
-            "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
-              ],
-              "metrics": {}
-            },
-            "serenity": {
-              "score": 0.0,
-              "role": "",
-              "principles": [],
-              "risks": []
-            }
-          },
-          {
-            "code": "603311",
-            "name": "金海高科",
-            "price": 37.51,
-            "change_pct": 10.0,
-            "amount_yi": 7.59,
-            "turnover_pct": 8.97,
-            "vol_ratio": 1.3,
-            "float_mcap_yi": 88.48,
-            "reason_tags": "控制权变更+新能源车过滤+空气过滤+大飞机",
-            "theme_tags": [],
-            "score": 27.57,
-            "pre_score": 43.57,
-            "chan_score": 0,
-            "serenity_score": 0.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 38,
-            "estimated_2d_range": {
-              "low_pct": -4.0,
-              "high_pct": 2.4,
-              "text": "-4.0% ~ +2.4%"
-            },
-            "stop_loss": 36.2,
-            "take_profit_reference": 38.41,
-            "dragon_net_wan": 3066.1,
-            "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
-            "reasons": [
-              "龙虎榜净买入约 3066 万",
-              "流动性: 成交 7.6 亿，换手 9.0%"
-            ],
-            "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "K线样本不足，缠论结构信号降权"
-            ],
-            "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
-              ],
-              "metrics": {}
-            },
-            "serenity": {
-              "score": 0.0,
-              "role": "",
-              "principles": [],
-              "risks": []
-            }
-          },
-          {
-            "code": "601208",
-            "name": "东材科技",
-            "price": 56.49,
-            "change_pct": 10.01,
-            "amount_yi": 79.08,
-            "turnover_pct": 14.05,
-            "vol_ratio": 1.63,
-            "float_mcap_yi": 570.65,
-            "reason_tags": "高速树脂+AI算力+项目投产+一季报增长",
-            "theme_tags": [
-              "AI算力",
-              "算力"
-            ],
-            "score": 27.26,
-            "pre_score": 43.26,
-            "chan_score": 0,
-            "serenity_score": 0.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 38,
-            "estimated_2d_range": {
-              "low_pct": -4.0,
-              "high_pct": 2.4,
-              "text": "-4.0% ~ +2.4%"
-            },
-            "stop_loss": 54.51,
-            "take_profit_reference": 57.85,
-            "dragon_net_wan": 0.0,
-            "dragon_reason": "",
-            "reasons": [
-              "题材命中: AI算力、算力",
-              "流动性: 成交 79.1 亿，换手 14.1%"
-            ],
-            "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "K线样本不足，缠论结构信号降权"
-            ],
-            "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
-              ],
-              "metrics": {}
-            },
-            "serenity": {
-              "score": 0.0,
-              "role": "",
-              "principles": [],
-              "risks": []
-            }
           }
         ]
       },
       "stats": {
-        "raw_pool_size": 81,
+        "raw_pool_size": 105,
         "event_pool_size": 81,
-        "broad_pool_size": 0,
+        "broad_pool_size": 24,
         "scored_size": 60,
         "dragon_count": 85
       }
@@ -1855,8 +2263,8 @@
           "name": "Sandisk",
           "market_key": "us",
           "role": "NAND/存储周期",
-          "price": 1785.87,
-          "change_pct": 4.05,
+          "price": 1779.99,
+          "change_pct": 3.71,
           "amount_yi": 0,
           "turnover_pct": 0,
           "vol_ratio": 0.6,
@@ -1866,9 +2274,9 @@
             "NAND",
             "memory"
           ],
-          "score": 90.79,
+          "score": 91.4,
           "pre_score": 57.1,
-          "chan_score": 39.17,
+          "chan_score": 39.88,
           "setup_flags": [
             "second_buy"
           ],
@@ -1879,8 +2287,8 @@
             "high_pct": 2.6,
             "text": "-5.5% ~ +2.6%"
           },
-          "stop_loss": 1705.506,
-          "take_profit_reference": 1832.303,
+          "stop_loss": 1699.89,
+          "take_profit_reference": 1826.27,
           "dragon_net_wan": 0,
           "dragon_reason": "",
           "reasons": [
@@ -1889,13 +2297,13 @@
             "多头排列: 收盘价站上 MA5/10/20",
             "持股线: 未有效跌破 MA10",
             "二买近似: 多头后回踩 MA5/MA10 并重新收回",
-            "价格结构: 信号日 +4.05%，5日 +12.32%"
+            "价格结构: 信号日 +3.71%，5日 +11.95%"
           ],
           "risk_flags": [
-            "偏离 MA10 10.3%，追高风险上升"
+            "偏离 MA10 10.0%，追高风险上升"
           ],
           "chan": {
-            "score": 39.17,
+            "score": 39.88,
             "signals": [
               "女上位: MA5 在 MA10 之上",
               "多头排列: 收盘价站上 MA5/10/20",
@@ -1903,24 +2311,24 @@
               "二买近似: 多头后回踩 MA5/MA10 并重新收回"
             ],
             "warnings": [
-              "偏离 MA10 10.3%，追高风险上升"
+              "偏离 MA10 10.0%，追高风险上升"
             ],
             "metrics": {
-              "ma5": 1720.056,
-              "ma10": 1619.326,
-              "ma20": 1522.949,
-              "ma30": 1381.428,
+              "ma5": 1718.88,
+              "ma10": 1618.738,
+              "ma20": 1522.655,
+              "ma30": 1381.232,
               "box_high": 1658.77,
               "box_low": 1048.0,
               "volume_ratio_5d": 0.6,
-              "distance_ma5_pct": 3.83,
-              "distance_ma10_pct": 10.28,
-              "distance_ma20_pct": 17.26,
-              "pct_3d": 5.36,
-              "pct_5d": 12.32,
-              "pct_10d": 29.1,
-              "close_position": 0.77,
-              "upper_shadow_pct": 1.32,
+              "distance_ma5_pct": 3.56,
+              "distance_ma10_pct": 9.96,
+              "distance_ma20_pct": 16.9,
+              "pct_3d": 5.02,
+              "pct_5d": 11.95,
+              "pct_10d": 28.68,
+              "close_position": 0.71,
+              "upper_shadow_pct": 1.66,
               "setup_flags": [
                 "second_buy"
               ],
@@ -1941,8 +2349,8 @@
             "name": "Sandisk",
             "market_key": "us",
             "role": "NAND/存储周期",
-            "price": 1785.87,
-            "change_pct": 4.05,
+            "price": 1779.99,
+            "change_pct": 3.71,
             "amount_yi": 0,
             "turnover_pct": 0,
             "vol_ratio": 0.6,
@@ -1952,9 +2360,9 @@
               "NAND",
               "memory"
             ],
-            "score": 90.79,
+            "score": 91.4,
             "pre_score": 57.1,
-            "chan_score": 39.17,
+            "chan_score": 39.88,
             "setup_flags": [
               "second_buy"
             ],
@@ -1965,8 +2373,8 @@
               "high_pct": 2.6,
               "text": "-5.5% ~ +2.6%"
             },
-            "stop_loss": 1705.506,
-            "take_profit_reference": 1832.303,
+            "stop_loss": 1699.89,
+            "take_profit_reference": 1826.27,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -1975,13 +2383,13 @@
               "多头排列: 收盘价站上 MA5/10/20",
               "持股线: 未有效跌破 MA10",
               "二买近似: 多头后回踩 MA5/MA10 并重新收回",
-              "价格结构: 信号日 +4.05%，5日 +12.32%"
+              "价格结构: 信号日 +3.71%，5日 +11.95%"
             ],
             "risk_flags": [
-              "偏离 MA10 10.3%，追高风险上升"
+              "偏离 MA10 10.0%，追高风险上升"
             ],
             "chan": {
-              "score": 39.17,
+              "score": 39.88,
               "signals": [
                 "女上位: MA5 在 MA10 之上",
                 "多头排列: 收盘价站上 MA5/10/20",
@@ -1989,24 +2397,24 @@
                 "二买近似: 多头后回踩 MA5/MA10 并重新收回"
               ],
               "warnings": [
-                "偏离 MA10 10.3%，追高风险上升"
+                "偏离 MA10 10.0%，追高风险上升"
               ],
               "metrics": {
-                "ma5": 1720.056,
-                "ma10": 1619.326,
-                "ma20": 1522.949,
-                "ma30": 1381.428,
+                "ma5": 1718.88,
+                "ma10": 1618.738,
+                "ma20": 1522.655,
+                "ma30": 1381.232,
                 "box_high": 1658.77,
                 "box_low": 1048.0,
                 "volume_ratio_5d": 0.6,
-                "distance_ma5_pct": 3.83,
-                "distance_ma10_pct": 10.28,
-                "distance_ma20_pct": 17.26,
-                "pct_3d": 5.36,
-                "pct_5d": 12.32,
-                "pct_10d": 29.1,
-                "close_position": 0.77,
-                "upper_shadow_pct": 1.32,
+                "distance_ma5_pct": 3.56,
+                "distance_ma10_pct": 9.96,
+                "distance_ma20_pct": 16.9,
+                "pct_3d": 5.02,
+                "pct_5d": 11.95,
+                "pct_10d": 28.68,
+                "close_position": 0.71,
+                "upper_shadow_pct": 1.66,
                 "setup_flags": [
                   "second_buy"
                 ],
@@ -2030,7 +2438,7 @@
             "change_pct": 0.48,
             "amount_yi": 0,
             "turnover_pct": 0,
-            "vol_ratio": 0.57,
+            "vol_ratio": 0.58,
             "float_mcap_yi": 0,
             "reason_tags": "neocloud、AI datacenter",
             "theme_tags": [
@@ -2084,7 +2492,7 @@
                 "ma30": 55.307,
                 "box_high": 68.126,
                 "box_low": 42.21,
-                "volume_ratio_5d": 0.57,
+                "volume_ratio_5d": 0.58,
                 "distance_ma5_pct": 2.5,
                 "distance_ma10_pct": 7.65,
                 "distance_ma20_pct": 13.7,
@@ -2114,11 +2522,11 @@
             "name": "Lumentum",
             "market_key": "us",
             "role": "OCS/光器件/CPO",
-            "price": 969.59,
-            "change_pct": -5.79,
+            "price": 964.56,
+            "change_pct": -6.28,
             "amount_yi": 0,
             "turnover_pct": 0,
-            "vol_ratio": 0.45,
+            "vol_ratio": 0.46,
             "float_mcap_yi": 0,
             "reason_tags": "CPO、OCS、Google TPU",
             "theme_tags": [
@@ -2126,9 +2534,9 @@
               "OCS",
               "Google TPU"
             ],
-            "score": 55.16,
+            "score": 62.04,
             "pre_score": 75.2,
-            "chan_score": -14.0,
+            "chan_score": -6.0,
             "setup_flags": [],
             "hard_risk_count": 1,
             "confidence": 36,
@@ -2137,8 +2545,8 @@
               "high_pct": 2.6,
               "text": "-5.5% ~ +2.6%"
             },
-            "stop_loss": 925.958,
-            "take_profit_reference": 994.799,
+            "stop_loss": 921.155,
+            "take_profit_reference": 989.639,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -2149,38 +2557,39 @@
               "产业链主题: CPO、OCS、Google TPU",
               "女上位: MA5 在 MA10 之上",
               "持股线: 未有效跌破 MA10",
-              "价格结构: 信号日 -5.79%，5日 +7.46%"
+              "成本位置: 距 MA10 不远，二日风控更可控"
             ],
             "risk_flags": [
               "没有二买/三买确认，容易变成追涨交易",
               "上影线较长，资金分歧偏大"
             ],
             "chan": {
-              "score": -14.0,
+              "score": -6.0,
               "signals": [
                 "女上位: MA5 在 MA10 之上",
-                "持股线: 未有效跌破 MA10"
+                "持股线: 未有效跌破 MA10",
+                "成本位置: 距 MA10 不远，二日风控更可控"
               ],
               "warnings": [
                 "没有二买/三买确认，容易变成追涨交易",
                 "上影线较长，资金分歧偏大"
               ],
               "metrics": {
-                "ma5": 923.864,
-                "ma10": 921.191,
-                "ma20": 938.799,
-                "ma30": 923.682,
+                "ma5": 922.858,
+                "ma10": 920.688,
+                "ma20": 938.548,
+                "ma30": 923.515,
                 "box_high": 1085.68,
                 "box_low": 814.189,
-                "volume_ratio_5d": 0.45,
-                "distance_ma5_pct": 4.95,
-                "distance_ma10_pct": 5.25,
-                "distance_ma20_pct": 3.28,
-                "pct_3d": 13.41,
-                "pct_5d": 7.46,
-                "pct_10d": 8.93,
-                "close_position": 0.12,
-                "upper_shadow_pct": 8.24,
+                "volume_ratio_5d": 0.46,
+                "distance_ma5_pct": 4.52,
+                "distance_ma10_pct": 4.77,
+                "distance_ma20_pct": 2.77,
+                "pct_3d": 12.82,
+                "pct_5d": 6.9,
+                "pct_10d": 8.37,
+                "close_position": 0.06,
+                "upper_shadow_pct": 8.81,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-03"
               }
@@ -2203,8 +2612,8 @@
             "name": "Coherent",
             "market_key": "us",
             "role": "多元光子/激光/材料",
-            "price": 418.901,
-            "change_pct": -1.87,
+            "price": 417.185,
+            "change_pct": -2.27,
             "amount_yi": 0,
             "turnover_pct": 0,
             "vol_ratio": 0.41,
@@ -2215,9 +2624,9 @@
               "CPO",
               "materials"
             ],
-            "score": 53.04,
+            "score": 53.8,
             "pre_score": 67.3,
-            "chan_score": -7.28,
+            "chan_score": -6.4,
             "setup_flags": [],
             "hard_risk_count": 1,
             "confidence": 36,
@@ -2226,8 +2635,8 @@
               "high_pct": 2.6,
               "text": "-5.5% ~ +2.6%"
             },
-            "stop_loss": 400.051,
-            "take_profit_reference": 429.793,
+            "stop_loss": 398.412,
+            "take_profit_reference": 428.032,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -2238,15 +2647,15 @@
               "女上位: MA5 在 MA10 之上",
               "多头排列: 收盘价站上 MA5/10/20",
               "持股线: 未有效跌破 MA10",
-              "价格结构: 信号日 -1.87%，5日 +10.18%"
+              "价格结构: 信号日 -2.27%，5日 +9.73%"
             ],
             "risk_flags": [
               "没有二买/三买确认，容易变成追涨交易",
-              "偏离 MA10 9.6%，追高风险上升",
+              "偏离 MA10 9.2%，追高风险上升",
               "上影线较长，资金分歧偏大"
             ],
             "chan": {
-              "score": -7.28,
+              "score": -6.4,
               "signals": [
                 "女上位: MA5 在 MA10 之上",
                 "多头排列: 收盘价站上 MA5/10/20",
@@ -2254,25 +2663,25 @@
               ],
               "warnings": [
                 "没有二买/三买确认，容易变成追涨交易",
-                "偏离 MA10 9.6%，追高风险上升",
+                "偏离 MA10 9.2%，追高风险上升",
                 "上影线较长，资金分歧偏大"
               ],
               "metrics": {
-                "ma5": 389.422,
-                "ma10": 382.271,
-                "ma20": 374.155,
-                "ma30": 358.42,
+                "ma5": 389.079,
+                "ma10": 382.1,
+                "ma20": 374.069,
+                "ma30": 358.363,
                 "box_high": 413.0,
                 "box_low": 298.09,
                 "volume_ratio_5d": 0.41,
-                "distance_ma5_pct": 7.57,
-                "distance_ma10_pct": 9.58,
-                "distance_ma20_pct": 11.96,
-                "pct_3d": 15.89,
-                "pct_5d": 10.18,
-                "pct_10d": 18.46,
-                "close_position": 0.32,
-                "upper_shadow_pct": 4.98,
+                "distance_ma5_pct": 7.22,
+                "distance_ma10_pct": 9.18,
+                "distance_ma20_pct": 11.53,
+                "pct_3d": 15.41,
+                "pct_5d": 9.73,
+                "pct_10d": 17.97,
+                "close_position": 0.26,
+                "upper_shadow_pct": 5.41,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-03"
               }
@@ -2294,8 +2703,8 @@
             "name": "Vistra",
             "market_key": "us",
             "role": "AI 电力/核电受益",
-            "price": 156.505,
-            "change_pct": -0.93,
+            "price": 156.57,
+            "change_pct": -0.89,
             "amount_yi": 0,
             "turnover_pct": 0,
             "vol_ratio": 0.21,
@@ -2317,8 +2726,8 @@
               "high_pct": 2.6,
               "text": "-5.5% ~ +2.6%"
             },
-            "stop_loss": 149.462,
-            "take_profit_reference": 160.574,
+            "stop_loss": 149.524,
+            "take_profit_reference": 160.641,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -2326,7 +2735,7 @@
               "女上位: MA5 在 MA10 之上",
               "持股线: 未有效跌破 MA10",
               "成本位置: 距 MA10 不远，二日风控更可控",
-              "价格结构: 信号日 -0.93%，5日 -2.28%"
+              "价格结构: 信号日 -0.89%，5日 -2.24%"
             ],
             "risk_flags": [
               "没有二买/三买确认，容易变成追涨交易"
@@ -2342,21 +2751,21 @@
                 "没有二买/三买确认，容易变成追涨交易"
               ],
               "metrics": {
-                "ma5": 157.949,
-                "ma10": 156.38,
-                "ma20": 150.917,
-                "ma30": 153.705,
+                "ma5": 157.962,
+                "ma10": 156.387,
+                "ma20": 150.92,
+                "ma30": 153.708,
                 "box_high": 168.39,
                 "box_low": 132.66,
                 "volume_ratio_5d": 0.21,
-                "distance_ma5_pct": -0.91,
-                "distance_ma10_pct": 0.08,
-                "distance_ma20_pct": 3.7,
-                "pct_3d": -2.32,
-                "pct_5d": -2.28,
-                "pct_10d": 16.18,
-                "close_position": 0.61,
-                "upper_shadow_pct": 0.9,
+                "distance_ma5_pct": -0.88,
+                "distance_ma10_pct": 0.12,
+                "distance_ma20_pct": 3.74,
+                "pct_3d": -2.28,
+                "pct_5d": -2.24,
+                "pct_10d": 16.23,
+                "close_position": 0.62,
+                "upper_shadow_pct": 0.86,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-03"
               }
@@ -2374,8 +2783,8 @@
             "name": "Applied Optoelectronics",
             "market_key": "us",
             "role": "美国光模块/激光器",
-            "price": 190.59,
-            "change_pct": -5.82,
+            "price": 189.334,
+            "change_pct": -6.44,
             "amount_yi": 0,
             "turnover_pct": 0,
             "vol_ratio": 0.38,
@@ -2397,8 +2806,8 @@
               "high_pct": 2.6,
               "text": "-5.5% ~ +2.6%"
             },
-            "stop_loss": 182.013,
-            "take_profit_reference": 195.545,
+            "stop_loss": 180.814,
+            "take_profit_reference": 194.257,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -2409,7 +2818,7 @@
               "产业链主题: 1.6T、Photonics、AI datacenter",
               "女上位: MA5 在 MA10 之上",
               "持股线: 未有效跌破 MA10",
-              "价格结构: 信号日 -5.82%，5日 +5.98%"
+              "价格结构: 信号日 -6.44%，5日 +5.29%"
             ],
             "risk_flags": [
               "Serenity风险: 需重点跟踪 ATM/稀释或债务压力",
@@ -2427,21 +2836,21 @@
                 "上影线较长，资金分歧偏大"
               ],
               "metrics": {
-                "ma5": 181.212,
-                "ma10": 178.707,
-                "ma20": 180.345,
-                "ma30": 173.117,
+                "ma5": 180.961,
+                "ma10": 178.581,
+                "ma20": 180.282,
+                "ma30": 173.075,
                 "box_high": 233.67,
                 "box_low": 138.1,
                 "volume_ratio_5d": 0.38,
-                "distance_ma5_pct": 5.18,
-                "distance_ma10_pct": 6.65,
-                "distance_ma20_pct": 5.68,
-                "pct_3d": 20.31,
-                "pct_5d": 5.98,
-                "pct_10d": 11.24,
-                "close_position": 0.24,
-                "upper_shadow_pct": 7.56,
+                "distance_ma5_pct": 4.63,
+                "distance_ma10_pct": 6.02,
+                "distance_ma20_pct": 5.02,
+                "pct_3d": 19.52,
+                "pct_5d": 5.29,
+                "pct_10d": 10.51,
+                "close_position": 0.18,
+                "upper_shadow_pct": 8.27,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-03"
               }
@@ -2468,11 +2877,11 @@
             "name": "AXT",
             "market_key": "us",
             "role": "InP/GaAs 衬底",
-            "price": 110.05,
-            "change_pct": -0.72,
+            "price": 109.76,
+            "change_pct": -0.98,
             "amount_yi": 0,
             "turnover_pct": 0,
-            "vol_ratio": 0.27,
+            "vol_ratio": 0.28,
             "float_mcap_yi": 0,
             "reason_tags": "InP substrate、compound semi",
             "theme_tags": [
@@ -2490,8 +2899,8 @@
               "high_pct": 2.6,
               "text": "-5.5% ~ +2.6%"
             },
-            "stop_loss": 105.098,
-            "take_profit_reference": 112.911,
+            "stop_loss": 104.821,
+            "take_profit_reference": 112.614,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -2500,7 +2909,7 @@
               "Serenity因子: 直接受益数据中心/AI capex",
               "Serenity因子: 市值弹性相对更高",
               "产业链主题: InP substrate、compound semi",
-              "价格结构: 信号日 -0.72%，5日 -10.36%"
+              "价格结构: 信号日 -0.98%，5日 -10.60%"
             ],
             "risk_flags": [
               "收盘价跌破 MA10，二日持有风险偏高",
@@ -2516,21 +2925,21 @@
                 "上影线较长，资金分歧偏大"
               ],
               "metrics": {
-                "ma5": 109.862,
-                "ma10": 117.114,
-                "ma20": 116.446,
-                "ma30": 105.533,
+                "ma5": 109.804,
+                "ma10": 117.085,
+                "ma20": 116.432,
+                "ma30": 105.523,
                 "box_high": 143.16,
                 "box_low": 69.3,
-                "volume_ratio_5d": 0.27,
-                "distance_ma5_pct": 0.17,
-                "distance_ma10_pct": -6.03,
-                "distance_ma20_pct": -5.49,
-                "pct_3d": 6.68,
-                "pct_5d": -10.36,
-                "pct_10d": -2.51,
-                "close_position": 0.5,
-                "upper_shadow_pct": 4.61,
+                "volume_ratio_5d": 0.28,
+                "distance_ma5_pct": -0.04,
+                "distance_ma10_pct": -6.26,
+                "distance_ma20_pct": -5.73,
+                "pct_3d": 6.4,
+                "pct_5d": -10.6,
+                "pct_10d": -2.76,
+                "close_position": 0.47,
+                "upper_shadow_pct": 4.88,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-03"
               }
@@ -2554,11 +2963,11 @@
             "name": "Constellation Energy",
             "market_key": "us",
             "role": "AI 电力/核电 PPA",
-            "price": 269.09,
-            "change_pct": -1.31,
+            "price": 269.01,
+            "change_pct": -1.34,
             "amount_yi": 0,
             "turnover_pct": 0,
-            "vol_ratio": 0.27,
+            "vol_ratio": 0.28,
             "float_mcap_yi": 0,
             "reason_tags": "power、nuclear、AI datacenter",
             "theme_tags": [
@@ -2577,13 +2986,13 @@
               "high_pct": 2.6,
               "text": "-5.5% ~ +2.6%"
             },
-            "stop_loss": 256.981,
-            "take_profit_reference": 276.086,
+            "stop_loss": 256.905,
+            "take_profit_reference": 276.004,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
               "产业链主题: power、nuclear、AI datacenter",
-              "价格结构: 信号日 -1.31%，5日 -6.79%"
+              "价格结构: 信号日 -1.34%，5日 -6.81%"
             ],
             "risk_flags": [
               "收盘价跌破 MA10，二日持有风险偏高",
@@ -2597,21 +3006,21 @@
                 "没有二买/三买确认，容易变成追涨交易"
               ],
               "metrics": {
-                "ma5": 276.3,
-                "ma10": 283.291,
-                "ma20": 285.196,
-                "ma30": 292.584,
+                "ma5": 276.284,
+                "ma10": 283.283,
+                "ma20": 285.192,
+                "ma30": 292.582,
                 "box_high": 328.8,
                 "box_low": 256.1,
-                "volume_ratio_5d": 0.27,
-                "distance_ma5_pct": -2.61,
-                "distance_ma10_pct": -5.01,
-                "distance_ma20_pct": -5.65,
-                "pct_3d": -6.48,
-                "pct_5d": -6.79,
-                "pct_10d": 3.23,
-                "close_position": 0.32,
-                "upper_shadow_pct": 2.01,
+                "volume_ratio_5d": 0.28,
+                "distance_ma5_pct": -2.63,
+                "distance_ma10_pct": -5.04,
+                "distance_ma20_pct": -5.67,
+                "pct_3d": -6.51,
+                "pct_5d": -6.81,
+                "pct_10d": 3.2,
+                "close_position": 0.31,
+                "upper_shadow_pct": 2.04,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-03"
               }
@@ -2665,9 +3074,9 @@
     "total": 0
   },
   "stats": {
-    "hot_pool_size": 81,
+    "hot_pool_size": 105,
     "event_pool_size": 81,
-    "broad_pool_size": 0,
+    "broad_pool_size": 24,
     "scored_size": 60,
     "dragon_count": 85
   },
@@ -2701,7 +3110,7 @@
   },
   "serenity_source": {
     "repo": "yan-labs/serenity-aleabitoreddit",
-    "checked_at": "2026-06-03T23:43:32+08:00",
+    "checked_at": "2026-06-03T23:45:59+08:00",
     "latest_commit": "094a8dcd91c5",
     "latest_commit_date": "2026-06-03T07:00:13Z",
     "tweet_archive_span": "2025-07-02 → 2026-06-03",
