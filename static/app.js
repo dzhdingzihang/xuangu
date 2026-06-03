@@ -207,6 +207,11 @@ function renderRules(data) {
   clearList(els.chanRules);
   data.chan_rules.quant_mapping.forEach((rule) => els.chanRules.append(li(rule)));
   ((data.serenity_rules && data.serenity_rules.principles) || []).forEach((rule) => els.chanRules.append(li(`Serenity: ${rule}`)));
+  if (data.serenity_source) {
+    const source = data.serenity_source;
+    const span = source.tweet_archive_span ? `，档案 ${source.tweet_archive_span}` : "";
+    els.chanRules.append(li(`Serenity源: ${source.repo} 最新提交 ${source.latest_commit || "未知"}${span}`));
+  }
 }
 
 function renderMarket(data) {

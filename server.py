@@ -283,6 +283,39 @@ def http_get_json(url: str, params: dict | None = None, timeout: int = 14) -> di
     return response.json()
 
 
+def serenity_source_status() -> dict:
+    status = {
+        "repo": "yan-labs/serenity-aleabitoreddit",
+        "checked_at": now_cn().isoformat(timespec="seconds"),
+        "latest_commit": None,
+        "latest_commit_date": None,
+        "tweet_archive_span": None,
+        "note": "每日生成快照时查询 Serenity repo；若源仓库更新，需复核因子映射后再改变权重。",
+    }
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/yan-labs/serenity-aleabitoreddit/commits/main",
+            headers={"User-Agent": UA, "Accept": "application/vnd.github+json"},
+        )
+        commit = json.loads(urllib.request.urlopen(req, timeout=12).read().decode("utf-8"))
+        status["latest_commit"] = (commit.get("sha") or "")[:12]
+        status["latest_commit_date"] = (((commit.get("commit") or {}).get("committer") or {}).get("date"))
+    except Exception as exc:
+        status["note"] = f"Serenity repo 查询失败，沿用内置因子；错误: {exc}"
+    try:
+        req = urllib.request.Request(
+            "https://raw.githubusercontent.com/yan-labs/serenity-aleabitoreddit/main/README.md",
+            headers={"User-Agent": UA},
+        )
+        readme = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
+        match = re.search(r"spanning\s+\*\*([^*]+)\*\*", readme)
+        if match:
+            status["tweet_archive_span"] = match.group(1).strip()
+    except Exception:
+        pass
+    return status
+
+
 def load_ths_hot(date_text: str) -> list[dict]:
     url = (
         "http://zx.10jqka.com.cn/event/api/getharden/"
@@ -1391,6 +1424,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         },
         "chan_rules": CHAN_RULES,
         "serenity_rules": SERENITY_RULES,
+        "serenity_source": serenity_source_status(),
         "accuracy_note": (
             "预测准确率是规则模型按信号强度映射的先验估计；"
             "需要每天保存结果后，用真实 2 日收益滚动校准。"
