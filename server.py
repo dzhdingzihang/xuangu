@@ -262,6 +262,7 @@ def summarize_pick(pick: dict) -> dict:
         "signal_date": pick.get("signal_date"),
         "generated_at": pick.get("generated_at"),
         "generated_label": pick.get("generated_label"),
+        "snapshot_key": pick.get("snapshot_key"),
         "forecast_end_date": pick.get("forecast_end_date"),
         "forecast_horizon": pick.get("forecast_horizon"),
         "action": decision.get("action"),

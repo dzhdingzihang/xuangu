@@ -40,6 +40,7 @@ function summarizePick(pick) {
     signal_date: pick.signal_date,
     generated_at: pick.generated_at,
     generated_label: pick.generated_label,
+    snapshot_key: pick.snapshot_key,
     forecast_end_date: pick.forecast_end_date,
     forecast_horizon: pick.forecast_horizon,
     action: decision.action,
