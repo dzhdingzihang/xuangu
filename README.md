@@ -1,45 +1,42 @@
 # 智能选股
 
-A 股 / 港股 / 美股的未来 2 周智能选股网站。
+面向 A 股、港股、美股的两周维度智能选股网站。
 
-核心目标：
+线上地址：[https://xuangu.alixjd.com](https://xuangu.alixjd.com)
+
+## 目标
 
 - 每个交易日 09:00 生成未来约 2 周、10 个交易日的推荐。
-- 交易时段每半小时更新一次快照。
-- 每次快照独立保存，历史推荐变化可追溯。
-- 每个市场给出推荐股票、推荐度、两周涨幅预估和推荐理由；没有通过阈值则显示“无推荐”。
+- 交易时段 09:00-15:30 每半小时更新一次快照。
+- 每次快照独立保存，同一天推荐变化可以追溯。
+- A 股、港股、美股分别给出决策；未达到阈值时明确显示“无推荐”。
+- 每只候选股展示推荐度、两周涨幅预估、止损线、推荐理由和风险拦截原因。
 
 ## 核心逻辑
 
-- 缠论 PDF：二买、三买、背驰、均线持股线等可量化结构。
-- `waditu/czsc`：参考分型、笔、中枢、信号-事件-交易框架，内置轻量 CZSC 结构因子；GitHub Actions 会尝试安装 `czsc` 作为可选运行时。
-- `wbh604/UZI-Skill`：参考多维评分、评审团共识、游资射程、杀猪盘/过热风控，形成 UZI 风控因子。
-- `yan-labs/serenity-aleabitoreddit`：AI capex 上游瓶颈、CPO/光通信、InP/化合物半导体、HBM/存储、neocloud、电力等产业链因子。
+系统不是单一指标打分，而是把结构、趋势、产业链、资金和风险过滤合成一个两周推荐度。
 
-## 运行
+- 缠论结构：参考二买、三买、背驰、均线持股线、箱体突破等可量化形态。
+- `waditu/czsc`：参考分型、笔、中枢、信号-事件-交易框架；生产环境使用内置轻量 CZSC 结构因子，避免每半小时部署时安装完整研究库导致更新变慢。
+- `wbh604/UZI-Skill`：参考多维评分、投资者评审团共识、游资射程、龙虎榜、过热和杀猪盘过滤，形成 UZI 风控因子。
+- `yan-labs/serenity-aleabitoreddit`：参考 AI capex 上游瓶颈、CPO/光通信、InP/化合物半导体、HBM/存储、neocloud、电力等产业链因子。
+- 市场风控：指数环境、涨停追高、过热、流动性、下行空间、MA20 失守等会降低推荐度或直接给出无推荐。
 
-```bash
-cd "/Users/dingzihang/Documents/猪猪投资存钱罐/chan-stock-site"
-python server.py --port 8790
-```
+当前模型版本：`smart-selector-2026-06-04.1`
 
-打开：
+## 推荐输出
 
-```text
-http://127.0.0.1:8790
-```
+每个市场都会输出：
 
-## 命令行生成快照
+- `BUY_CANDIDATE`：两周推荐，代表通过当前阈值。
+- `NO_TRADE`：无推荐，代表候选股没有达到两周买入标准。
+- `recommendation_degree`：推荐度，越高代表未来两周上涨信号越强。
+- `estimated_2w_range`：未来两周涨幅预估区间。
+- `reasons`：推荐理由。
+- `risk_flags` / `message`：风险标签或未推荐原因。
+- `snapshot_key`：快照文件名，用于追溯当天每半小时变化。
 
-```bash
-python server.py --once --force
-```
-
-指定目标日：
-
-```bash
-python server.py --once --date 2026-06-04 --force
-```
+注意：推荐度不是胜率承诺，也不是收益保证。
 
 ## 数据源
 
@@ -48,9 +45,93 @@ python server.py --once --date 2026-06-04 --force
 - 东方财富全市场、龙虎榜、行业热度
 - 百度股市通日 K
 - Yahoo Finance 日 K（港股 / 美股）
+- GitHub 公开研究仓库的方法论和产业链线索
+
+## API
+
+```text
+GET /api/status
+GET /api/latest
+GET /api/history?limit=120
+GET /api/pick?date=2026-06-04
+```
+
+常用字段：
+
+- `target_date`：推荐对应日期。
+- `signal_date`：使用的行情信号日期。
+- `forecast_end_date`：两周观察窗口结束日期。
+- `forecast_horizon`：推荐观察周期。
+- `markets.a_share` / `markets.hk` / `markets.us`：三市场决策。
+- `history[].snapshot_key`：历史快照唯一标识。
+
+## 本地运行
+
+```bash
+cd "/Users/dingzihang/Documents/猪猪投资存钱罐/chan-stock-site"
+python3 server.py --port 8790
+```
+
+打开：
+
+```text
+http://127.0.0.1:8790
+```
+
+生成一次快照：
+
+```bash
+python3 server.py --once --force
+```
+
+指定目标日：
+
+```bash
+python3 server.py --once --date 2026-06-04 --force
+```
+
+构建 Cloudflare Worker 静态资源：
+
+```bash
+npm install
+npm run build
+```
 
 ## 自动部署
 
-GitHub Actions 会在北京时间交易日 09:00-15:30 每半小时生成新快照、提交历史文件并部署 Cloudflare Worker。
+GitHub Actions 在北京时间交易日 09:00-15:30 每半小时运行一次：
 
-注意：本工具是量化决策辅助，不构成投资建议，不保证盈利。
+1. 安装 Python 依赖。
+2. 生成新的智能选股快照。
+3. 构建 Worker assets。
+4. 提交 `data/picks/*.json` 历史快照。
+5. 部署到 Cloudflare Workers。
+
+对应 cron：
+
+```text
+0,30 1-7 * * 1-5
+```
+
+这是 UTC 时间，对应北京时间 09:00-15:30。
+
+## UZI-Skill
+
+UZI-Skill 已按官方指引安装到本机：
+
+```text
+/Users/dingzihang/Documents/猪猪投资存钱罐/UZI-Skill
+```
+
+也可以单独运行个股深度分析：
+
+```bash
+cd "/Users/dingzihang/Documents/猪猪投资存钱罐/UZI-Skill"
+python3 run.py 贵州茅台 --no-browser
+python3 run.py AAPL --no-browser
+python3 run.py 002273.SZ --depth lite --no-browser
+```
+
+## 风险提示
+
+本项目是量化和研究辅助工具，不构成投资建议，不保证盈利。短线和两周维度受市场情绪、政策、流动性和突发消息影响很大，请结合仓位、止损和自身风险承受能力使用。
