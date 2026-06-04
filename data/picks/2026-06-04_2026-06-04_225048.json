@@ -1,8 +1,8 @@
 {
   "model_version": "smart-selector-2026-06-04.1",
-  "generated_at": "2026-06-04T22:52:57+08:00",
-  "generated_label": "2026-06-04 22:52",
-  "snapshot_key": "2026-06-04_2026-06-04_225257.json",
+  "generated_at": "2026-06-04T22:50:48+08:00",
+  "generated_label": "2026-06-04 22:50",
+  "snapshot_key": "2026-06-04_2026-06-04_225048.json",
   "target_date": "2026-06-04",
   "next_trade_date": "2026-06-18",
   "forecast_end_date": "2026-06-18",
@@ -10,81 +10,111 @@
   "signal_date": "2026-06-04",
   "holding_plan": "未来2周观察窗口；若跌破止损线、MA20失守或推荐度显著下降，提前退出。",
   "decision": {
-    "action": "NO_TRADE",
-    "title": "无推荐",
-    "message": "推荐度低于 64；硬风险项过多，不适合未来2周持有；候选股风险标签过多；信号日已接近涨停，次日追高性价比不足；预估下行空间过大",
-    "primary": null,
-    "blocked_candidate": {
-      "code": "000733",
-      "name": "振华科技",
-      "price": 59.31,
-      "change_pct": 10.0,
-      "amount_yi": 43.83,
-      "turnover_pct": 13.87,
-      "vol_ratio": 1.49,
-      "float_mcap_yi": 328.68,
-      "reason_tags": "MLCC+超级电容+商业航天+央企",
-      "theme_tags": [
-        "商业航天"
-      ],
-      "score": 26.14,
-      "pre_score": 54.14,
-      "chan_score": 0,
-      "czsc_score": 0.0,
+    "action": "BUY_CANDIDATE",
+    "title": "两周推荐",
+    "message": "满足未来2周上涨的趋势结构、资金承接和风控阈值。",
+    "primary": {
+      "code": "301526",
+      "name": "国际复材",
+      "price": 22.69,
+      "change_pct": 3.09,
+      "amount_yi": 36.27,
+      "turnover_pct": 11.46,
+      "vol_ratio": 0.82,
+      "float_mcap_yi": 855.61,
+      "reason_tags": "全市场稳健候选",
+      "theme_tags": [],
+      "score": 131.24,
+      "pre_score": 54.74,
+      "chan_score": 50.0,
+      "czsc_score": 35.0,
       "serenity_score": 0.0,
-      "uzi_score": -12.0,
-      "setup_flags": [],
-      "hard_risk_count": 2,
-      "confidence": 35,
-      "recommendation_degree": 35,
+      "uzi_score": 4.0,
+      "setup_flags": [
+        "second_buy"
+      ],
+      "hard_risk_count": 0,
+      "confidence": 67,
+      "recommendation_degree": 67,
       "estimated_2w_range": {
-        "low_pct": -6.0,
-        "high_pct": 3.0,
-        "text": "-6.0% ~ +3.0%"
+        "low_pct": -2.9,
+        "high_pct": 8.7,
+        "text": "-2.9% ~ +8.7%"
       },
       "estimated_2d_range": {
-        "low_pct": -6.0,
-        "high_pct": 3.0,
-        "text": "-6.0% ~ +3.0%"
+        "low_pct": -2.9,
+        "high_pct": 8.7,
+        "text": "-2.9% ~ +8.7%"
       },
-      "stop_loss": 55.75,
-      "take_profit_reference": 61.09,
-      "dragon_net_wan": 42181.7,
-      "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
+      "stop_loss": 21.33,
+      "take_profit_reference": 24.66,
+      "dragon_net_wan": 0.0,
+      "dragon_reason": "",
       "reasons": [
-        "题材命中: 商业航天",
-        "龙虎榜净买入约 42182 万",
-        "UZI风控: 近5日未明显透支，仍有两周弹性",
-        "流动性: 成交 43.8 亿，换手 13.9%，未来2周观察"
+        "女上位: MA5 在 MA10 之上",
+        "多头排列: 收盘价站上 MA5/10/20",
+        "持股线: 未有效跌破 MA10",
+        "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+        "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+        "CZSC近似: 中期均线未走坏，适合两周窗口",
+        "CZSC近似: 突破中枢后回踩未破"
       ],
-      "risk_flags": [
-        "信号日涨停，次日追高风险",
-        "10cm 涨停后，隔日接力不确定",
-        "K线样本不足，缠论结构信号降权"
-      ],
+      "risk_flags": [],
       "chan": {
-        "score": 0,
-        "signals": [],
-        "warnings": [
-          "K线样本不足，缠论结构信号降权"
+        "score": 50.0,
+        "signals": [
+          "女上位: MA5 在 MA10 之上",
+          "多头排列: 收盘价站上 MA5/10/20",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "成本位置: 距 MA10 不远，两周风控更可控"
         ],
-        "metrics": {}
+        "warnings": [],
+        "metrics": {
+          "ma5": 22.518,
+          "ma10": 22.38,
+          "ma20": 20.534,
+          "ma30": 19.036,
+          "box_high": 25.0,
+          "box_low": 14.54,
+          "volume_ratio_5d": 0.82,
+          "distance_ma5_pct": 0.76,
+          "distance_ma10_pct": 1.39,
+          "distance_ma20_pct": 10.5,
+          "pct_3d": 6.23,
+          "pct_5d": -8.43,
+          "pct_10d": 27.4,
+          "close_position": 0.66,
+          "upper_shadow_pct": 2.69,
+          "setup_flags": [
+            "second_buy"
+          ],
+          "last_kline_date": "2026-06-04"
+        }
       },
       "czsc": {
-        "score": 0.0,
-        "signals": [],
+        "score": 35.0,
+        "signals": [
+          "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+          "CZSC近似: 中期均线未走坏，适合两周窗口",
+          "CZSC近似: 突破中枢后回踩未破"
+        ],
         "warnings": [],
-        "metrics": {}
+        "metrics": {
+          "ma20": 20.534,
+          "ma30": 19.036,
+          "ma60": 15.626,
+          "box_high_45d": 20.58,
+          "box_low_45d": 10.8,
+          "pct_20d": 18.18
+        }
       },
       "uzi": {
-        "score": -12.0,
+        "score": 4.0,
         "signals": [
-          "UZI风控: 近5日未明显透支，仍有两周弹性"
+          "UZI风控: 未触发杀猪盘/过热式硬拦截"
         ],
-        "warnings": [
-          "UZI风控: 单日涨幅过大，疑似已被抢跑",
-          "UZI风控: 风险标签过多"
-        ]
+        "warnings": []
       },
       "serenity": {
         "score": 0.0,
@@ -95,396 +125,112 @@
     },
     "watchlist": [
       {
-        "code": "000733",
-        "name": "振华科技",
-        "price": 59.31,
-        "change_pct": 10.0,
-        "amount_yi": 43.83,
-        "turnover_pct": 13.87,
-        "vol_ratio": 1.49,
-        "float_mcap_yi": 328.68,
-        "reason_tags": "MLCC+超级电容+商业航天+央企",
-        "theme_tags": [
-          "商业航天"
-        ],
-        "score": 26.14,
-        "pre_score": 54.14,
-        "chan_score": 0,
-        "czsc_score": 0.0,
+        "code": "000100",
+        "name": "TCL科技",
+        "price": 4.92,
+        "change_pct": 3.8,
+        "amount_yi": 103.64,
+        "turnover_pct": 11.14,
+        "vol_ratio": 1.69,
+        "float_mcap_yi": 1023.4,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 136.23,
+        "pre_score": 61.67,
+        "chan_score": 58.08,
+        "czsc_score": 19.0,
         "serenity_score": 0.0,
-        "uzi_score": -12.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 35,
-        "recommendation_degree": 35,
+        "uzi_score": 12.0,
+        "setup_flags": [
+          "second_buy"
+        ],
+        "hard_risk_count": 0,
+        "confidence": 65,
+        "recommendation_degree": 65,
         "estimated_2w_range": {
-          "low_pct": -6.0,
-          "high_pct": 3.0,
-          "text": "-6.0% ~ +3.0%"
+          "low_pct": -3.3,
+          "high_pct": 7.9,
+          "text": "-3.3% ~ +7.9%"
         },
         "estimated_2d_range": {
-          "low_pct": -6.0,
-          "high_pct": 3.0,
-          "text": "-6.0% ~ +3.0%"
+          "low_pct": -3.3,
+          "high_pct": 7.9,
+          "text": "-3.3% ~ +7.9%"
         },
-        "stop_loss": 55.75,
-        "take_profit_reference": 61.09,
-        "dragon_net_wan": 42181.7,
-        "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
-        "reasons": [
-          "题材命中: 商业航天",
-          "龙虎榜净买入约 42182 万",
-          "UZI风控: 近5日未明显透支，仍有两周弹性",
-          "流动性: 成交 43.8 亿，换手 13.9%，未来2周观察"
-        ],
-        "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "K线样本不足，缠论结构信号降权"
-        ],
-        "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
-          ],
-          "metrics": {}
-        },
-        "czsc": {
-          "score": 0.0,
-          "signals": [],
-          "warnings": [],
-          "metrics": {}
-        },
-        "uzi": {
-          "score": -12.0,
-          "signals": [
-            "UZI风控: 近5日未明显透支，仍有两周弹性"
-          ],
-          "warnings": [
-            "UZI风控: 单日涨幅过大，疑似已被抢跑",
-            "UZI风控: 风险标签过多"
-          ]
-        },
-        "serenity": {
-          "score": 0.0,
-          "role": "",
-          "principles": [],
-          "risks": []
-        }
-      },
-      {
-        "code": "600667",
-        "name": "太极实业",
-        "price": 16.36,
-        "change_pct": 10.02,
-        "amount_yi": 30.64,
-        "turnover_pct": 9.24,
-        "vol_ratio": 0.56,
-        "float_mcap_yi": 342.18,
-        "reason_tags": "存储芯片+SK海力士+先进封装+无锡国资",
-        "theme_tags": [
-          "先进封装",
-          "存储芯片"
-        ],
-        "score": 25.09,
-        "pre_score": 53.09,
-        "chan_score": 0,
-        "czsc_score": 0.0,
-        "serenity_score": 0.0,
-        "uzi_score": -12.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 35,
-        "recommendation_degree": 35,
-        "estimated_2w_range": {
-          "low_pct": -6.0,
-          "high_pct": 3.0,
-          "text": "-6.0% ~ +3.0%"
-        },
-        "estimated_2d_range": {
-          "low_pct": -6.0,
-          "high_pct": 3.0,
-          "text": "-6.0% ~ +3.0%"
-        },
-        "stop_loss": 15.38,
-        "take_profit_reference": 16.85,
-        "dragon_net_wan": 7435.4,
-        "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
-        "reasons": [
-          "题材命中: 先进封装、存储芯片",
-          "龙虎榜净买入约 7435 万",
-          "UZI风控: 近5日未明显透支，仍有两周弹性",
-          "流动性: 成交 30.6 亿，换手 9.2%，未来2周观察"
-        ],
-        "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "K线样本不足，缠论结构信号降权"
-        ],
-        "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
-          ],
-          "metrics": {}
-        },
-        "czsc": {
-          "score": 0.0,
-          "signals": [],
-          "warnings": [],
-          "metrics": {}
-        },
-        "uzi": {
-          "score": -12.0,
-          "signals": [
-            "UZI风控: 近5日未明显透支，仍有两周弹性"
-          ],
-          "warnings": [
-            "UZI风控: 单日涨幅过大，疑似已被抢跑",
-            "UZI风控: 风险标签过多"
-          ]
-        },
-        "serenity": {
-          "score": 0.0,
-          "role": "",
-          "principles": [],
-          "risks": []
-        }
-      },
-      {
-        "code": "001309",
-        "name": "德明利",
-        "price": 680.85,
-        "change_pct": 10.0,
-        "amount_yi": 126.89,
-        "turnover_pct": 11.62,
-        "vol_ratio": 1.61,
-        "float_mcap_yi": 1544.48,
-        "reason_tags": "存储芯片+企业级SSD+一季报增长",
-        "theme_tags": [
-          "存储芯片"
-        ],
-        "score": 20.22,
-        "pre_score": 48.22,
-        "chan_score": 0,
-        "czsc_score": 0.0,
-        "serenity_score": 0.0,
-        "uzi_score": -12.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 35,
-        "recommendation_degree": 35,
-        "estimated_2w_range": {
-          "low_pct": -6.0,
-          "high_pct": 3.0,
-          "text": "-6.0% ~ +3.0%"
-        },
-        "estimated_2d_range": {
-          "low_pct": -6.0,
-          "high_pct": 3.0,
-          "text": "-6.0% ~ +3.0%"
-        },
-        "stop_loss": 640.0,
-        "take_profit_reference": 701.28,
-        "dragon_net_wan": 10307.6,
-        "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
-        "reasons": [
-          "题材命中: 存储芯片",
-          "龙虎榜净买入约 10308 万",
-          "UZI风控: 近5日未明显透支，仍有两周弹性",
-          "流动性: 成交 126.9 亿，换手 11.6%，未来2周观察"
-        ],
-        "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "流通市值偏大，涨幅弹性受限",
-          "K线样本不足，缠论结构信号降权"
-        ],
-        "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
-          ],
-          "metrics": {}
-        },
-        "czsc": {
-          "score": 0.0,
-          "signals": [],
-          "warnings": [],
-          "metrics": {}
-        },
-        "uzi": {
-          "score": -12.0,
-          "signals": [
-            "UZI风控: 近5日未明显透支，仍有两周弹性"
-          ],
-          "warnings": [
-            "UZI风控: 单日涨幅过大，疑似已被抢跑",
-            "UZI风控: 风险标签过多"
-          ]
-        },
-        "serenity": {
-          "score": 0.0,
-          "role": "",
-          "principles": [],
-          "risks": []
-        }
-      },
-      {
-        "code": "600246",
-        "name": "万通发展",
-        "price": 18.87,
-        "change_pct": 10.03,
-        "amount_yi": 27.0,
-        "turnover_pct": 7.98,
-        "vol_ratio": 0.69,
-        "float_mcap_yi": 366.64,
-        "reason_tags": "高速交换芯片+PCIe5.0芯片+存储芯片",
-        "theme_tags": [
-          "存储芯片"
-        ],
-        "score": 19.22,
-        "pre_score": 47.22,
-        "chan_score": 0,
-        "czsc_score": 0.0,
-        "serenity_score": 0.0,
-        "uzi_score": -12.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 35,
-        "recommendation_degree": 35,
-        "estimated_2w_range": {
-          "low_pct": -6.0,
-          "high_pct": 3.0,
-          "text": "-6.0% ~ +3.0%"
-        },
-        "estimated_2d_range": {
-          "low_pct": -6.0,
-          "high_pct": 3.0,
-          "text": "-6.0% ~ +3.0%"
-        },
-        "stop_loss": 17.74,
-        "take_profit_reference": 19.44,
-        "dragon_net_wan": 10229.0,
-        "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
-        "reasons": [
-          "题材命中: 存储芯片",
-          "龙虎榜净买入约 10229 万",
-          "UZI风控: 近5日未明显透支，仍有两周弹性",
-          "流动性: 成交 27.0 亿，换手 8.0%，未来2周观察"
-        ],
-        "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "K线样本不足，缠论结构信号降权"
-        ],
-        "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
-          ],
-          "metrics": {}
-        },
-        "czsc": {
-          "score": 0.0,
-          "signals": [],
-          "warnings": [],
-          "metrics": {}
-        },
-        "uzi": {
-          "score": -12.0,
-          "signals": [
-            "UZI风控: 近5日未明显透支，仍有两周弹性"
-          ],
-          "warnings": [
-            "UZI风控: 单日涨幅过大，疑似已被抢跑",
-            "UZI风控: 风险标签过多"
-          ]
-        },
-        "serenity": {
-          "score": 0.0,
-          "role": "",
-          "principles": [],
-          "risks": []
-        }
-      },
-      {
-        "code": "603920",
-        "name": "世运电路",
-        "price": 62.69,
-        "change_pct": 10.0,
-        "amount_yi": 21.59,
-        "turnover_pct": 4.87,
-        "vol_ratio": 0.81,
-        "float_mcap_yi": 451.74,
-        "reason_tags": "AI PCB+人形机器人+CPO",
-        "theme_tags": [
-          "CPO",
-          "PCB",
-          "机器人",
-          "人形机器人"
-        ],
-        "score": 17.61,
-        "pre_score": 45.61,
-        "chan_score": 0,
-        "czsc_score": 0.0,
-        "serenity_score": 0.0,
-        "uzi_score": -12.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 35,
-        "recommendation_degree": 35,
-        "estimated_2w_range": {
-          "low_pct": -6.0,
-          "high_pct": 3.0,
-          "text": "-6.0% ~ +3.0%"
-        },
-        "estimated_2d_range": {
-          "low_pct": -6.0,
-          "high_pct": 3.0,
-          "text": "-6.0% ~ +3.0%"
-        },
-        "stop_loss": 58.93,
-        "take_profit_reference": 64.57,
+        "stop_loss": 4.62,
+        "take_profit_reference": 5.31,
         "dragon_net_wan": 0.0,
         "dragon_reason": "",
         "reasons": [
-          "题材命中: CPO、PCB、机器人、人形机器人",
-          "UZI风控: 近5日未明显透支，仍有两周弹性",
-          "流动性: 成交 21.6 亿，换手 4.9%，未来2周观察"
+          "女上位: MA5 在 MA10 之上",
+          "多头排列: 收盘价站上 MA5/10/20",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+          "CZSC近似: 中期均线未走坏，适合两周窗口",
+          "UZI风控: 近5日未明显透支，仍有两周弹性"
         ],
         "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
-          "K线样本不足，缠论结构信号降权"
+          "只接近或突破 20 日高点，未出现明确回踩确认"
         ],
         "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
+          "score": 58.08,
+          "signals": [
+            "女上位: MA5 在 MA10 之上",
+            "多头排列: 收盘价站上 MA5/10/20",
+            "持股线: 未有效跌破 MA10",
+            "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+            "MACD背驰改善: 低点附近绿柱力度收敛",
+            "量能确认: 较 5 日均量 1.7 倍"
           ],
-          "metrics": {}
+          "warnings": [
+            "只接近或突破 20 日高点，未出现明确回踩确认"
+          ],
+          "metrics": {
+            "ma5": 4.554,
+            "ma10": 4.551,
+            "ma20": 4.414,
+            "ma30": 4.374,
+            "box_high": 4.93,
+            "box_low": 4.12,
+            "volume_ratio_5d": 1.69,
+            "distance_ma5_pct": 8.04,
+            "distance_ma10_pct": 8.11,
+            "distance_ma20_pct": 11.45,
+            "pct_3d": 11.82,
+            "pct_5d": 7.19,
+            "pct_10d": 12.59,
+            "close_position": 0.69,
+            "upper_shadow_pct": 2.24,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "last_kline_date": "2026-06-04"
+          }
         },
         "czsc": {
-          "score": 0.0,
-          "signals": [],
+          "score": 19.0,
+          "signals": [
+            "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+            "CZSC近似: 中期均线未走坏，适合两周窗口"
+          ],
           "warnings": [],
-          "metrics": {}
+          "metrics": {
+            "ma20": 4.414,
+            "ma30": 4.374,
+            "ma60": 4.401,
+            "box_high_45d": 4.65,
+            "box_low_45d": 4.11,
+            "pct_20d": 14.42
+          }
         },
         "uzi": {
-          "score": -12.0,
+          "score": 12.0,
           "signals": [
-            "UZI风控: 近5日未明显透支，仍有两周弹性"
+            "UZI风控: 近5日未明显透支，仍有两周弹性",
+            "UZI风控: 未触发杀猪盘/过热式硬拦截"
           ],
-          "warnings": [
-            "UZI风控: 单日涨幅过大，疑似已被抢跑",
-            "UZI风控: 风险标签过多"
-          ]
+          "warnings": []
         },
         "serenity": {
           "score": 0.0,
@@ -494,26 +240,28 @@
         }
       },
       {
-        "code": "000725",
-        "name": "京东方Ａ",
-        "price": 6.15,
-        "change_pct": 10.02,
-        "amount_yi": 199.5,
-        "turnover_pct": 9.14,
-        "vol_ratio": 0.98,
-        "float_mcap_yi": 2278.23,
-        "reason_tags": "玻璃基封装载板+康宁合作+回购注销",
+        "code": "600522",
+        "name": "中天科技",
+        "price": 46.06,
+        "change_pct": 2.4,
+        "amount_yi": 162.74,
+        "turnover_pct": 10.38,
+        "vol_ratio": 1.04,
+        "float_mcap_yi": 1572.0,
+        "reason_tags": "全市场稳健候选",
         "theme_tags": [],
-        "score": 17.51,
-        "pre_score": 45.51,
-        "chan_score": 0,
-        "czsc_score": 0.0,
+        "score": 103.05,
+        "pre_score": 48.68,
+        "chan_score": 33.83,
+        "czsc_score": 25.0,
         "serenity_score": 0.0,
-        "uzi_score": -12.0,
-        "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 35,
-        "recommendation_degree": 35,
+        "uzi_score": 4.0,
+        "setup_flags": [
+          "second_buy"
+        ],
+        "hard_risk_count": 0,
+        "confidence": 53,
+        "recommendation_degree": 53,
         "estimated_2w_range": {
           "low_pct": -6.0,
           "high_pct": 3.0,
@@ -524,44 +272,78 @@
           "high_pct": 3.0,
           "text": "-6.0% ~ +3.0%"
         },
-        "stop_loss": 5.78,
-        "take_profit_reference": 6.33,
-        "dragon_net_wan": 147331.9,
-        "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
+        "stop_loss": 43.3,
+        "take_profit_reference": 47.44,
+        "dragon_net_wan": 0.0,
+        "dragon_reason": "",
         "reasons": [
-          "龙虎榜净买入约 147332 万",
-          "UZI风控: 近5日未明显透支，仍有两周弹性",
-          "流动性: 成交 199.5 亿，换手 9.1%，未来2周观察"
+          "女上位: MA5 在 MA10 之上",
+          "持股线: 未有效跌破 MA10",
+          "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+          "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+          "CZSC近似: 中期均线未走坏，适合两周窗口",
+          "CZSC近似: 中枢上半区震荡，等待向上离开",
+          "UZI风控: 未触发杀猪盘/过热式硬拦截"
         ],
         "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
           "流通市值偏大，涨幅弹性受限",
-          "K线样本不足，缠论结构信号降权"
+          "偏离 MA10 9.1%，追高风险上升"
         ],
         "chan": {
-          "score": 0,
-          "signals": [],
-          "warnings": [
-            "K线样本不足，缠论结构信号降权"
+          "score": 33.83,
+          "signals": [
+            "女上位: MA5 在 MA10 之上",
+            "持股线: 未有效跌破 MA10",
+            "二买近似: 多头后回踩 MA5/MA10 并重新收回"
           ],
-          "metrics": {}
+          "warnings": [
+            "偏离 MA10 9.1%，追高风险上升"
+          ],
+          "metrics": {
+            "ma5": 43.102,
+            "ma10": 42.227,
+            "ma20": 42.78,
+            "ma30": 40.053,
+            "box_high": 47.4,
+            "box_low": 32.51,
+            "volume_ratio_5d": 1.04,
+            "distance_ma5_pct": 6.86,
+            "distance_ma10_pct": 9.08,
+            "distance_ma20_pct": 7.67,
+            "pct_3d": 16.93,
+            "pct_5d": 13.67,
+            "pct_10d": 9.93,
+            "close_position": 0.67,
+            "upper_shadow_pct": 2.43,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "last_kline_date": "2026-06-04"
+          }
         },
         "czsc": {
-          "score": 0.0,
-          "signals": [],
+          "score": 25.0,
+          "signals": [
+            "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+            "CZSC近似: 中期均线未走坏，适合两周窗口",
+            "CZSC近似: 中枢上半区震荡，等待向上离开"
+          ],
           "warnings": [],
-          "metrics": {}
+          "metrics": {
+            "ma20": 42.78,
+            "ma30": 40.053,
+            "ma60": 34.252,
+            "box_high_45d": 47.4,
+            "box_low_45d": 26.56,
+            "pct_20d": 20.01
+          }
         },
         "uzi": {
-          "score": -12.0,
+          "score": 4.0,
           "signals": [
-            "UZI风控: 近5日未明显透支，仍有两周弹性"
+            "UZI风控: 未触发杀猪盘/过热式硬拦截"
           ],
-          "warnings": [
-            "UZI风控: 单日涨幅过大，疑似已被抢跑",
-            "UZI风控: 风险标签过多"
-          ]
+          "warnings": []
         },
         "serenity": {
           "score": 0.0,
@@ -571,26 +353,26 @@
         }
       },
       {
-        "code": "002951",
-        "name": "金时科技",
-        "price": 24.79,
-        "change_pct": 9.98,
-        "amount_yi": 6.84,
-        "turnover_pct": 7.33,
-        "vol_ratio": 0.99,
-        "float_mcap_yi": 100.4,
-        "reason_tags": "超级电容+间接投资光纤公司+储能电站",
+        "code": "300475",
+        "name": "香农芯创",
+        "price": 184.96,
+        "change_pct": 4.48,
+        "amount_yi": 68.21,
+        "turnover_pct": 8.24,
+        "vol_ratio": 1.1,
+        "float_mcap_yi": 868.46,
+        "reason_tags": "全市场稳健候选",
         "theme_tags": [],
-        "score": 13.43,
-        "pre_score": 41.43,
+        "score": 101.2,
+        "pre_score": 61.65,
         "chan_score": 0,
         "czsc_score": 0.0,
-        "serenity_score": 0.0,
-        "uzi_score": -12.0,
+        "serenity_score": 54.7,
+        "uzi_score": 12.0,
         "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 35,
-        "recommendation_degree": 35,
+        "hard_risk_count": 1,
+        "confidence": 55,
+        "recommendation_degree": 55,
         "estimated_2w_range": {
           "low_pct": -6.0,
           "high_pct": 3.0,
@@ -601,18 +383,17 @@
           "high_pct": 3.0,
           "text": "-6.0% ~ +3.0%"
         },
-        "stop_loss": 23.3,
-        "take_profit_reference": 25.53,
-        "dragon_net_wan": 3823.3,
-        "dragon_reason": "日振幅值达到15%的前5只证券",
+        "stop_loss": 173.86,
+        "take_profit_reference": 190.51,
+        "dragon_net_wan": 0.0,
+        "dragon_reason": "",
         "reasons": [
-          "龙虎榜净买入约 3823 万",
+          "Serenity因子: 市值弹性相对更高",
           "UZI风控: 近5日未明显透支，仍有两周弹性",
-          "流动性: 成交 6.8 亿，换手 7.3%，未来2周观察"
+          "UZI风控: 未触发杀猪盘/过热式硬拦截",
+          "流动性: 成交 68.2 亿，换手 8.2%，未来2周观察"
         ],
         "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
           "K线样本不足，缠论结构信号降权"
         ],
         "chan": {
@@ -630,43 +411,43 @@
           "metrics": {}
         },
         "uzi": {
-          "score": -12.0,
+          "score": 12.0,
           "signals": [
-            "UZI风控: 近5日未明显透支，仍有两周弹性"
+            "UZI风控: 近5日未明显透支，仍有两周弹性",
+            "UZI风控: 未触发杀猪盘/过热式硬拦截"
           ],
-          "warnings": [
-            "UZI风控: 单日涨幅过大，疑似已被抢跑",
-            "UZI风控: 风险标签过多"
-          ]
+          "warnings": []
         },
         "serenity": {
-          "score": 0.0,
-          "role": "",
-          "principles": [],
+          "score": 54.7,
+          "role": "存储/HBM 产业链",
+          "principles": [
+            "Serenity因子: 市值弹性相对更高"
+          ],
           "risks": []
         }
       },
       {
-        "code": "605162",
-        "name": "新中港",
-        "price": 12.71,
-        "change_pct": 10.04,
-        "amount_yi": 4.03,
-        "turnover_pct": 7.35,
-        "vol_ratio": 1.22,
-        "float_mcap_yi": 56.29,
-        "reason_tags": "可转债赎回完成+热电联产+弗迪电池供热",
+        "code": "000988",
+        "name": "华工科技",
+        "price": 158.36,
+        "change_pct": 2.57,
+        "amount_yi": 119.2,
+        "turnover_pct": 7.6,
+        "vol_ratio": 0.85,
+        "float_mcap_yi": 1592.31,
+        "reason_tags": "全市场稳健候选",
         "theme_tags": [],
-        "score": 11.87,
-        "pre_score": 39.87,
-        "chan_score": 0,
-        "czsc_score": 0.0,
-        "serenity_score": 0.0,
-        "uzi_score": -12.0,
+        "score": 104.83,
+        "pre_score": 48.47,
+        "chan_score": -2.0,
+        "czsc_score": 25.0,
+        "serenity_score": 56.7,
+        "uzi_score": 4.0,
         "setup_flags": [],
-        "hard_risk_count": 2,
-        "confidence": 35,
-        "recommendation_degree": 35,
+        "hard_risk_count": 1,
+        "confidence": 53,
+        "recommendation_degree": 53,
         "estimated_2w_range": {
           "low_pct": -6.0,
           "high_pct": 3.0,
@@ -677,18 +458,125 @@
           "high_pct": 3.0,
           "text": "-6.0% ~ +3.0%"
         },
-        "stop_loss": 11.95,
-        "take_profit_reference": 13.09,
-        "dragon_net_wan": 6838.8,
+        "stop_loss": 148.86,
+        "take_profit_reference": 163.11,
+        "dragon_net_wan": 0.0,
+        "dragon_reason": "",
+        "reasons": [
+          "持股线: 未有效跌破 MA10",
+          "成本位置: 距 MA10 不远，两周风控更可控",
+          "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+          "CZSC近似: 中期均线未走坏，适合两周窗口",
+          "CZSC近似: 中枢上半区震荡，等待向上离开",
+          "UZI风控: 未触发杀猪盘/过热式硬拦截",
+          "流动性: 成交 119.2 亿，换手 7.6%，未来2周观察"
+        ],
+        "risk_flags": [
+          "流通市值偏大，涨幅弹性受限",
+          "没有二买/三买确认，容易变成追涨交易"
+        ],
+        "chan": {
+          "score": -2.0,
+          "signals": [
+            "持股线: 未有效跌破 MA10",
+            "成本位置: 距 MA10 不远，两周风控更可控"
+          ],
+          "warnings": [
+            "没有二买/三买确认，容易变成追涨交易"
+          ],
+          "metrics": {
+            "ma5": 151.398,
+            "ma10": 158.107,
+            "ma20": 152.306,
+            "ma30": 141.599,
+            "box_high": 175.8,
+            "box_low": 114.38,
+            "volume_ratio_5d": 0.85,
+            "distance_ma5_pct": 4.6,
+            "distance_ma10_pct": 0.16,
+            "distance_ma20_pct": 3.97,
+            "pct_3d": 10.69,
+            "pct_5d": -4.39,
+            "pct_10d": 2.86,
+            "close_position": 0.75,
+            "upper_shadow_pct": 1.72,
+            "setup_flags": [],
+            "last_kline_date": "2026-06-04"
+          }
+        },
+        "czsc": {
+          "score": 25.0,
+          "signals": [
+            "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+            "CZSC近似: 中期均线未走坏，适合两周窗口",
+            "CZSC近似: 中枢上半区震荡，等待向上离开"
+          ],
+          "warnings": [],
+          "metrics": {
+            "ma20": 152.306,
+            "ma30": 141.599,
+            "ma60": 127.887,
+            "box_high_45d": 170.88,
+            "box_low_45d": 99.87,
+            "pct_20d": 18.62
+          }
+        },
+        "uzi": {
+          "score": 4.0,
+          "signals": [
+            "UZI风控: 未触发杀猪盘/过热式硬拦截"
+          ],
+          "warnings": []
+        },
+        "serenity": {
+          "score": 56.7,
+          "role": "光模块/激光加工",
+          "principles": [],
+          "risks": []
+        }
+      },
+      {
+        "code": "600549",
+        "name": "厦门钨业",
+        "price": 63.73,
+        "change_pct": 6.2,
+        "amount_yi": 77.52,
+        "turnover_pct": 8.16,
+        "vol_ratio": 1.51,
+        "float_mcap_yi": 1011.77,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 86.52,
+        "pre_score": 82.52,
+        "chan_score": 0,
+        "czsc_score": 0.0,
+        "serenity_score": 0.0,
+        "uzi_score": 12.0,
+        "setup_flags": [],
+        "hard_risk_count": 1,
+        "confidence": 51,
+        "recommendation_degree": 51,
+        "estimated_2w_range": {
+          "low_pct": -6.0,
+          "high_pct": 3.0,
+          "text": "-6.0% ~ +3.0%"
+        },
+        "estimated_2d_range": {
+          "low_pct": -6.0,
+          "high_pct": 3.0,
+          "text": "-6.0% ~ +3.0%"
+        },
+        "stop_loss": 59.91,
+        "take_profit_reference": 65.64,
+        "dragon_net_wan": 119424.2,
         "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
         "reasons": [
-          "龙虎榜净买入约 6839 万",
+          "龙虎榜净买入约 119424 万",
           "UZI风控: 近5日未明显透支，仍有两周弹性",
-          "流动性: 成交 4.0 亿，换手 7.3%，未来2周观察"
+          "UZI风控: 未触发杀猪盘/过热式硬拦截",
+          "流动性: 成交 77.5 亿，换手 8.2%，未来2周观察"
         ],
         "risk_flags": [
-          "信号日涨停，次日追高风险",
-          "10cm 涨停后，隔日接力不确定",
           "K线样本不足，缠论结构信号降权"
         ],
         "chan": {
@@ -706,14 +594,267 @@
           "metrics": {}
         },
         "uzi": {
-          "score": -12.0,
+          "score": 12.0,
           "signals": [
-            "UZI风控: 近5日未明显透支，仍有两周弹性"
+            "UZI风控: 近5日未明显透支，仍有两周弹性",
+            "UZI风控: 未触发杀猪盘/过热式硬拦截"
+          ],
+          "warnings": []
+        },
+        "serenity": {
+          "score": 0.0,
+          "role": "",
+          "principles": [],
+          "risks": []
+        }
+      },
+      {
+        "code": "601689",
+        "name": "拓普集团",
+        "price": 67.6,
+        "change_pct": 7.94,
+        "amount_yi": 46.37,
+        "turnover_pct": 4.0,
+        "vol_ratio": 1.7,
+        "float_mcap_yi": 1174.78,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 85.61,
+        "pre_score": 54.28,
+        "chan_score": 3.1,
+        "czsc_score": 25.0,
+        "serenity_score": 0.0,
+        "uzi_score": 12.0,
+        "setup_flags": [],
+        "hard_risk_count": 1,
+        "confidence": 51,
+        "recommendation_degree": 51,
+        "estimated_2w_range": {
+          "low_pct": -6.0,
+          "high_pct": 3.0,
+          "text": "-6.0% ~ +3.0%"
+        },
+        "estimated_2d_range": {
+          "low_pct": -6.0,
+          "high_pct": 3.0,
+          "text": "-6.0% ~ +3.0%"
+        },
+        "stop_loss": 63.54,
+        "take_profit_reference": 69.63,
+        "dragon_net_wan": 0.0,
+        "dragon_reason": "",
+        "reasons": [
+          "持股线: 未有效跌破 MA10",
+          "量能确认: 较 5 日均量 1.7 倍",
+          "成本位置: 距 MA10 不远，两周风控更可控",
+          "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+          "CZSC近似: 中期均线未走坏，适合两周窗口",
+          "CZSC近似: 中枢上半区震荡，等待向上离开",
+          "UZI风控: 近5日未明显透支，仍有两周弹性"
+        ],
+        "risk_flags": [
+          "没有二买/三买确认，容易变成追涨交易"
+        ],
+        "chan": {
+          "score": 3.1,
+          "signals": [
+            "持股线: 未有效跌破 MA10",
+            "量能确认: 较 5 日均量 1.7 倍",
+            "成本位置: 距 MA10 不远，两周风控更可控"
           ],
           "warnings": [
-            "UZI风控: 单日涨幅过大，疑似已被抢跑",
-            "UZI风控: 风险标签过多"
-          ]
+            "没有二买/三买确认，容易变成追涨交易"
+          ],
+          "metrics": {
+            "ma5": 63.354,
+            "ma10": 66.507,
+            "ma20": 67.431,
+            "ma30": 64.586,
+            "box_high": 74.85,
+            "box_low": 55.53,
+            "volume_ratio_5d": 1.7,
+            "distance_ma5_pct": 6.7,
+            "distance_ma10_pct": 1.64,
+            "distance_ma20_pct": 0.25,
+            "pct_3d": 10.49,
+            "pct_5d": 2.7,
+            "pct_10d": -6.27,
+            "close_position": 0.83,
+            "upper_shadow_pct": 1.69,
+            "setup_flags": [],
+            "last_kline_date": "2026-06-04"
+          }
+        },
+        "czsc": {
+          "score": 25.0,
+          "signals": [
+            "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+            "CZSC近似: 中期均线未走坏，适合两周窗口",
+            "CZSC近似: 中枢上半区震荡，等待向上离开"
+          ],
+          "warnings": [],
+          "metrics": {
+            "ma20": 67.431,
+            "ma30": 64.586,
+            "ma60": 62.001,
+            "box_high_45d": 74.19,
+            "box_low_45d": 55.46,
+            "pct_20d": 5.66
+          }
+        },
+        "uzi": {
+          "score": 12.0,
+          "signals": [
+            "UZI风控: 近5日未明显透支，仍有两周弹性",
+            "UZI风控: 未触发杀猪盘/过热式硬拦截"
+          ],
+          "warnings": []
+        },
+        "serenity": {
+          "score": 0.0,
+          "role": "",
+          "principles": [],
+          "risks": []
+        }
+      },
+      {
+        "code": "600726",
+        "name": "华电能源",
+        "price": 10.39,
+        "change_pct": 7.0,
+        "amount_yi": 57.52,
+        "turnover_pct": 7.58,
+        "vol_ratio": 1.53,
+        "float_mcap_yi": 821.57,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 85.28,
+        "pre_score": 81.28,
+        "chan_score": 0,
+        "czsc_score": 0.0,
+        "serenity_score": 0.0,
+        "uzi_score": 12.0,
+        "setup_flags": [],
+        "hard_risk_count": 1,
+        "confidence": 51,
+        "recommendation_degree": 51,
+        "estimated_2w_range": {
+          "low_pct": -6.0,
+          "high_pct": 3.0,
+          "text": "-6.0% ~ +3.0%"
+        },
+        "estimated_2d_range": {
+          "low_pct": -6.0,
+          "high_pct": 3.0,
+          "text": "-6.0% ~ +3.0%"
+        },
+        "stop_loss": 9.77,
+        "take_profit_reference": 10.7,
+        "dragon_net_wan": 25509.1,
+        "dragon_reason": "有价格涨跌幅限制的日价格振幅达到15%的前五只证券",
+        "reasons": [
+          "龙虎榜净买入约 25509 万",
+          "UZI风控: 近5日未明显透支，仍有两周弹性",
+          "UZI风控: 未触发杀猪盘/过热式硬拦截",
+          "流动性: 成交 57.5 亿，换手 7.6%，未来2周观察"
+        ],
+        "risk_flags": [
+          "K线样本不足，缠论结构信号降权"
+        ],
+        "chan": {
+          "score": 0,
+          "signals": [],
+          "warnings": [
+            "K线样本不足，缠论结构信号降权"
+          ],
+          "metrics": {}
+        },
+        "czsc": {
+          "score": 0.0,
+          "signals": [],
+          "warnings": [],
+          "metrics": {}
+        },
+        "uzi": {
+          "score": 12.0,
+          "signals": [
+            "UZI风控: 近5日未明显透支，仍有两周弹性",
+            "UZI风控: 未触发杀猪盘/过热式硬拦截"
+          ],
+          "warnings": []
+        },
+        "serenity": {
+          "score": 0.0,
+          "role": "",
+          "principles": [],
+          "risks": []
+        }
+      },
+      {
+        "code": "601208",
+        "name": "东材科技",
+        "price": 59.6,
+        "change_pct": 5.51,
+        "amount_yi": 63.95,
+        "turnover_pct": 10.95,
+        "vol_ratio": 1.12,
+        "float_mcap_yi": 602.07,
+        "reason_tags": "全市场稳健候选",
+        "theme_tags": [],
+        "score": 83.42,
+        "pre_score": 79.42,
+        "chan_score": 0,
+        "czsc_score": 0.0,
+        "serenity_score": 0.0,
+        "uzi_score": 12.0,
+        "setup_flags": [],
+        "hard_risk_count": 1,
+        "confidence": 50,
+        "recommendation_degree": 50,
+        "estimated_2w_range": {
+          "low_pct": -6.0,
+          "high_pct": 3.0,
+          "text": "-6.0% ~ +3.0%"
+        },
+        "estimated_2d_range": {
+          "low_pct": -6.0,
+          "high_pct": 3.0,
+          "text": "-6.0% ~ +3.0%"
+        },
+        "stop_loss": 56.02,
+        "take_profit_reference": 61.39,
+        "dragon_net_wan": 38135.4,
+        "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
+        "reasons": [
+          "龙虎榜净买入约 38135 万",
+          "UZI风控: 近5日未明显透支，仍有两周弹性",
+          "UZI风控: 未触发杀猪盘/过热式硬拦截",
+          "流动性: 成交 64.0 亿，换手 10.9%，未来2周观察"
+        ],
+        "risk_flags": [
+          "K线样本不足，缠论结构信号降权"
+        ],
+        "chan": {
+          "score": 0,
+          "signals": [],
+          "warnings": [
+            "K线样本不足，缠论结构信号降权"
+          ],
+          "metrics": {}
+        },
+        "czsc": {
+          "score": 0.0,
+          "signals": [],
+          "warnings": [],
+          "metrics": {}
+        },
+        "uzi": {
+          "score": 12.0,
+          "signals": [
+            "UZI风控: 近5日未明显透支，仍有两周弹性",
+            "UZI风控: 未触发杀猪盘/过热式硬拦截"
+          ],
+          "warnings": []
         },
         "serenity": {
           "score": 0.0,
@@ -730,81 +871,111 @@
       "label": "A股",
       "description": "A股强势池 + CZSC结构 + UZI风控 + Serenity AI 上游瓶颈权重。",
       "decision": {
-        "action": "NO_TRADE",
-        "title": "无推荐",
-        "message": "推荐度低于 64；硬风险项过多，不适合未来2周持有；候选股风险标签过多；信号日已接近涨停，次日追高性价比不足；预估下行空间过大",
-        "primary": null,
-        "blocked_candidate": {
-          "code": "000733",
-          "name": "振华科技",
-          "price": 59.31,
-          "change_pct": 10.0,
-          "amount_yi": 43.83,
-          "turnover_pct": 13.87,
-          "vol_ratio": 1.49,
-          "float_mcap_yi": 328.68,
-          "reason_tags": "MLCC+超级电容+商业航天+央企",
-          "theme_tags": [
-            "商业航天"
-          ],
-          "score": 26.14,
-          "pre_score": 54.14,
-          "chan_score": 0,
-          "czsc_score": 0.0,
+        "action": "BUY_CANDIDATE",
+        "title": "两周推荐",
+        "message": "满足未来2周上涨的趋势结构、资金承接和风控阈值。",
+        "primary": {
+          "code": "301526",
+          "name": "国际复材",
+          "price": 22.69,
+          "change_pct": 3.09,
+          "amount_yi": 36.27,
+          "turnover_pct": 11.46,
+          "vol_ratio": 0.82,
+          "float_mcap_yi": 855.61,
+          "reason_tags": "全市场稳健候选",
+          "theme_tags": [],
+          "score": 131.24,
+          "pre_score": 54.74,
+          "chan_score": 50.0,
+          "czsc_score": 35.0,
           "serenity_score": 0.0,
-          "uzi_score": -12.0,
-          "setup_flags": [],
-          "hard_risk_count": 2,
-          "confidence": 35,
-          "recommendation_degree": 35,
+          "uzi_score": 4.0,
+          "setup_flags": [
+            "second_buy"
+          ],
+          "hard_risk_count": 0,
+          "confidence": 67,
+          "recommendation_degree": 67,
           "estimated_2w_range": {
-            "low_pct": -6.0,
-            "high_pct": 3.0,
-            "text": "-6.0% ~ +3.0%"
+            "low_pct": -2.9,
+            "high_pct": 8.7,
+            "text": "-2.9% ~ +8.7%"
           },
           "estimated_2d_range": {
-            "low_pct": -6.0,
-            "high_pct": 3.0,
-            "text": "-6.0% ~ +3.0%"
+            "low_pct": -2.9,
+            "high_pct": 8.7,
+            "text": "-2.9% ~ +8.7%"
           },
-          "stop_loss": 55.75,
-          "take_profit_reference": 61.09,
-          "dragon_net_wan": 42181.7,
-          "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
+          "stop_loss": 21.33,
+          "take_profit_reference": 24.66,
+          "dragon_net_wan": 0.0,
+          "dragon_reason": "",
           "reasons": [
-            "题材命中: 商业航天",
-            "龙虎榜净买入约 42182 万",
-            "UZI风控: 近5日未明显透支，仍有两周弹性",
-            "流动性: 成交 43.8 亿，换手 13.9%，未来2周观察"
+            "女上位: MA5 在 MA10 之上",
+            "多头排列: 收盘价站上 MA5/10/20",
+            "持股线: 未有效跌破 MA10",
+            "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+            "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+            "CZSC近似: 中期均线未走坏，适合两周窗口",
+            "CZSC近似: 突破中枢后回踩未破"
           ],
-          "risk_flags": [
-            "信号日涨停，次日追高风险",
-            "10cm 涨停后，隔日接力不确定",
-            "K线样本不足，缠论结构信号降权"
-          ],
+          "risk_flags": [],
           "chan": {
-            "score": 0,
-            "signals": [],
-            "warnings": [
-              "K线样本不足，缠论结构信号降权"
+            "score": 50.0,
+            "signals": [
+              "女上位: MA5 在 MA10 之上",
+              "多头排列: 收盘价站上 MA5/10/20",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "成本位置: 距 MA10 不远，两周风控更可控"
             ],
-            "metrics": {}
+            "warnings": [],
+            "metrics": {
+              "ma5": 22.518,
+              "ma10": 22.38,
+              "ma20": 20.534,
+              "ma30": 19.036,
+              "box_high": 25.0,
+              "box_low": 14.54,
+              "volume_ratio_5d": 0.82,
+              "distance_ma5_pct": 0.76,
+              "distance_ma10_pct": 1.39,
+              "distance_ma20_pct": 10.5,
+              "pct_3d": 6.23,
+              "pct_5d": -8.43,
+              "pct_10d": 27.4,
+              "close_position": 0.66,
+              "upper_shadow_pct": 2.69,
+              "setup_flags": [
+                "second_buy"
+              ],
+              "last_kline_date": "2026-06-04"
+            }
           },
           "czsc": {
-            "score": 0.0,
-            "signals": [],
+            "score": 35.0,
+            "signals": [
+              "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+              "CZSC近似: 中期均线未走坏，适合两周窗口",
+              "CZSC近似: 突破中枢后回踩未破"
+            ],
             "warnings": [],
-            "metrics": {}
+            "metrics": {
+              "ma20": 20.534,
+              "ma30": 19.036,
+              "ma60": 15.626,
+              "box_high_45d": 20.58,
+              "box_low_45d": 10.8,
+              "pct_20d": 18.18
+            }
           },
           "uzi": {
-            "score": -12.0,
+            "score": 4.0,
             "signals": [
-              "UZI风控: 近5日未明显透支，仍有两周弹性"
+              "UZI风控: 未触发杀猪盘/过热式硬拦截"
             ],
-            "warnings": [
-              "UZI风控: 单日涨幅过大，疑似已被抢跑",
-              "UZI风控: 风险标签过多"
-            ]
+            "warnings": []
           },
           "serenity": {
             "score": 0.0,
@@ -815,396 +986,112 @@
         },
         "watchlist": [
           {
-            "code": "000733",
-            "name": "振华科技",
-            "price": 59.31,
-            "change_pct": 10.0,
-            "amount_yi": 43.83,
-            "turnover_pct": 13.87,
-            "vol_ratio": 1.49,
-            "float_mcap_yi": 328.68,
-            "reason_tags": "MLCC+超级电容+商业航天+央企",
-            "theme_tags": [
-              "商业航天"
-            ],
-            "score": 26.14,
-            "pre_score": 54.14,
-            "chan_score": 0,
-            "czsc_score": 0.0,
+            "code": "000100",
+            "name": "TCL科技",
+            "price": 4.92,
+            "change_pct": 3.8,
+            "amount_yi": 103.64,
+            "turnover_pct": 11.14,
+            "vol_ratio": 1.69,
+            "float_mcap_yi": 1023.4,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 136.23,
+            "pre_score": 61.67,
+            "chan_score": 58.08,
+            "czsc_score": 19.0,
             "serenity_score": 0.0,
-            "uzi_score": -12.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 35,
-            "recommendation_degree": 35,
+            "uzi_score": 12.0,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "hard_risk_count": 0,
+            "confidence": 65,
+            "recommendation_degree": 65,
             "estimated_2w_range": {
-              "low_pct": -6.0,
-              "high_pct": 3.0,
-              "text": "-6.0% ~ +3.0%"
+              "low_pct": -3.3,
+              "high_pct": 7.9,
+              "text": "-3.3% ~ +7.9%"
             },
             "estimated_2d_range": {
-              "low_pct": -6.0,
-              "high_pct": 3.0,
-              "text": "-6.0% ~ +3.0%"
+              "low_pct": -3.3,
+              "high_pct": 7.9,
+              "text": "-3.3% ~ +7.9%"
             },
-            "stop_loss": 55.75,
-            "take_profit_reference": 61.09,
-            "dragon_net_wan": 42181.7,
-            "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
-            "reasons": [
-              "题材命中: 商业航天",
-              "龙虎榜净买入约 42182 万",
-              "UZI风控: 近5日未明显透支，仍有两周弹性",
-              "流动性: 成交 43.8 亿，换手 13.9%，未来2周观察"
-            ],
-            "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "K线样本不足，缠论结构信号降权"
-            ],
-            "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
-              ],
-              "metrics": {}
-            },
-            "czsc": {
-              "score": 0.0,
-              "signals": [],
-              "warnings": [],
-              "metrics": {}
-            },
-            "uzi": {
-              "score": -12.0,
-              "signals": [
-                "UZI风控: 近5日未明显透支，仍有两周弹性"
-              ],
-              "warnings": [
-                "UZI风控: 单日涨幅过大，疑似已被抢跑",
-                "UZI风控: 风险标签过多"
-              ]
-            },
-            "serenity": {
-              "score": 0.0,
-              "role": "",
-              "principles": [],
-              "risks": []
-            }
-          },
-          {
-            "code": "600667",
-            "name": "太极实业",
-            "price": 16.36,
-            "change_pct": 10.02,
-            "amount_yi": 30.64,
-            "turnover_pct": 9.24,
-            "vol_ratio": 0.56,
-            "float_mcap_yi": 342.18,
-            "reason_tags": "存储芯片+SK海力士+先进封装+无锡国资",
-            "theme_tags": [
-              "先进封装",
-              "存储芯片"
-            ],
-            "score": 25.09,
-            "pre_score": 53.09,
-            "chan_score": 0,
-            "czsc_score": 0.0,
-            "serenity_score": 0.0,
-            "uzi_score": -12.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 35,
-            "recommendation_degree": 35,
-            "estimated_2w_range": {
-              "low_pct": -6.0,
-              "high_pct": 3.0,
-              "text": "-6.0% ~ +3.0%"
-            },
-            "estimated_2d_range": {
-              "low_pct": -6.0,
-              "high_pct": 3.0,
-              "text": "-6.0% ~ +3.0%"
-            },
-            "stop_loss": 15.38,
-            "take_profit_reference": 16.85,
-            "dragon_net_wan": 7435.4,
-            "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
-            "reasons": [
-              "题材命中: 先进封装、存储芯片",
-              "龙虎榜净买入约 7435 万",
-              "UZI风控: 近5日未明显透支，仍有两周弹性",
-              "流动性: 成交 30.6 亿，换手 9.2%，未来2周观察"
-            ],
-            "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "K线样本不足，缠论结构信号降权"
-            ],
-            "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
-              ],
-              "metrics": {}
-            },
-            "czsc": {
-              "score": 0.0,
-              "signals": [],
-              "warnings": [],
-              "metrics": {}
-            },
-            "uzi": {
-              "score": -12.0,
-              "signals": [
-                "UZI风控: 近5日未明显透支，仍有两周弹性"
-              ],
-              "warnings": [
-                "UZI风控: 单日涨幅过大，疑似已被抢跑",
-                "UZI风控: 风险标签过多"
-              ]
-            },
-            "serenity": {
-              "score": 0.0,
-              "role": "",
-              "principles": [],
-              "risks": []
-            }
-          },
-          {
-            "code": "001309",
-            "name": "德明利",
-            "price": 680.85,
-            "change_pct": 10.0,
-            "amount_yi": 126.89,
-            "turnover_pct": 11.62,
-            "vol_ratio": 1.61,
-            "float_mcap_yi": 1544.48,
-            "reason_tags": "存储芯片+企业级SSD+一季报增长",
-            "theme_tags": [
-              "存储芯片"
-            ],
-            "score": 20.22,
-            "pre_score": 48.22,
-            "chan_score": 0,
-            "czsc_score": 0.0,
-            "serenity_score": 0.0,
-            "uzi_score": -12.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 35,
-            "recommendation_degree": 35,
-            "estimated_2w_range": {
-              "low_pct": -6.0,
-              "high_pct": 3.0,
-              "text": "-6.0% ~ +3.0%"
-            },
-            "estimated_2d_range": {
-              "low_pct": -6.0,
-              "high_pct": 3.0,
-              "text": "-6.0% ~ +3.0%"
-            },
-            "stop_loss": 640.0,
-            "take_profit_reference": 701.28,
-            "dragon_net_wan": 10307.6,
-            "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
-            "reasons": [
-              "题材命中: 存储芯片",
-              "龙虎榜净买入约 10308 万",
-              "UZI风控: 近5日未明显透支，仍有两周弹性",
-              "流动性: 成交 126.9 亿，换手 11.6%，未来2周观察"
-            ],
-            "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "流通市值偏大，涨幅弹性受限",
-              "K线样本不足，缠论结构信号降权"
-            ],
-            "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
-              ],
-              "metrics": {}
-            },
-            "czsc": {
-              "score": 0.0,
-              "signals": [],
-              "warnings": [],
-              "metrics": {}
-            },
-            "uzi": {
-              "score": -12.0,
-              "signals": [
-                "UZI风控: 近5日未明显透支，仍有两周弹性"
-              ],
-              "warnings": [
-                "UZI风控: 单日涨幅过大，疑似已被抢跑",
-                "UZI风控: 风险标签过多"
-              ]
-            },
-            "serenity": {
-              "score": 0.0,
-              "role": "",
-              "principles": [],
-              "risks": []
-            }
-          },
-          {
-            "code": "600246",
-            "name": "万通发展",
-            "price": 18.87,
-            "change_pct": 10.03,
-            "amount_yi": 27.0,
-            "turnover_pct": 7.98,
-            "vol_ratio": 0.69,
-            "float_mcap_yi": 366.64,
-            "reason_tags": "高速交换芯片+PCIe5.0芯片+存储芯片",
-            "theme_tags": [
-              "存储芯片"
-            ],
-            "score": 19.22,
-            "pre_score": 47.22,
-            "chan_score": 0,
-            "czsc_score": 0.0,
-            "serenity_score": 0.0,
-            "uzi_score": -12.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 35,
-            "recommendation_degree": 35,
-            "estimated_2w_range": {
-              "low_pct": -6.0,
-              "high_pct": 3.0,
-              "text": "-6.0% ~ +3.0%"
-            },
-            "estimated_2d_range": {
-              "low_pct": -6.0,
-              "high_pct": 3.0,
-              "text": "-6.0% ~ +3.0%"
-            },
-            "stop_loss": 17.74,
-            "take_profit_reference": 19.44,
-            "dragon_net_wan": 10229.0,
-            "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
-            "reasons": [
-              "题材命中: 存储芯片",
-              "龙虎榜净买入约 10229 万",
-              "UZI风控: 近5日未明显透支，仍有两周弹性",
-              "流动性: 成交 27.0 亿，换手 8.0%，未来2周观察"
-            ],
-            "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "K线样本不足，缠论结构信号降权"
-            ],
-            "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
-              ],
-              "metrics": {}
-            },
-            "czsc": {
-              "score": 0.0,
-              "signals": [],
-              "warnings": [],
-              "metrics": {}
-            },
-            "uzi": {
-              "score": -12.0,
-              "signals": [
-                "UZI风控: 近5日未明显透支，仍有两周弹性"
-              ],
-              "warnings": [
-                "UZI风控: 单日涨幅过大，疑似已被抢跑",
-                "UZI风控: 风险标签过多"
-              ]
-            },
-            "serenity": {
-              "score": 0.0,
-              "role": "",
-              "principles": [],
-              "risks": []
-            }
-          },
-          {
-            "code": "603920",
-            "name": "世运电路",
-            "price": 62.69,
-            "change_pct": 10.0,
-            "amount_yi": 21.59,
-            "turnover_pct": 4.87,
-            "vol_ratio": 0.81,
-            "float_mcap_yi": 451.74,
-            "reason_tags": "AI PCB+人形机器人+CPO",
-            "theme_tags": [
-              "CPO",
-              "PCB",
-              "机器人",
-              "人形机器人"
-            ],
-            "score": 17.61,
-            "pre_score": 45.61,
-            "chan_score": 0,
-            "czsc_score": 0.0,
-            "serenity_score": 0.0,
-            "uzi_score": -12.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 35,
-            "recommendation_degree": 35,
-            "estimated_2w_range": {
-              "low_pct": -6.0,
-              "high_pct": 3.0,
-              "text": "-6.0% ~ +3.0%"
-            },
-            "estimated_2d_range": {
-              "low_pct": -6.0,
-              "high_pct": 3.0,
-              "text": "-6.0% ~ +3.0%"
-            },
-            "stop_loss": 58.93,
-            "take_profit_reference": 64.57,
+            "stop_loss": 4.62,
+            "take_profit_reference": 5.31,
             "dragon_net_wan": 0.0,
             "dragon_reason": "",
             "reasons": [
-              "题材命中: CPO、PCB、机器人、人形机器人",
-              "UZI风控: 近5日未明显透支，仍有两周弹性",
-              "流动性: 成交 21.6 亿，换手 4.9%，未来2周观察"
+              "女上位: MA5 在 MA10 之上",
+              "多头排列: 收盘价站上 MA5/10/20",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+              "CZSC近似: 中期均线未走坏，适合两周窗口",
+              "UZI风控: 近5日未明显透支，仍有两周弹性"
             ],
             "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
-              "K线样本不足，缠论结构信号降权"
+              "只接近或突破 20 日高点，未出现明确回踩确认"
             ],
             "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
+              "score": 58.08,
+              "signals": [
+                "女上位: MA5 在 MA10 之上",
+                "多头排列: 收盘价站上 MA5/10/20",
+                "持股线: 未有效跌破 MA10",
+                "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+                "MACD背驰改善: 低点附近绿柱力度收敛",
+                "量能确认: 较 5 日均量 1.7 倍"
               ],
-              "metrics": {}
+              "warnings": [
+                "只接近或突破 20 日高点，未出现明确回踩确认"
+              ],
+              "metrics": {
+                "ma5": 4.554,
+                "ma10": 4.551,
+                "ma20": 4.414,
+                "ma30": 4.374,
+                "box_high": 4.93,
+                "box_low": 4.12,
+                "volume_ratio_5d": 1.69,
+                "distance_ma5_pct": 8.04,
+                "distance_ma10_pct": 8.11,
+                "distance_ma20_pct": 11.45,
+                "pct_3d": 11.82,
+                "pct_5d": 7.19,
+                "pct_10d": 12.59,
+                "close_position": 0.69,
+                "upper_shadow_pct": 2.24,
+                "setup_flags": [
+                  "second_buy"
+                ],
+                "last_kline_date": "2026-06-04"
+              }
             },
             "czsc": {
-              "score": 0.0,
-              "signals": [],
+              "score": 19.0,
+              "signals": [
+                "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+                "CZSC近似: 中期均线未走坏，适合两周窗口"
+              ],
               "warnings": [],
-              "metrics": {}
+              "metrics": {
+                "ma20": 4.414,
+                "ma30": 4.374,
+                "ma60": 4.401,
+                "box_high_45d": 4.65,
+                "box_low_45d": 4.11,
+                "pct_20d": 14.42
+              }
             },
             "uzi": {
-              "score": -12.0,
+              "score": 12.0,
               "signals": [
-                "UZI风控: 近5日未明显透支，仍有两周弹性"
+                "UZI风控: 近5日未明显透支，仍有两周弹性",
+                "UZI风控: 未触发杀猪盘/过热式硬拦截"
               ],
-              "warnings": [
-                "UZI风控: 单日涨幅过大，疑似已被抢跑",
-                "UZI风控: 风险标签过多"
-              ]
+              "warnings": []
             },
             "serenity": {
               "score": 0.0,
@@ -1214,26 +1101,28 @@
             }
           },
           {
-            "code": "000725",
-            "name": "京东方Ａ",
-            "price": 6.15,
-            "change_pct": 10.02,
-            "amount_yi": 199.5,
-            "turnover_pct": 9.14,
-            "vol_ratio": 0.98,
-            "float_mcap_yi": 2278.23,
-            "reason_tags": "玻璃基封装载板+康宁合作+回购注销",
+            "code": "600522",
+            "name": "中天科技",
+            "price": 46.06,
+            "change_pct": 2.4,
+            "amount_yi": 162.74,
+            "turnover_pct": 10.38,
+            "vol_ratio": 1.04,
+            "float_mcap_yi": 1572.0,
+            "reason_tags": "全市场稳健候选",
             "theme_tags": [],
-            "score": 17.51,
-            "pre_score": 45.51,
-            "chan_score": 0,
-            "czsc_score": 0.0,
+            "score": 103.05,
+            "pre_score": 48.68,
+            "chan_score": 33.83,
+            "czsc_score": 25.0,
             "serenity_score": 0.0,
-            "uzi_score": -12.0,
-            "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 35,
-            "recommendation_degree": 35,
+            "uzi_score": 4.0,
+            "setup_flags": [
+              "second_buy"
+            ],
+            "hard_risk_count": 0,
+            "confidence": 53,
+            "recommendation_degree": 53,
             "estimated_2w_range": {
               "low_pct": -6.0,
               "high_pct": 3.0,
@@ -1244,44 +1133,78 @@
               "high_pct": 3.0,
               "text": "-6.0% ~ +3.0%"
             },
-            "stop_loss": 5.78,
-            "take_profit_reference": 6.33,
-            "dragon_net_wan": 147331.9,
-            "dragon_reason": "日涨幅偏离值达到7%的前5只证券",
+            "stop_loss": 43.3,
+            "take_profit_reference": 47.44,
+            "dragon_net_wan": 0.0,
+            "dragon_reason": "",
             "reasons": [
-              "龙虎榜净买入约 147332 万",
-              "UZI风控: 近5日未明显透支，仍有两周弹性",
-              "流动性: 成交 199.5 亿，换手 9.1%，未来2周观察"
+              "女上位: MA5 在 MA10 之上",
+              "持股线: 未有效跌破 MA10",
+              "二买近似: 多头后回踩 MA5/MA10 并重新收回",
+              "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+              "CZSC近似: 中期均线未走坏，适合两周窗口",
+              "CZSC近似: 中枢上半区震荡，等待向上离开",
+              "UZI风控: 未触发杀猪盘/过热式硬拦截"
             ],
             "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
               "流通市值偏大，涨幅弹性受限",
-              "K线样本不足，缠论结构信号降权"
+              "偏离 MA10 9.1%，追高风险上升"
             ],
             "chan": {
-              "score": 0,
-              "signals": [],
-              "warnings": [
-                "K线样本不足，缠论结构信号降权"
+              "score": 33.83,
+              "signals": [
+                "女上位: MA5 在 MA10 之上",
+                "持股线: 未有效跌破 MA10",
+                "二买近似: 多头后回踩 MA5/MA10 并重新收回"
               ],
-              "metrics": {}
+              "warnings": [
+                "偏离 MA10 9.1%，追高风险上升"
+              ],
+              "metrics": {
+                "ma5": 43.102,
+                "ma10": 42.227,
+                "ma20": 42.78,
+                "ma30": 40.053,
+                "box_high": 47.4,
+                "box_low": 32.51,
+                "volume_ratio_5d": 1.04,
+                "distance_ma5_pct": 6.86,
+                "distance_ma10_pct": 9.08,
+                "distance_ma20_pct": 7.67,
+                "pct_3d": 16.93,
+                "pct_5d": 13.67,
+                "pct_10d": 9.93,
+                "close_position": 0.67,
+                "upper_shadow_pct": 2.43,
+                "setup_flags": [
+                  "second_buy"
+                ],
+                "last_kline_date": "2026-06-04"
+              }
             },
             "czsc": {
-              "score": 0.0,
-              "signals": [],
+              "score": 25.0,
+              "signals": [
+                "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+                "CZSC近似: 中期均线未走坏，适合两周窗口",
+                "CZSC近似: 中枢上半区震荡，等待向上离开"
+              ],
               "warnings": [],
-              "metrics": {}
+              "metrics": {
+                "ma20": 42.78,
+                "ma30": 40.053,
+                "ma60": 34.252,
+                "box_high_45d": 47.4,
+                "box_low_45d": 26.56,
+                "pct_20d": 20.01
+              }
             },
             "uzi": {
-              "score": -12.0,
+              "score": 4.0,
               "signals": [
-                "UZI风控: 近5日未明显透支，仍有两周弹性"
+                "UZI风控: 未触发杀猪盘/过热式硬拦截"
               ],
-              "warnings": [
-                "UZI风控: 单日涨幅过大，疑似已被抢跑",
-                "UZI风控: 风险标签过多"
-              ]
+              "warnings": []
             },
             "serenity": {
               "score": 0.0,
@@ -1291,26 +1214,26 @@
             }
           },
           {
-            "code": "002951",
-            "name": "金时科技",
-            "price": 24.79,
-            "change_pct": 9.98,
-            "amount_yi": 6.84,
-            "turnover_pct": 7.33,
-            "vol_ratio": 0.99,
-            "float_mcap_yi": 100.4,
-            "reason_tags": "超级电容+间接投资光纤公司+储能电站",
+            "code": "300475",
+            "name": "香农芯创",
+            "price": 184.96,
+            "change_pct": 4.48,
+            "amount_yi": 68.21,
+            "turnover_pct": 8.24,
+            "vol_ratio": 1.1,
+            "float_mcap_yi": 868.46,
+            "reason_tags": "全市场稳健候选",
             "theme_tags": [],
-            "score": 13.43,
-            "pre_score": 41.43,
+            "score": 101.2,
+            "pre_score": 61.65,
             "chan_score": 0,
             "czsc_score": 0.0,
-            "serenity_score": 0.0,
-            "uzi_score": -12.0,
+            "serenity_score": 54.7,
+            "uzi_score": 12.0,
             "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 35,
-            "recommendation_degree": 35,
+            "hard_risk_count": 1,
+            "confidence": 55,
+            "recommendation_degree": 55,
             "estimated_2w_range": {
               "low_pct": -6.0,
               "high_pct": 3.0,
@@ -1321,18 +1244,17 @@
               "high_pct": 3.0,
               "text": "-6.0% ~ +3.0%"
             },
-            "stop_loss": 23.3,
-            "take_profit_reference": 25.53,
-            "dragon_net_wan": 3823.3,
-            "dragon_reason": "日振幅值达到15%的前5只证券",
+            "stop_loss": 173.86,
+            "take_profit_reference": 190.51,
+            "dragon_net_wan": 0.0,
+            "dragon_reason": "",
             "reasons": [
-              "龙虎榜净买入约 3823 万",
+              "Serenity因子: 市值弹性相对更高",
               "UZI风控: 近5日未明显透支，仍有两周弹性",
-              "流动性: 成交 6.8 亿，换手 7.3%，未来2周观察"
+              "UZI风控: 未触发杀猪盘/过热式硬拦截",
+              "流动性: 成交 68.2 亿，换手 8.2%，未来2周观察"
             ],
             "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
               "K线样本不足，缠论结构信号降权"
             ],
             "chan": {
@@ -1350,43 +1272,43 @@
               "metrics": {}
             },
             "uzi": {
-              "score": -12.0,
+              "score": 12.0,
               "signals": [
-                "UZI风控: 近5日未明显透支，仍有两周弹性"
+                "UZI风控: 近5日未明显透支，仍有两周弹性",
+                "UZI风控: 未触发杀猪盘/过热式硬拦截"
               ],
-              "warnings": [
-                "UZI风控: 单日涨幅过大，疑似已被抢跑",
-                "UZI风控: 风险标签过多"
-              ]
+              "warnings": []
             },
             "serenity": {
-              "score": 0.0,
-              "role": "",
-              "principles": [],
+              "score": 54.7,
+              "role": "存储/HBM 产业链",
+              "principles": [
+                "Serenity因子: 市值弹性相对更高"
+              ],
               "risks": []
             }
           },
           {
-            "code": "605162",
-            "name": "新中港",
-            "price": 12.71,
-            "change_pct": 10.04,
-            "amount_yi": 4.03,
-            "turnover_pct": 7.35,
-            "vol_ratio": 1.22,
-            "float_mcap_yi": 56.29,
-            "reason_tags": "可转债赎回完成+热电联产+弗迪电池供热",
+            "code": "000988",
+            "name": "华工科技",
+            "price": 158.36,
+            "change_pct": 2.57,
+            "amount_yi": 119.2,
+            "turnover_pct": 7.6,
+            "vol_ratio": 0.85,
+            "float_mcap_yi": 1592.31,
+            "reason_tags": "全市场稳健候选",
             "theme_tags": [],
-            "score": 11.87,
-            "pre_score": 39.87,
-            "chan_score": 0,
-            "czsc_score": 0.0,
-            "serenity_score": 0.0,
-            "uzi_score": -12.0,
+            "score": 104.83,
+            "pre_score": 48.47,
+            "chan_score": -2.0,
+            "czsc_score": 25.0,
+            "serenity_score": 56.7,
+            "uzi_score": 4.0,
             "setup_flags": [],
-            "hard_risk_count": 2,
-            "confidence": 35,
-            "recommendation_degree": 35,
+            "hard_risk_count": 1,
+            "confidence": 53,
+            "recommendation_degree": 53,
             "estimated_2w_range": {
               "low_pct": -6.0,
               "high_pct": 3.0,
@@ -1397,18 +1319,125 @@
               "high_pct": 3.0,
               "text": "-6.0% ~ +3.0%"
             },
-            "stop_loss": 11.95,
-            "take_profit_reference": 13.09,
-            "dragon_net_wan": 6838.8,
+            "stop_loss": 148.86,
+            "take_profit_reference": 163.11,
+            "dragon_net_wan": 0.0,
+            "dragon_reason": "",
+            "reasons": [
+              "持股线: 未有效跌破 MA10",
+              "成本位置: 距 MA10 不远，两周风控更可控",
+              "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+              "CZSC近似: 中期均线未走坏，适合两周窗口",
+              "CZSC近似: 中枢上半区震荡，等待向上离开",
+              "UZI风控: 未触发杀猪盘/过热式硬拦截",
+              "流动性: 成交 119.2 亿，换手 7.6%，未来2周观察"
+            ],
+            "risk_flags": [
+              "流通市值偏大，涨幅弹性受限",
+              "没有二买/三买确认，容易变成追涨交易"
+            ],
+            "chan": {
+              "score": -2.0,
+              "signals": [
+                "持股线: 未有效跌破 MA10",
+                "成本位置: 距 MA10 不远，两周风控更可控"
+              ],
+              "warnings": [
+                "没有二买/三买确认，容易变成追涨交易"
+              ],
+              "metrics": {
+                "ma5": 151.398,
+                "ma10": 158.107,
+                "ma20": 152.306,
+                "ma30": 141.599,
+                "box_high": 175.8,
+                "box_low": 114.38,
+                "volume_ratio_5d": 0.85,
+                "distance_ma5_pct": 4.6,
+                "distance_ma10_pct": 0.16,
+                "distance_ma20_pct": 3.97,
+                "pct_3d": 10.69,
+                "pct_5d": -4.39,
+                "pct_10d": 2.86,
+                "close_position": 0.75,
+                "upper_shadow_pct": 1.72,
+                "setup_flags": [],
+                "last_kline_date": "2026-06-04"
+              }
+            },
+            "czsc": {
+              "score": 25.0,
+              "signals": [
+                "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+                "CZSC近似: 中期均线未走坏，适合两周窗口",
+                "CZSC近似: 中枢上半区震荡，等待向上离开"
+              ],
+              "warnings": [],
+              "metrics": {
+                "ma20": 152.306,
+                "ma30": 141.599,
+                "ma60": 127.887,
+                "box_high_45d": 170.88,
+                "box_low_45d": 99.87,
+                "pct_20d": 18.62
+              }
+            },
+            "uzi": {
+              "score": 4.0,
+              "signals": [
+                "UZI风控: 未触发杀猪盘/过热式硬拦截"
+              ],
+              "warnings": []
+            },
+            "serenity": {
+              "score": 56.7,
+              "role": "光模块/激光加工",
+              "principles": [],
+              "risks": []
+            }
+          },
+          {
+            "code": "600549",
+            "name": "厦门钨业",
+            "price": 63.73,
+            "change_pct": 6.2,
+            "amount_yi": 77.52,
+            "turnover_pct": 8.16,
+            "vol_ratio": 1.51,
+            "float_mcap_yi": 1011.77,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 86.52,
+            "pre_score": 82.52,
+            "chan_score": 0,
+            "czsc_score": 0.0,
+            "serenity_score": 0.0,
+            "uzi_score": 12.0,
+            "setup_flags": [],
+            "hard_risk_count": 1,
+            "confidence": 51,
+            "recommendation_degree": 51,
+            "estimated_2w_range": {
+              "low_pct": -6.0,
+              "high_pct": 3.0,
+              "text": "-6.0% ~ +3.0%"
+            },
+            "estimated_2d_range": {
+              "low_pct": -6.0,
+              "high_pct": 3.0,
+              "text": "-6.0% ~ +3.0%"
+            },
+            "stop_loss": 59.91,
+            "take_profit_reference": 65.64,
+            "dragon_net_wan": 119424.2,
             "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
             "reasons": [
-              "龙虎榜净买入约 6839 万",
+              "龙虎榜净买入约 119424 万",
               "UZI风控: 近5日未明显透支，仍有两周弹性",
-              "流动性: 成交 4.0 亿，换手 7.3%，未来2周观察"
+              "UZI风控: 未触发杀猪盘/过热式硬拦截",
+              "流动性: 成交 77.5 亿，换手 8.2%，未来2周观察"
             ],
             "risk_flags": [
-              "信号日涨停，次日追高风险",
-              "10cm 涨停后，隔日接力不确定",
               "K线样本不足，缠论结构信号降权"
             ],
             "chan": {
@@ -1426,14 +1455,267 @@
               "metrics": {}
             },
             "uzi": {
-              "score": -12.0,
+              "score": 12.0,
               "signals": [
-                "UZI风控: 近5日未明显透支，仍有两周弹性"
+                "UZI风控: 近5日未明显透支，仍有两周弹性",
+                "UZI风控: 未触发杀猪盘/过热式硬拦截"
+              ],
+              "warnings": []
+            },
+            "serenity": {
+              "score": 0.0,
+              "role": "",
+              "principles": [],
+              "risks": []
+            }
+          },
+          {
+            "code": "601689",
+            "name": "拓普集团",
+            "price": 67.6,
+            "change_pct": 7.94,
+            "amount_yi": 46.37,
+            "turnover_pct": 4.0,
+            "vol_ratio": 1.7,
+            "float_mcap_yi": 1174.78,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 85.61,
+            "pre_score": 54.28,
+            "chan_score": 3.1,
+            "czsc_score": 25.0,
+            "serenity_score": 0.0,
+            "uzi_score": 12.0,
+            "setup_flags": [],
+            "hard_risk_count": 1,
+            "confidence": 51,
+            "recommendation_degree": 51,
+            "estimated_2w_range": {
+              "low_pct": -6.0,
+              "high_pct": 3.0,
+              "text": "-6.0% ~ +3.0%"
+            },
+            "estimated_2d_range": {
+              "low_pct": -6.0,
+              "high_pct": 3.0,
+              "text": "-6.0% ~ +3.0%"
+            },
+            "stop_loss": 63.54,
+            "take_profit_reference": 69.63,
+            "dragon_net_wan": 0.0,
+            "dragon_reason": "",
+            "reasons": [
+              "持股线: 未有效跌破 MA10",
+              "量能确认: 较 5 日均量 1.7 倍",
+              "成本位置: 距 MA10 不远，两周风控更可控",
+              "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+              "CZSC近似: 中期均线未走坏，适合两周窗口",
+              "CZSC近似: 中枢上半区震荡，等待向上离开",
+              "UZI风控: 近5日未明显透支，仍有两周弹性"
+            ],
+            "risk_flags": [
+              "没有二买/三买确认，容易变成追涨交易"
+            ],
+            "chan": {
+              "score": 3.1,
+              "signals": [
+                "持股线: 未有效跌破 MA10",
+                "量能确认: 较 5 日均量 1.7 倍",
+                "成本位置: 距 MA10 不远，两周风控更可控"
               ],
               "warnings": [
-                "UZI风控: 单日涨幅过大，疑似已被抢跑",
-                "UZI风控: 风险标签过多"
-              ]
+                "没有二买/三买确认，容易变成追涨交易"
+              ],
+              "metrics": {
+                "ma5": 63.354,
+                "ma10": 66.507,
+                "ma20": 67.431,
+                "ma30": 64.586,
+                "box_high": 74.85,
+                "box_low": 55.53,
+                "volume_ratio_5d": 1.7,
+                "distance_ma5_pct": 6.7,
+                "distance_ma10_pct": 1.64,
+                "distance_ma20_pct": 0.25,
+                "pct_3d": 10.49,
+                "pct_5d": 2.7,
+                "pct_10d": -6.27,
+                "close_position": 0.83,
+                "upper_shadow_pct": 1.69,
+                "setup_flags": [],
+                "last_kline_date": "2026-06-04"
+              }
+            },
+            "czsc": {
+              "score": 25.0,
+              "signals": [
+                "CZSC近似: 日线趋势维持在 MA20/MA30 上方",
+                "CZSC近似: 中期均线未走坏，适合两周窗口",
+                "CZSC近似: 中枢上半区震荡，等待向上离开"
+              ],
+              "warnings": [],
+              "metrics": {
+                "ma20": 67.431,
+                "ma30": 64.586,
+                "ma60": 62.001,
+                "box_high_45d": 74.19,
+                "box_low_45d": 55.46,
+                "pct_20d": 5.66
+              }
+            },
+            "uzi": {
+              "score": 12.0,
+              "signals": [
+                "UZI风控: 近5日未明显透支，仍有两周弹性",
+                "UZI风控: 未触发杀猪盘/过热式硬拦截"
+              ],
+              "warnings": []
+            },
+            "serenity": {
+              "score": 0.0,
+              "role": "",
+              "principles": [],
+              "risks": []
+            }
+          },
+          {
+            "code": "600726",
+            "name": "华电能源",
+            "price": 10.39,
+            "change_pct": 7.0,
+            "amount_yi": 57.52,
+            "turnover_pct": 7.58,
+            "vol_ratio": 1.53,
+            "float_mcap_yi": 821.57,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 85.28,
+            "pre_score": 81.28,
+            "chan_score": 0,
+            "czsc_score": 0.0,
+            "serenity_score": 0.0,
+            "uzi_score": 12.0,
+            "setup_flags": [],
+            "hard_risk_count": 1,
+            "confidence": 51,
+            "recommendation_degree": 51,
+            "estimated_2w_range": {
+              "low_pct": -6.0,
+              "high_pct": 3.0,
+              "text": "-6.0% ~ +3.0%"
+            },
+            "estimated_2d_range": {
+              "low_pct": -6.0,
+              "high_pct": 3.0,
+              "text": "-6.0% ~ +3.0%"
+            },
+            "stop_loss": 9.77,
+            "take_profit_reference": 10.7,
+            "dragon_net_wan": 25509.1,
+            "dragon_reason": "有价格涨跌幅限制的日价格振幅达到15%的前五只证券",
+            "reasons": [
+              "龙虎榜净买入约 25509 万",
+              "UZI风控: 近5日未明显透支，仍有两周弹性",
+              "UZI风控: 未触发杀猪盘/过热式硬拦截",
+              "流动性: 成交 57.5 亿，换手 7.6%，未来2周观察"
+            ],
+            "risk_flags": [
+              "K线样本不足，缠论结构信号降权"
+            ],
+            "chan": {
+              "score": 0,
+              "signals": [],
+              "warnings": [
+                "K线样本不足，缠论结构信号降权"
+              ],
+              "metrics": {}
+            },
+            "czsc": {
+              "score": 0.0,
+              "signals": [],
+              "warnings": [],
+              "metrics": {}
+            },
+            "uzi": {
+              "score": 12.0,
+              "signals": [
+                "UZI风控: 近5日未明显透支，仍有两周弹性",
+                "UZI风控: 未触发杀猪盘/过热式硬拦截"
+              ],
+              "warnings": []
+            },
+            "serenity": {
+              "score": 0.0,
+              "role": "",
+              "principles": [],
+              "risks": []
+            }
+          },
+          {
+            "code": "601208",
+            "name": "东材科技",
+            "price": 59.6,
+            "change_pct": 5.51,
+            "amount_yi": 63.95,
+            "turnover_pct": 10.95,
+            "vol_ratio": 1.12,
+            "float_mcap_yi": 602.07,
+            "reason_tags": "全市场稳健候选",
+            "theme_tags": [],
+            "score": 83.42,
+            "pre_score": 79.42,
+            "chan_score": 0,
+            "czsc_score": 0.0,
+            "serenity_score": 0.0,
+            "uzi_score": 12.0,
+            "setup_flags": [],
+            "hard_risk_count": 1,
+            "confidence": 50,
+            "recommendation_degree": 50,
+            "estimated_2w_range": {
+              "low_pct": -6.0,
+              "high_pct": 3.0,
+              "text": "-6.0% ~ +3.0%"
+            },
+            "estimated_2d_range": {
+              "low_pct": -6.0,
+              "high_pct": 3.0,
+              "text": "-6.0% ~ +3.0%"
+            },
+            "stop_loss": 56.02,
+            "take_profit_reference": 61.39,
+            "dragon_net_wan": 38135.4,
+            "dragon_reason": "非ST、*ST和S证券连续三个交易日内收盘价格涨幅偏离值累计达到20%的证券",
+            "reasons": [
+              "龙虎榜净买入约 38135 万",
+              "UZI风控: 近5日未明显透支，仍有两周弹性",
+              "UZI风控: 未触发杀猪盘/过热式硬拦截",
+              "流动性: 成交 64.0 亿，换手 10.9%，未来2周观察"
+            ],
+            "risk_flags": [
+              "K线样本不足，缠论结构信号降权"
+            ],
+            "chan": {
+              "score": 0,
+              "signals": [],
+              "warnings": [
+                "K线样本不足，缠论结构信号降权"
+              ],
+              "metrics": {}
+            },
+            "czsc": {
+              "score": 0.0,
+              "signals": [],
+              "warnings": [],
+              "metrics": {}
+            },
+            "uzi": {
+              "score": 12.0,
+              "signals": [
+                "UZI风控: 近5日未明显透支，仍有两周弹性",
+                "UZI风控: 未触发杀猪盘/过热式硬拦截"
+              ],
+              "warnings": []
             },
             "serenity": {
               "score": 0.0,
@@ -1445,9 +1727,9 @@
         ]
       },
       "stats": {
-        "raw_pool_size": 91,
+        "raw_pool_size": 190,
         "event_pool_size": 91,
-        "broad_pool_size": 0,
+        "broad_pool_size": 99,
         "scored_size": 60,
         "dragon_count": 91
       }
@@ -2599,8 +2881,8 @@
           "name": "Coherent",
           "market_key": "us",
           "role": "多元光子/激光/材料",
-          "price": 394.587,
-          "change_pct": -5.47,
+          "price": 394.265,
+          "change_pct": -5.55,
           "amount_yi": 0,
           "turnover_pct": 0,
           "vol_ratio": 0.27,
@@ -2630,8 +2912,8 @@
             "high_pct": 4.0,
             "text": "-8.0% ~ +4.0%"
           },
-          "stop_loss": 364.993,
-          "take_profit_reference": 410.371,
+          "stop_loss": 364.695,
+          "take_profit_reference": 410.036,
           "dragon_net_wan": 0,
           "dragon_reason": "",
           "reasons": [
@@ -2659,21 +2941,21 @@
               "没有二买/三买确认，容易变成追涨交易"
             ],
             "metrics": {
-              "ma5": 392.655,
-              "ma10": 385.733,
-              "ma20": 376.577,
-              "ma30": 359.841,
+              "ma5": 392.591,
+              "ma10": 385.701,
+              "ma20": 376.561,
+              "ma30": 359.831,
               "box_high": 413.0,
               "box_low": 301.18,
               "volume_ratio_5d": 0.27,
-              "distance_ma5_pct": 0.49,
-              "distance_ma10_pct": 2.3,
-              "distance_ma20_pct": 4.78,
-              "pct_3d": 8.73,
-              "pct_5d": 4.68,
-              "pct_10d": 10.07,
-              "close_position": 0.69,
-              "upper_shadow_pct": 1.63,
+              "distance_ma5_pct": 0.43,
+              "distance_ma10_pct": 2.22,
+              "distance_ma20_pct": 4.7,
+              "pct_3d": 8.64,
+              "pct_5d": 4.59,
+              "pct_10d": 9.98,
+              "close_position": 0.68,
+              "upper_shadow_pct": 1.71,
               "setup_flags": [],
               "last_kline_date": "2026-06-04"
             }
@@ -2687,12 +2969,12 @@
             ],
             "warnings": [],
             "metrics": {
-              "ma20": 376.577,
-              "ma30": 359.841,
-              "ma60": 318.106,
+              "ma20": 376.561,
+              "ma30": 359.831,
+              "ma60": 318.101,
               "box_high_45d": 413.0,
               "box_low_45d": 231.79,
-              "pct_20d": 14.48
+              "pct_20d": 14.39
             }
           },
           "uzi": {
@@ -2730,8 +3012,8 @@
             "name": "Coherent",
             "market_key": "us",
             "role": "多元光子/激光/材料",
-            "price": 394.587,
-            "change_pct": -5.47,
+            "price": 394.265,
+            "change_pct": -5.55,
             "amount_yi": 0,
             "turnover_pct": 0,
             "vol_ratio": 0.27,
@@ -2761,8 +3043,8 @@
               "high_pct": 4.0,
               "text": "-8.0% ~ +4.0%"
             },
-            "stop_loss": 364.993,
-            "take_profit_reference": 410.371,
+            "stop_loss": 364.695,
+            "take_profit_reference": 410.036,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -2790,21 +3072,21 @@
                 "没有二买/三买确认，容易变成追涨交易"
               ],
               "metrics": {
-                "ma5": 392.655,
-                "ma10": 385.733,
-                "ma20": 376.577,
-                "ma30": 359.841,
+                "ma5": 392.591,
+                "ma10": 385.701,
+                "ma20": 376.561,
+                "ma30": 359.831,
                 "box_high": 413.0,
                 "box_low": 301.18,
                 "volume_ratio_5d": 0.27,
-                "distance_ma5_pct": 0.49,
-                "distance_ma10_pct": 2.3,
-                "distance_ma20_pct": 4.78,
-                "pct_3d": 8.73,
-                "pct_5d": 4.68,
-                "pct_10d": 10.07,
-                "close_position": 0.69,
-                "upper_shadow_pct": 1.63,
+                "distance_ma5_pct": 0.43,
+                "distance_ma10_pct": 2.22,
+                "distance_ma20_pct": 4.7,
+                "pct_3d": 8.64,
+                "pct_5d": 4.59,
+                "pct_10d": 9.98,
+                "close_position": 0.68,
+                "upper_shadow_pct": 1.71,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-04"
               }
@@ -2818,12 +3100,12 @@
               ],
               "warnings": [],
               "metrics": {
-                "ma20": 376.577,
-                "ma30": 359.841,
-                "ma60": 318.106,
+                "ma20": 376.561,
+                "ma30": 359.831,
+                "ma60": 318.101,
                 "box_high_45d": 413.0,
                 "box_low_45d": 231.79,
-                "pct_20d": 14.48
+                "pct_20d": 14.39
               }
             },
             "uzi": {
@@ -2860,11 +3142,11 @@
             "name": "Nebius",
             "market_key": "us",
             "role": "neocloud/AI 云",
-            "price": 247.25,
-            "change_pct": -1.76,
+            "price": 248.45,
+            "change_pct": -1.28,
             "amount_yi": 0,
             "turnover_pct": 0,
-            "vol_ratio": 0.26,
+            "vol_ratio": 0.25,
             "float_mcap_yi": 0,
             "reason_tags": "neocloud、AI datacenter",
             "theme_tags": [
@@ -2890,8 +3172,8 @@
               "high_pct": 4.0,
               "text": "-8.0% ~ +4.0%"
             },
-            "stop_loss": 228.706,
-            "take_profit_reference": 257.14,
+            "stop_loss": 229.816,
+            "take_profit_reference": 258.388,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -2917,21 +3199,21 @@
                 "没有二买/三买确认，容易变成追涨交易"
               ],
               "metrics": {
-                "ma5": 251.022,
-                "ma10": 233.258,
-                "ma20": 214.869,
-                "ma30": 195.448,
+                "ma5": 251.262,
+                "ma10": 233.378,
+                "ma20": 214.929,
+                "ma30": 195.488,
                 "box_high": 233.73,
                 "box_low": 135.0,
-                "volume_ratio_5d": 0.26,
-                "distance_ma5_pct": -1.5,
-                "distance_ma10_pct": 6.0,
-                "distance_ma20_pct": 15.07,
-                "pct_3d": -6.53,
-                "pct_5d": 9.24,
-                "pct_10d": 28.9,
-                "close_position": 0.89,
-                "upper_shadow_pct": 0.62,
+                "volume_ratio_5d": 0.25,
+                "distance_ma5_pct": -1.12,
+                "distance_ma10_pct": 6.46,
+                "distance_ma20_pct": 15.6,
+                "pct_3d": -6.07,
+                "pct_5d": 9.77,
+                "pct_10d": 29.52,
+                "close_position": 0.98,
+                "upper_shadow_pct": 0.14,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-04"
               }
@@ -2944,12 +3226,12 @@
               ],
               "warnings": [],
               "metrics": {
-                "ma20": 214.869,
-                "ma30": 195.448,
-                "ma60": 161.198,
+                "ma20": 214.929,
+                "ma30": 195.488,
+                "ma60": 161.218,
                 "box_high_45d": 233.73,
                 "box_low_45d": 96.19,
-                "pct_20d": 26.74
+                "pct_20d": 27.35
               }
             },
             "uzi": {
@@ -2986,8 +3268,8 @@
             "name": "Sandisk",
             "market_key": "us",
             "role": "NAND/存储周期",
-            "price": 1775.98,
-            "change_pct": -3.03,
+            "price": 1783.44,
+            "change_pct": -2.62,
             "amount_yi": 0,
             "turnover_pct": 0,
             "vol_ratio": 0.57,
@@ -3016,8 +3298,8 @@
               "high_pct": 4.0,
               "text": "-8.0% ~ +4.0%"
             },
-            "stop_loss": 1642.781,
-            "take_profit_reference": 1847.019,
+            "stop_loss": 1649.682,
+            "take_profit_reference": 1854.778,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -3044,21 +3326,21 @@
                 "没有二买/三买确认，容易变成追涨交易"
               ],
               "metrics": {
-                "ma5": 1756.05,
-                "ma10": 1662.231,
-                "ma20": 1543.53,
-                "ma30": 1409.512,
+                "ma5": 1757.542,
+                "ma10": 1662.977,
+                "ma20": 1543.903,
+                "ma30": 1409.761,
                 "box_high": 1697.96,
                 "box_low": 1048.0,
                 "volume_ratio_5d": 0.57,
-                "distance_ma5_pct": 1.13,
-                "distance_ma10_pct": 6.84,
-                "distance_ma20_pct": 15.06,
-                "pct_3d": 0.83,
-                "pct_5d": 8.18,
-                "pct_10d": 27.53,
-                "close_position": 0.52,
-                "upper_shadow_pct": 2.61,
+                "distance_ma5_pct": 1.47,
+                "distance_ma10_pct": 7.24,
+                "distance_ma20_pct": 15.51,
+                "pct_3d": 1.25,
+                "pct_5d": 8.64,
+                "pct_10d": 28.07,
+                "close_position": 0.6,
+                "upper_shadow_pct": 2.18,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-04"
               }
@@ -3071,12 +3353,12 @@
               ],
               "warnings": [],
               "metrics": {
-                "ma20": 1543.53,
-                "ma30": 1409.512,
-                "ma60": 1085.482,
+                "ma20": 1543.903,
+                "ma30": 1409.761,
+                "ma60": 1085.606,
                 "box_high_45d": 1600.0,
                 "box_low_45d": 641.0,
-                "pct_20d": 25.96
+                "pct_20d": 26.49
               }
             },
             "uzi": {
@@ -3109,11 +3391,11 @@
             "name": "Micron",
             "market_key": "us",
             "role": "HBM/DRAM/NAND",
-            "price": 992.88,
-            "change_pct": -8.03,
+            "price": 995.88,
+            "change_pct": -7.75,
             "amount_yi": 0,
             "turnover_pct": 0,
-            "vol_ratio": 0.51,
+            "vol_ratio": 0.5,
             "float_mcap_yi": 0,
             "reason_tags": "HBM、memory",
             "theme_tags": [
@@ -3139,8 +3421,8 @@
               "high_pct": 4.0,
               "text": "-8.0% ~ +4.0%"
             },
-            "stop_loss": 918.414,
-            "take_profit_reference": 1032.595,
+            "stop_loss": 921.189,
+            "take_profit_reference": 1035.715,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -3155,7 +3437,7 @@
             ],
             "risk_flags": [
               "没有二买/三买确认，容易变成追涨交易",
-              "20日涨幅 48.9%，两周追高风险上升"
+              "20日涨幅 49.4%，两周追高风险上升"
             ],
             "chan": {
               "score": -4.0,
@@ -3167,21 +3449,21 @@
                 "没有二买/三买确认，容易变成追涨交易"
               ],
               "metrics": {
-                "ma5": 1028.61,
-                "ma10": 940.396,
-                "ma20": 838.794,
-                "ma30": 741.475,
+                "ma5": 1029.21,
+                "ma10": 940.696,
+                "ma20": 838.944,
+                "ma30": 741.575,
                 "box_high": 956.16,
                 "box_low": 502.58,
-                "volume_ratio_5d": 0.51,
-                "distance_ma5_pct": -3.47,
-                "distance_ma10_pct": 5.58,
-                "distance_ma20_pct": 18.37,
-                "pct_3d": -4.12,
-                "pct_5d": 7.51,
-                "pct_10d": 35.64,
-                "close_position": 0.46,
-                "upper_shadow_pct": 2.47,
+                "volume_ratio_5d": 0.5,
+                "distance_ma5_pct": -3.24,
+                "distance_ma10_pct": 5.87,
+                "distance_ma20_pct": 18.71,
+                "pct_3d": -3.83,
+                "pct_5d": 7.84,
+                "pct_10d": 36.05,
+                "close_position": 0.53,
+                "upper_shadow_pct": 2.16,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-04"
               }
@@ -3194,15 +3476,15 @@
                 "CZSC近似: 突破中枢后回踩未破"
               ],
               "warnings": [
-                "20日涨幅 48.9%，两周追高风险上升"
+                "20日涨幅 49.4%，两周追高风险上升"
               ],
               "metrics": {
-                "ma20": 838.794,
-                "ma30": 741.475,
-                "ma60": 577.756,
+                "ma20": 838.944,
+                "ma30": 741.575,
+                "ma60": 577.806,
                 "box_high_45d": 818.67,
                 "box_low_45d": 340.2,
-                "pct_20d": 48.95
+                "pct_20d": 49.4
               }
             },
             "uzi": {
@@ -3232,148 +3514,13 @@
             }
           },
           {
-            "code": "AAOI",
-            "symbol": "AAOI",
-            "name": "Applied Optoelectronics",
-            "market_key": "us",
-            "role": "美国光模块/激光器",
-            "price": 175.332,
-            "change_pct": -4.75,
-            "amount_yi": 0,
-            "turnover_pct": 0,
-            "vol_ratio": 0.24,
-            "float_mcap_yi": 0,
-            "reason_tags": "1.6T、Photonics、AI datacenter",
-            "theme_tags": [
-              "1.6T",
-              "Photonics",
-              "AI datacenter"
-            ],
-            "score": 58.3,
-            "pre_score": 71.5,
-            "chan_score": -20.0,
-            "czsc_score": 13.0,
-            "uzi_score": 0.0,
-            "setup_flags": [],
-            "hard_risk_count": 1,
-            "confidence": 35,
-            "recommendation_degree": 35,
-            "estimated_2w_range": {
-              "low_pct": -8.0,
-              "high_pct": 4.0,
-              "text": "-8.0% ~ +4.0%"
-            },
-            "estimated_2d_range": {
-              "low_pct": -8.0,
-              "high_pct": 4.0,
-              "text": "-8.0% ~ +4.0%"
-            },
-            "stop_loss": 162.182,
-            "take_profit_reference": 182.345,
-            "dragon_net_wan": 0,
-            "dragon_reason": "",
-            "reasons": [
-              "Serenity因子: 上游瓶颈/稀缺供给突出",
-              "Serenity因子: 位于 AI capex 更上游环节",
-              "Serenity因子: 直接受益数据中心/AI capex",
-              "Serenity因子: 具备头部客户或潜在 Mag7 链路",
-              "产业链主题: 1.6T、Photonics、AI datacenter",
-              "女上位: MA5 在 MA10 之上",
-              "CZSC近似: 中期均线未走坏，适合两周窗口",
-              "CZSC近似: 中枢上半区震荡，等待向上离开"
-            ],
-            "risk_flags": [
-              "Serenity风险: 需重点跟踪 ATM/稀释或债务压力",
-              "收盘价跌破 MA10，两周趋势风险偏高",
-              "没有二买/三买确认，容易变成追涨交易"
-            ],
-            "chan": {
-              "score": -20.0,
-              "signals": [
-                "女上位: MA5 在 MA10 之上"
-              ],
-              "warnings": [
-                "收盘价跌破 MA10，两周趋势风险偏高",
-                "没有二买/三买确认，容易变成追涨交易"
-              ],
-              "metrics": {
-                "ma5": 181.17,
-                "ma10": 179.062,
-                "ma20": 179.859,
-                "ma30": 173.763,
-                "box_high": 233.67,
-                "box_low": 143.58,
-                "volume_ratio_5d": 0.24,
-                "distance_ma5_pct": -3.22,
-                "distance_ma10_pct": -2.08,
-                "distance_ma20_pct": -2.52,
-                "pct_3d": -5.57,
-                "pct_5d": 3.73,
-                "pct_10d": 6.09,
-                "close_position": 0.42,
-                "upper_shadow_pct": 3.4,
-                "setup_flags": [],
-                "last_kline_date": "2026-06-04"
-              }
-            },
-            "czsc": {
-              "score": 13.0,
-              "signals": [
-                "CZSC近似: 中期均线未走坏，适合两周窗口",
-                "CZSC近似: 中枢上半区震荡，等待向上离开"
-              ],
-              "warnings": [],
-              "metrics": {
-                "ma20": 179.859,
-                "ma30": 173.763,
-                "ma60": 145.819,
-                "box_high_45d": 233.67,
-                "box_low_45d": 81.51,
-                "pct_20d": -1.8
-              }
-            },
-            "uzi": {
-              "score": 0.0,
-              "signals": [
-                "UZI风控: 近5日未明显透支，仍有两周弹性"
-              ],
-              "warnings": [
-                "UZI风控: 风险标签过多"
-              ]
-            },
-            "serenity": {
-              "score": 71.5,
-              "role": "美国光模块/激光器",
-              "principles": [
-                "Serenity因子: 上游瓶颈/稀缺供给突出",
-                "Serenity因子: 位于 AI capex 更上游环节",
-                "Serenity因子: 直接受益数据中心/AI capex",
-                "Serenity因子: 具备头部客户或潜在 Mag7 链路",
-                "Serenity因子: 市值弹性相对更高",
-                "Serenity因子: 存在量产/合同/政策/指数等催化线索"
-              ],
-              "risks": [
-                "Serenity风险: 需重点跟踪 ATM/稀释或债务压力"
-              ],
-              "policy": {
-                "lens_weight": 1.0,
-                "chan_weight": 0.86,
-                "hard_penalty": 9,
-                "threshold": 66,
-                "ma10_limit": 10.0,
-                "pct5_limit": 22.0,
-                "change_limit": 14.0
-              }
-            }
-          },
-          {
             "code": "LITE",
             "symbol": "LITE",
             "name": "Lumentum",
             "market_key": "us",
             "role": "OCS/光器件/CPO",
-            "price": 892.44,
-            "change_pct": -4.86,
+            "price": 888.875,
+            "change_pct": -5.24,
             "amount_yi": 0,
             "turnover_pct": 0,
             "vol_ratio": 0.32,
@@ -3403,8 +3550,8 @@
               "high_pct": 4.0,
               "text": "-8.0% ~ +4.0%"
             },
-            "stop_loss": 825.507,
-            "take_profit_reference": 928.138,
+            "stop_loss": 822.209,
+            "take_profit_reference": 924.43,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -3432,21 +3579,21 @@
                 "没有二买/三买确认，容易变成追涨交易"
               ],
               "metrics": {
-                "ma5": 923.91,
-                "ma10": 920.469,
-                "ma20": 934.628,
-                "ma30": 923.257,
+                "ma5": 923.197,
+                "ma10": 920.113,
+                "ma20": 934.449,
+                "ma30": 923.139,
                 "box_high": 1085.68,
                 "box_low": 845.0,
                 "volume_ratio_5d": 0.32,
-                "distance_ma5_pct": -3.41,
-                "distance_ma10_pct": -3.05,
-                "distance_ma20_pct": -4.51,
-                "pct_3d": -1.39,
-                "pct_5d": 3.7,
-                "pct_10d": 2.81,
-                "close_position": 0.64,
-                "upper_shadow_pct": 1.74,
+                "distance_ma5_pct": -3.72,
+                "distance_ma10_pct": -3.39,
+                "distance_ma20_pct": -4.88,
+                "pct_3d": -1.78,
+                "pct_5d": 3.28,
+                "pct_10d": 2.4,
+                "close_position": 0.56,
+                "upper_shadow_pct": 2.15,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-04"
               }
@@ -3460,12 +3607,12 @@
                 "跌破 MA20，未来两周趋势延续性不足"
               ],
               "metrics": {
-                "ma20": 934.628,
-                "ma30": 923.257,
-                "ma60": 848.752,
+                "ma20": 934.449,
+                "ma30": 923.139,
+                "ma60": 848.692,
                 "box_high_45d": 1085.68,
                 "box_low_45d": 707.835,
-                "pct_20d": -5.49
+                "pct_20d": -5.87
               }
             },
             "uzi": {
@@ -3504,11 +3651,11 @@
             "name": "Vistra",
             "market_key": "us",
             "role": "AI 电力/核电受益",
-            "price": 150.915,
-            "change_pct": -1.88,
+            "price": 150.81,
+            "change_pct": -1.94,
             "amount_yi": 0,
             "turnover_pct": 0,
-            "vol_ratio": 0.19,
+            "vol_ratio": 0.18,
             "float_mcap_yi": 0,
             "reason_tags": "power、grid、AI datacenter",
             "theme_tags": [
@@ -3535,8 +3682,8 @@
               "high_pct": 4.0,
               "text": "-8.0% ~ +4.0%"
             },
-            "stop_loss": 139.596,
-            "take_profit_reference": 156.952,
+            "stop_loss": 139.499,
+            "take_profit_reference": 156.842,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -3544,7 +3691,7 @@
               "CZSC近似: 中期均线未走坏，适合两周窗口",
               "CZSC近似: 中枢上半区震荡，等待向上离开",
               "UZI风控: 未触发杀猪盘/过热式硬拦截",
-              "价格结构: 信号日 -1.88%，5日 -5.84%，未来2周观察"
+              "价格结构: 信号日 -1.94%，5日 -5.91%，未来2周观察"
             ],
             "risk_flags": [
               "收盘价跌破 MA10，两周趋势风险偏高",
@@ -3558,21 +3705,21 @@
                 "没有二买/三买确认，容易变成追涨交易"
               ],
               "metrics": {
-                "ma5": 155.535,
-                "ma10": 156.801,
-                "ma20": 150.413,
-                "ma30": 153.453,
+                "ma5": 155.514,
+                "ma10": 156.791,
+                "ma20": 150.407,
+                "ma30": 153.449,
                 "box_high": 168.39,
                 "box_low": 132.66,
-                "volume_ratio_5d": 0.19,
-                "distance_ma5_pct": -2.97,
-                "distance_ma10_pct": -3.75,
-                "distance_ma20_pct": 0.33,
-                "pct_3d": -2.48,
-                "pct_5d": -5.84,
-                "pct_10d": 4.8,
-                "close_position": 0.09,
-                "upper_shadow_pct": 1.38,
+                "volume_ratio_5d": 0.18,
+                "distance_ma5_pct": -3.02,
+                "distance_ma10_pct": -3.81,
+                "distance_ma20_pct": 0.27,
+                "pct_3d": -2.55,
+                "pct_5d": -5.91,
+                "pct_10d": 4.73,
+                "close_position": 0.05,
+                "upper_shadow_pct": 1.45,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-04"
               }
@@ -3585,12 +3732,12 @@
               ],
               "warnings": [],
               "metrics": {
-                "ma20": 150.413,
-                "ma30": 153.453,
-                "ma60": 155.174,
+                "ma20": 150.407,
+                "ma30": 153.449,
+                "ma60": 155.172,
                 "box_high_45d": 168.49,
                 "box_low_45d": 132.66,
-                "pct_20d": -4.66
+                "pct_20d": -4.73
               }
             },
             "uzi": {
@@ -3617,13 +3764,153 @@
             }
           },
           {
+            "code": "AAOI",
+            "symbol": "AAOI",
+            "name": "Applied Optoelectronics",
+            "market_key": "us",
+            "role": "美国光模块/激光器",
+            "price": 174.295,
+            "change_pct": -5.31,
+            "amount_yi": 0,
+            "turnover_pct": 0,
+            "vol_ratio": 0.23,
+            "float_mcap_yi": 0,
+            "reason_tags": "1.6T、Photonics、AI datacenter",
+            "theme_tags": [
+              "1.6T",
+              "Photonics",
+              "AI datacenter"
+            ],
+            "score": 37.7,
+            "pre_score": 71.5,
+            "chan_score": -30.0,
+            "czsc_score": 1.0,
+            "uzi_score": 0.0,
+            "setup_flags": [],
+            "hard_risk_count": 1,
+            "confidence": 35,
+            "recommendation_degree": 35,
+            "estimated_2w_range": {
+              "low_pct": -8.0,
+              "high_pct": 4.0,
+              "text": "-8.0% ~ +4.0%"
+            },
+            "estimated_2d_range": {
+              "low_pct": -8.0,
+              "high_pct": 4.0,
+              "text": "-8.0% ~ +4.0%"
+            },
+            "stop_loss": 161.223,
+            "take_profit_reference": 181.267,
+            "dragon_net_wan": 0,
+            "dragon_reason": "",
+            "reasons": [
+              "Serenity因子: 上游瓶颈/稀缺供给突出",
+              "Serenity因子: 位于 AI capex 更上游环节",
+              "Serenity因子: 直接受益数据中心/AI capex",
+              "Serenity因子: 具备头部客户或潜在 Mag7 链路",
+              "产业链主题: 1.6T、Photonics、AI datacenter",
+              "女上位: MA5 在 MA10 之上",
+              "CZSC近似: 中期均线未走坏，适合两周窗口",
+              "CZSC近似: 中枢上半区震荡，等待向上离开"
+            ],
+            "risk_flags": [
+              "Serenity风险: 需重点跟踪 ATM/稀释或债务压力",
+              "收盘价跌破 MA10，两周趋势风险偏高",
+              "没有二买/三买确认，容易变成追涨交易",
+              "上影线较长，资金分歧偏大",
+              "跌破 MA20，未来两周趋势延续性不足"
+            ],
+            "chan": {
+              "score": -30.0,
+              "signals": [
+                "女上位: MA5 在 MA10 之上"
+              ],
+              "warnings": [
+                "收盘价跌破 MA10，两周趋势风险偏高",
+                "没有二买/三买确认，容易变成追涨交易",
+                "上影线较长，资金分歧偏大"
+              ],
+              "metrics": {
+                "ma5": 180.963,
+                "ma10": 178.959,
+                "ma20": 179.807,
+                "ma30": 173.729,
+                "box_high": 233.67,
+                "box_low": 143.58,
+                "volume_ratio_5d": 0.23,
+                "distance_ma5_pct": -3.68,
+                "distance_ma10_pct": -2.61,
+                "distance_ma20_pct": -3.07,
+                "pct_3d": -6.13,
+                "pct_5d": 3.12,
+                "pct_10d": 5.47,
+                "close_position": 0.31,
+                "upper_shadow_pct": 4.02,
+                "setup_flags": [],
+                "last_kline_date": "2026-06-04"
+              }
+            },
+            "czsc": {
+              "score": 1.0,
+              "signals": [
+                "CZSC近似: 中期均线未走坏，适合两周窗口",
+                "CZSC近似: 中枢上半区震荡，等待向上离开"
+              ],
+              "warnings": [
+                "跌破 MA20，未来两周趋势延续性不足"
+              ],
+              "metrics": {
+                "ma20": 179.807,
+                "ma30": 173.729,
+                "ma60": 145.802,
+                "box_high_45d": 233.67,
+                "box_low_45d": 81.51,
+                "pct_20d": -2.38
+              }
+            },
+            "uzi": {
+              "score": 0.0,
+              "signals": [
+                "UZI风控: 近5日未明显透支，仍有两周弹性"
+              ],
+              "warnings": [
+                "UZI风控: 风险标签过多"
+              ]
+            },
+            "serenity": {
+              "score": 71.5,
+              "role": "美国光模块/激光器",
+              "principles": [
+                "Serenity因子: 上游瓶颈/稀缺供给突出",
+                "Serenity因子: 位于 AI capex 更上游环节",
+                "Serenity因子: 直接受益数据中心/AI capex",
+                "Serenity因子: 具备头部客户或潜在 Mag7 链路",
+                "Serenity因子: 市值弹性相对更高",
+                "Serenity因子: 存在量产/合同/政策/指数等催化线索"
+              ],
+              "risks": [
+                "Serenity风险: 需重点跟踪 ATM/稀释或债务压力"
+              ],
+              "policy": {
+                "lens_weight": 1.0,
+                "chan_weight": 0.86,
+                "hard_penalty": 9,
+                "threshold": 66,
+                "ma10_limit": 10.0,
+                "pct5_limit": 22.0,
+                "change_limit": 14.0
+              }
+            }
+          },
+          {
             "code": "AXTI",
             "symbol": "AXTI",
             "name": "AXT",
             "market_key": "us",
             "role": "InP/GaAs 衬底",
-            "price": 106.66,
-            "change_pct": -0.04,
+            "price": 106.484,
+            "change_pct": -0.2,
             "amount_yi": 0,
             "turnover_pct": 0,
             "vol_ratio": 0.2,
@@ -3652,8 +3939,8 @@
               "high_pct": 4.0,
               "text": "-8.0% ~ +4.0%"
             },
-            "stop_loss": 98.661,
-            "take_profit_reference": 110.926,
+            "stop_loss": 98.498,
+            "take_profit_reference": 110.744,
             "dragon_net_wan": 0,
             "dragon_reason": "",
             "reasons": [
@@ -3664,7 +3951,7 @@
               "产业链主题: InP substrate、compound semi",
               "CZSC近似: 中期均线未走坏，适合两周窗口",
               "CZSC近似: 中枢上半区震荡，等待向上离开",
-              "价格结构: 信号日 -0.04%，5日 -7.81%，未来2周观察"
+              "价格结构: 信号日 -0.20%，5日 -7.97%，未来2周观察"
             ],
             "risk_flags": [
               "收盘价跌破 MA10，两周趋势风险偏高",
@@ -3681,21 +3968,21 @@
                 "上影线较长，资金分歧偏大"
               ],
               "metrics": {
-                "ma5": 107.384,
-                "ma10": 116.984,
-                "ma20": 116.37,
-                "ma30": 106.079,
+                "ma5": 107.349,
+                "ma10": 116.966,
+                "ma20": 116.361,
+                "ma30": 106.073,
                 "box_high": 143.16,
                 "box_low": 71.1,
                 "volume_ratio_5d": 0.2,
-                "distance_ma5_pct": -0.67,
-                "distance_ma10_pct": -8.83,
-                "distance_ma20_pct": -8.34,
-                "pct_3d": -2.64,
-                "pct_5d": -7.81,
-                "pct_10d": 1.96,
-                "close_position": 0.57,
-                "upper_shadow_pct": 3.69,
+                "distance_ma5_pct": -0.81,
+                "distance_ma10_pct": -8.96,
+                "distance_ma20_pct": -8.49,
+                "pct_3d": -2.8,
+                "pct_5d": -7.97,
+                "pct_10d": 1.79,
+                "close_position": 0.55,
+                "upper_shadow_pct": 3.86,
                 "setup_flags": [],
                 "last_kline_date": "2026-06-04"
               }
@@ -3710,12 +3997,12 @@
                 "跌破 MA20，未来两周趋势延续性不足"
               ],
               "metrics": {
-                "ma20": 116.37,
-                "ma30": 106.079,
-                "ma60": 82.964,
+                "ma20": 116.361,
+                "ma30": 106.073,
+                "ma60": 82.961,
                 "box_high_45d": 134.0,
                 "box_low_45d": 39.7,
-                "pct_20d": 1.75
+                "pct_20d": 1.58
               }
             },
             "uzi": {
@@ -3785,13 +4072,122 @@
     "risk_note": "指数环境未触发系统性风险拦截。"
   },
   "industry_heat": {
-    "top": [],
-    "total": 0
+    "top": [
+      {
+        "rank": 1,
+        "name": "航空机场",
+        "change_pct": -0.89,
+        "leader": "002928",
+        "leader_change": 1.8,
+        "up_count": 2,
+        "down_count": 12
+      },
+      {
+        "rank": 2,
+        "name": "铁路公路",
+        "change_pct": -1.25,
+        "leader": "002357",
+        "leader_change": 3.62,
+        "up_count": 5,
+        "down_count": 30
+      },
+      {
+        "rank": 3,
+        "name": "物流",
+        "change_pct": -1.83,
+        "leader": "603871",
+        "leader_change": 3.16,
+        "up_count": 4,
+        "down_count": 43
+      },
+      {
+        "rank": 4,
+        "name": "水泥",
+        "change_pct": -1.77,
+        "leader": "603916",
+        "leader_change": 1.86,
+        "up_count": 2,
+        "down_count": 20
+      },
+      {
+        "rank": 5,
+        "name": "公用事业",
+        "change_pct": -1.34,
+        "leader": "001376",
+        "leader_change": 10.02,
+        "up_count": 32,
+        "down_count": 108
+      },
+      {
+        "rank": 6,
+        "name": "电力",
+        "change_pct": -1.18,
+        "leader": "001376",
+        "leader_change": 10.02,
+        "up_count": 28,
+        "down_count": 82
+      },
+      {
+        "rank": 7,
+        "name": "农林牧渔",
+        "change_pct": -2.21,
+        "leader": "600191",
+        "leader_change": 4.98,
+        "up_count": 9,
+        "down_count": 101
+      },
+      {
+        "rank": 8,
+        "name": "纺织服饰",
+        "change_pct": -1.38,
+        "leader": "600439",
+        "leader_change": 9.92,
+        "up_count": 15,
+        "down_count": 92
+      },
+      {
+        "rank": 9,
+        "name": "煤炭",
+        "change_pct": 2.0,
+        "leader": "600403",
+        "leader_change": 9.96,
+        "up_count": 25,
+        "down_count": 8
+      },
+      {
+        "rank": 10,
+        "name": "食品饮料",
+        "change_pct": -2.25,
+        "leader": "002570",
+        "leader_change": 10.0,
+        "up_count": 15,
+        "down_count": 114
+      },
+      {
+        "rank": 11,
+        "name": "家居用品",
+        "change_pct": -1.21,
+        "leader": "603610",
+        "leader_change": 10.02,
+        "up_count": 16,
+        "down_count": 60
+      },
+      {
+        "rank": 12,
+        "name": "通信设备",
+        "change_pct": -0.49,
+        "leader": "688668",
+        "leader_change": 20.0,
+        "up_count": 30,
+        "down_count": 60
+      }
+    ],
+    "total": 100
   },
   "stats": {
-    "hot_pool_size": 91,
+    "hot_pool_size": 190,
     "event_pool_size": 91,
-    "broad_pool_size": 0,
+    "broad_pool_size": 99,
     "scored_size": 60,
     "dragon_count": 91
   },
@@ -3853,7 +4249,7 @@
   },
   "serenity_source": {
     "repo": "yan-labs/serenity-aleabitoreddit",
-    "checked_at": "2026-06-04T22:53:34+08:00",
+    "checked_at": "2026-06-04T22:51:34+08:00",
     "latest_commit": null,
     "latest_commit_date": null,
     "tweet_archive_span": "2025-07-02 → 2026-06-04",

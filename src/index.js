@@ -3,7 +3,7 @@ const JSON_HEADERS = {
   "cache-control": "no-store",
 };
 
-const MODEL_VERSION = "chan-selector-2026-06-03.4";
+const MODEL_VERSION = "smart-selector-2026-06-04.1";
 
 function json(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -39,6 +39,9 @@ function summarizePick(pick) {
     target_date: pick.target_date,
     signal_date: pick.signal_date,
     generated_at: pick.generated_at,
+    generated_label: pick.generated_label,
+    forecast_end_date: pick.forecast_end_date,
+    forecast_horizon: pick.forecast_horizon,
     action: decision.action,
     title: decision.title,
     message: decision.message,
@@ -48,8 +51,11 @@ function summarizePick(pick) {
   if (primary) {
     summary.code = primary.code;
     summary.name = primary.name;
-    summary.confidence = primary.confidence;
-    summary.estimated_2d_range = primary.estimated_2d_range && primary.estimated_2d_range.text;
+    summary.confidence = primary.recommendation_degree || primary.confidence;
+    summary.recommendation_degree = primary.recommendation_degree || primary.confidence;
+    const range = primary.estimated_2w_range || primary.estimated_2d_range;
+    summary.estimated_2w_range = range && range.text;
+    summary.estimated_2d_range = range && range.text;
     summary.score = primary.score;
     summary.reason_tags = primary.reason_tags;
   }
@@ -105,7 +111,7 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === "/api/history") {
-    const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 30), 90));
+    const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 120), 240));
     const files = await loadManifest(env);
     const rows = [];
     for (const file of files) {

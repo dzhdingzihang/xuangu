@@ -1,69 +1,56 @@
-# 缠论量化选股网站
+# 智能选股
 
-本地运行的 A 股 2 日持有选股工具。它结合缠中说禅 PDF 中可量化的买点思想、同花顺强势股题材、腾讯收盘行情、东方财富龙虎榜和日 K 技术结构。
+A 股 / 港股 / 美股的未来 2 周智能选股网站。
 
-核心原则：
+核心目标：
 
-- 只选 1 只主选股；如果胜率和风控不达标，输出“今日不交易”。
-- 默认使用前一交易日收盘数据，适合每天早上 8:30 决策。
-- 买入后最多持有 2 个交易日；跌破止损线或 MA10 失守提前退出。
-- 预测准确率是模型先验估计，不是承诺收益，需要后续用真实交易结果校准。
+- 每个交易日 09:00 生成未来约 2 周、10 个交易日的推荐。
+- 交易时段每半小时更新一次快照。
+- 每次快照独立保存，历史推荐变化可追溯。
+- 每个市场给出推荐股票、推荐度、两周涨幅预估和推荐理由；没有通过阈值则显示“无推荐”。
+
+## 核心逻辑
+
+- 缠论 PDF：二买、三买、背驰、均线持股线等可量化结构。
+- `waditu/czsc`：参考分型、笔、中枢、信号-事件-交易框架，内置轻量 CZSC 结构因子；GitHub Actions 会尝试安装 `czsc` 作为可选运行时。
+- `wbh604/UZI-Skill`：参考多维评分、评审团共识、游资射程、杀猪盘/过热风控，形成 UZI 风控因子。
+- `yan-labs/serenity-aleabitoreddit`：AI capex 上游瓶颈、CPO/光通信、InP/化合物半导体、HBM/存储、neocloud、电力等产业链因子。
 
 ## 运行
 
 ```bash
 cd "/Users/dingzihang/Documents/猪猪投资存钱罐/chan-stock-site"
-../.venv/bin/python server.py --port 8790
+python server.py --port 8790
 ```
 
-然后打开：
+打开：
 
 ```text
 http://127.0.0.1:8790
 ```
 
-## 命令行重算
+## 命令行生成快照
 
 ```bash
-../.venv/bin/python server.py --once --force
+python server.py --once --force
 ```
 
 指定目标日：
 
 ```bash
-../.venv/bin/python server.py --once --date 2026-05-26 --force
+python server.py --once --date 2026-06-04 --force
 ```
 
 ## 数据源
 
 - 同花顺强势股题材归因
 - 腾讯财经行情
-- 东方财富龙虎榜
-- 百度股市通日 K（优先，带 MA5/10/20）
-- 东方财富日 K（备用）
+- 东方财富全市场、龙虎榜、行业热度
+- 百度股市通日 K
+- Yahoo Finance 日 K（港股 / 美股）
 
-## 部署到 Render
+## 自动部署
 
-本目录已经包含 Render Blueprint：
+GitHub Actions 会在北京时间交易日 09:00-15:30 每半小时生成新快照、提交历史文件并部署 Cloudflare Worker。
 
-```text
-render.yaml
-requirements.txt
-runtime.txt
-```
-
-Render 启动命令：
-
-```bash
-python server.py --host 0.0.0.0 --port $PORT
-```
-
-注意：Render Free Web Service 可能休眠，内置 08:30 定时器只有服务处于运行状态时才会准点执行。若要稳定每天 08:30 自动刷新，建议升级为常驻实例，或额外配置 Render Cron/外部定时器访问 `/api/pick?force=1`。
-
-## 缠论量化映射
-
-- 女上位：MA5 > MA10。
-- 二买近似：多头均线后回踩 MA5/MA10 不破并重新收回。
-- 三买近似：突破近 20 日中枢后回试不破。
-- MACD 背驰改善：低点附近 MACD 柱力度收敛。
-- 风控：不满足信号强度或风险过高时空仓。
+注意：本工具是量化决策辅助，不构成投资建议，不保证盈利。

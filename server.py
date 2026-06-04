@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Local Chan-theory A-share selector.
+Local intelligent stock selector.
 
-It intentionally prefers "no trade" over weak signals. The model is a
+It intentionally prefers "no recommendation" over weak signals. The model is a
 decision-support tool, not a guarantee of profit.
 """
 
@@ -33,7 +33,9 @@ CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "chan-selector-2026-06-03.4"
+MODEL_VERSION = "smart-selector-2026-06-04.1"
+FORECAST_TRADE_DAYS = 10
+FORECAST_LABEL = "未来2周"
 
 for path in (CACHE, PICKS):
     path.mkdir(parents=True, exist_ok=True)
@@ -54,6 +56,26 @@ CHAN_RULES = {
         "三买: 突破近 20 日箱体或中枢后，回踩不跌回箱体上沿；只突破不回踩不追。",
         "背驰: 价格创新低但 MACD 柱改善，作为二买/反转加分。",
         "卖点/风控: 涨停后大幅高开不追；跌破 MA10 或买入后两日未兑现强度时退出。",
+    ],
+}
+
+
+CZSC_RULES = {
+    "source": "waditu/czsc",
+    "principles": [
+        "参考 czsc 的分型、笔、中枢、信号-事件-交易框架，将单一均线信号升级为结构组合评分。",
+        "两周持有更重视日线中枢突破后的回踩确认、MA20/MA30 趋势、箱体位置和背驰风险。",
+        "若运行环境安装了 czsc，可进一步接入原生分型/笔/中枢；当前模型内置轻量近似，不依赖扩展成功。",
+    ],
+}
+
+
+UZI_RULES = {
+    "source": "wbh604/UZI-Skill",
+    "principles": [
+        "借鉴 UZI 的多维评分、评审团共识、游资射程、杀猪盘检测和定性风险门控。",
+        "推荐度不是单纯技术分，而是产业链、趋势、资金承接、风险标签、流动性和题材一致性的综合分。",
+        "对模板化推广、过热追高、低质量流动性、融资/稀释压力和单一催化叙事进行降权。",
     ],
 }
 
@@ -194,6 +216,12 @@ def next_weekday(day: dt.date) -> dt.date:
     return day
 
 
+def add_trade_weekdays(day: dt.date, count: int) -> dt.date:
+    for _ in range(count):
+        day = next_weekday(day)
+    return day
+
+
 def default_signal_date(today: dt.date | None = None) -> dt.date:
     current = now_cn()
     today = today or current.date()
@@ -211,16 +239,19 @@ def default_target_date() -> dt.date:
     today = current.date()
     if not is_trade_weekday(today):
         return next_weekday(today)
-    if current.time() >= dt.time(15, 30):
-        return next_weekday(today)
     return today
 
 
-def parse_cache_name(path: pathlib.Path) -> tuple[str, str] | None:
-    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.json", path.name)
+def snapshot_slug(moment: dt.datetime | None = None) -> str:
+    moment = moment or now_cn()
+    return moment.strftime("%H%M%S")
+
+
+def parse_cache_name(path: pathlib.Path) -> tuple[str, str, str] | None:
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})(?:_(\d{6}))?\.json", path.name)
     if not match:
         return None
-    return match.group(1), match.group(2)
+    return match.group(1), match.group(2), match.group(3) or "000000"
 
 
 def summarize_pick(pick: dict) -> dict:
@@ -230,6 +261,9 @@ def summarize_pick(pick: dict) -> dict:
         "target_date": pick.get("target_date"),
         "signal_date": pick.get("signal_date"),
         "generated_at": pick.get("generated_at"),
+        "generated_label": pick.get("generated_label"),
+        "forecast_end_date": pick.get("forecast_end_date"),
+        "forecast_horizon": pick.get("forecast_horizon"),
         "action": decision.get("action"),
         "title": decision.get("title"),
         "message": decision.get("message"),
@@ -241,8 +275,10 @@ def summarize_pick(pick: dict) -> dict:
             {
                 "code": primary.get("code"),
                 "name": primary.get("name"),
-                "confidence": primary.get("confidence"),
-                "estimated_2d_range": (primary.get("estimated_2d_range") or {}).get("text"),
+                "confidence": primary.get("recommendation_degree") or primary.get("confidence"),
+                "recommendation_degree": primary.get("recommendation_degree") or primary.get("confidence"),
+                "estimated_2w_range": (primary.get("estimated_2w_range") or primary.get("estimated_2d_range") or {}).get("text"),
+                "estimated_2d_range": (primary.get("estimated_2w_range") or primary.get("estimated_2d_range") or {}).get("text"),
                 "score": primary.get("score"),
                 "reason_tags": primary.get("reason_tags"),
             }
@@ -768,6 +804,24 @@ def macd_hist(closes: list[float]) -> list[float]:
     return [(d - signal) * 2 for d, signal in zip(dif, dea)]
 
 
+def runtime_research_status() -> dict:
+    status = {
+        "czsc": {"installed": False, "version": None, "mode": "builtin-lightweight"},
+        "uzi_skill": {"installed": True, "mode": "methodology-weighted", "repo": "wbh604/UZI-Skill"},
+    }
+    try:
+        import czsc  # type: ignore
+
+        status["czsc"] = {
+            "installed": True,
+            "version": getattr(czsc, "__version__", "unknown"),
+            "mode": "optional-runtime-detected",
+        }
+    except Exception:
+        pass
+    return status
+
+
 def mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
@@ -776,6 +830,88 @@ def pct_change(current: float, base: float) -> float:
     if not base:
         return 0.0
     return (current / base - 1) * 100
+
+
+def czsc_structure_score(kline: list[dict]) -> dict:
+    if len(kline) < 45:
+        return {"score": 0.0, "signals": [], "warnings": [], "metrics": {}}
+    closes = [x["close"] for x in kline]
+    highs = [x["high"] for x in kline]
+    lows = [x["low"] for x in kline]
+    last = kline[-1]
+    ma20 = mean(closes[-20:])
+    ma30 = mean(closes[-30:])
+    ma60 = mean(closes[-60:]) if len(closes) >= 60 else mean(closes)
+    box_high = max(highs[-45:-10])
+    box_low = min(lows[-45:-10])
+    recent_low = min(lows[-8:])
+    pct_20d = pct_change(closes[-1], closes[-21]) if len(closes) >= 21 else 0
+    score = 0.0
+    signals: list[str] = []
+    warnings: list[str] = []
+    if closes[-1] > ma20 > ma30:
+        score += 12
+        signals.append("CZSC近似: 日线趋势维持在 MA20/MA30 上方")
+    if ma30 >= ma60 * 0.985:
+        score += 7
+        signals.append("CZSC近似: 中期均线未走坏，适合两周窗口")
+    if closes[-1] > box_high * 1.01 and recent_low > box_high * 0.97:
+        score += 16
+        signals.append("CZSC近似: 突破中枢后回踩未破")
+    elif box_low <= closes[-1] <= box_high and closes[-1] > (box_low + box_high) / 2:
+        score += 6
+        signals.append("CZSC近似: 中枢上半区震荡，等待向上离开")
+    if pct_20d > 35:
+        score -= 14
+        warnings.append(f"20日涨幅 {pct_20d:.1f}%，两周追高风险上升")
+    if closes[-1] < ma20 * 0.97:
+        score -= 12
+        warnings.append("跌破 MA20，未来两周趋势延续性不足")
+    return {
+        "score": round(score, 2),
+        "signals": signals[:4],
+        "warnings": warnings[:4],
+        "metrics": {
+            "ma20": round(ma20, 3),
+            "ma30": round(ma30, 3),
+            "ma60": round(ma60, 3),
+            "box_high_45d": round(box_high, 3),
+            "box_low_45d": round(box_low, 3),
+            "pct_20d": round(pct_20d, 2),
+        },
+    }
+
+
+def uzi_risk_score(candidate: dict, quote: dict, risk_flags: list[str], market_key: str) -> dict:
+    score = 0.0
+    reasons: list[str] = []
+    warnings: list[str] = []
+    change = quote.get("change_pct", 0.0)
+    pct_5d = quote.get("pct_5d", 0.0)
+    vol_ratio = quote.get("vol_ratio", 0.0)
+    amount_yi = quote.get("amount_yi", 0.0)
+    if 0 <= pct_5d <= (14 if market_key == "us" else 10):
+        score += 8
+        reasons.append("UZI风控: 近5日未明显透支，仍有两周弹性")
+    if change > (12 if market_key == "us" else 8.5):
+        score -= 12
+        warnings.append("UZI风控: 单日涨幅过大，疑似已被抢跑")
+    if pct_5d > (28 if market_key == "us" else 18):
+        score -= 14
+        warnings.append("UZI风控: 5日涨幅过热，避免追高接盘")
+    if vol_ratio and vol_ratio > 3.5:
+        score -= 8
+        warnings.append("UZI风控: 量能异常放大，分歧风险升高")
+    if market_key == "a_share" and amount_yi and amount_yi < 3:
+        score -= 8
+        warnings.append("UZI风控: A股成交额偏低，承接不足")
+    if len(risk_flags) >= 3:
+        score -= 8
+        warnings.append("UZI风控: 风险标签过多")
+    if not warnings:
+        score += 4
+        reasons.append("UZI风控: 未触发杀猪盘/过热式硬拦截")
+    return {"score": round(score, 2), "signals": reasons[:4], "warnings": warnings[:4]}
 
 
 def chan_signal(kline: list[dict]) -> dict:
@@ -823,7 +959,7 @@ def chan_signal(kline: list[dict]) -> dict:
         score += 6
         signals.append("持股线: 未有效跌破 MA10")
     else:
-        warnings.append("收盘价跌破 MA10，二日持有风险偏高")
+        warnings.append("收盘价跌破 MA10，两周趋势风险偏高")
         score -= 10
 
     recent_pullback = min(lows[-6:-1]) <= ma10 * 1.025
@@ -878,7 +1014,7 @@ def chan_signal(kline: list[dict]) -> dict:
         warnings.append(f"偏离 MA10 {distance_ma10:.1f}%，追高风险上升")
     elif 0 <= distance_ma10 <= 5:
         score += 8
-        signals.append("成本位置: 距 MA10 不远，二日风控更可控")
+        signals.append("成本位置: 距 MA10 不远，两周风控更可控")
     if pct_5d > 18:
         score -= min(24, (pct_5d - 18) * 1.2)
         warnings.append(f"5 日累计涨幅 {pct_5d:.1f}%，短线兑现压力偏大")
@@ -961,7 +1097,7 @@ def preliminary_score(hot: dict, quote: dict, dragon: dict | None) -> dict:
             risk_flags.append("一字涨停，次日可买性差")
             score -= 22
     if change_pct >= 18.5:
-        risk_flags.append("20cm 大涨后，二日持有回撤风险高")
+        risk_flags.append("20cm 大涨后，两周持有回撤风险高")
         score -= 12
     elif change_pct >= 9.5:
         risk_flags.append("10cm 涨停后，隔日接力不确定")
@@ -992,22 +1128,22 @@ def preliminary_score(hot: dict, quote: dict, dragon: dict | None) -> dict:
 
 
 def candidate_confidence(score: float, risk_count: int, market_risk: str) -> int:
-    confidence = 48 + (score - 60) * 0.34
-    confidence -= min(risk_count * 4, 18)
+    confidence = 50 + (score - 72) * 0.28
+    confidence -= min(risk_count * 3, 18)
     if market_risk == "medium":
         confidence -= 5
     elif market_risk == "high":
         confidence -= 12
-    return int(max(38, min(72, round(confidence))))
+    return int(max(35, min(86, round(confidence))))
 
 
 def estimate_range(confidence: int, technical: float, theme: float, risk_count: int) -> dict:
-    if confidence < 62:
-        low, high = -4.0, 2.4
+    if confidence < 58:
+        low, high = -6.0, 3.0
     else:
-        low = max(-3.2, -1.8 + (confidence - 62) * 0.04 - risk_count * 0.32)
-        high = 1.8 + (confidence - 62) * 0.18 + technical * 0.028 + theme * 0.045
-        high = min(high, 9.0)
+        low = max(-5.0, -3.2 + (confidence - 60) * 0.05 - risk_count * 0.35)
+        high = 3.2 + (confidence - 58) * 0.28 + technical * 0.035 + theme * 0.06
+        high = min(high, 18.0)
     return {
         "low_pct": round(low, 1),
         "high_pct": round(high, 1),
@@ -1052,21 +1188,21 @@ def serenity_lens_score(candidate: dict) -> tuple[float, list[str], list[str]]:
 
 
 def serenity_confidence(score: float, risk_count: int, market_key: str) -> int:
-    base = 46 + (score - 72) * 0.31
-    base -= min(risk_count * 4, 20)
+    base = 48 + (score - 74) * 0.30
+    base -= min(risk_count * 3.5, 20)
     if market_key in ("hk", "us"):
         base -= 1
-    return int(max(36, min(76, round(base))))
+    return int(max(35, min(86, round(base))))
 
 
 def serenity_estimate_range(confidence: int, score: float, risk_count: int, market_key: str) -> dict:
-    if confidence < 60:
-        low, high = (-5.5, 2.6) if market_key == "us" else (-4.2, 2.2)
+    if confidence < 58:
+        low, high = (-8.0, 4.0) if market_key == "us" else (-6.0, 3.2)
     else:
-        vol_boost = 0.2 if market_key == "us" else 0.0
-        low = -2.8 - risk_count * 0.45 - vol_boost
-        high = 2.0 + (confidence - 60) * 0.22 + max(score - 85, 0) * 0.035 + vol_boost
-        high = min(high, 12.0 if market_key == "us" else 8.5)
+        vol_boost = 1.2 if market_key == "us" else 0.4
+        low = -4.2 - risk_count * 0.45 - vol_boost
+        high = 4.0 + (confidence - 58) * 0.34 + max(score - 90, 0) * 0.045 + vol_boost
+        high = min(high, 24.0 if market_key == "us" else 18.0)
     return {"low_pct": round(low, 1), "high_pct": round(high, 1), "text": f"{low:+.1f}% ~ {high:+.1f}%"}
 
 
@@ -1101,11 +1237,13 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         if not quote or quote["price"] <= 0:
             continue
         chan = chan_signal(kline)
+        czsc = czsc_structure_score(kline)
         metrics = chan.get("metrics") or {}
         lens_score, lens_reasons, lens_risks = serenity_lens_score(candidate)
         setup_flags = metrics.get("setup_flags") or []
-        total = lens_score * policy["lens_weight"] + chan["score"] * policy["chan_weight"]
-        risk_flags = list(lens_risks) + chan["warnings"]
+        risk_flags = list(lens_risks) + chan["warnings"] + czsc["warnings"]
+        uzi = uzi_risk_score(candidate, {**quote, "amount_yi": 0}, risk_flags, market_key)
+        total = lens_score * policy["lens_weight"] + chan["score"] * policy["chan_weight"] + czsc["score"] + uzi["score"]
         hard_risks = 0
         if not setup_flags:
             hard_risks += 1
@@ -1125,14 +1263,16 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
             total -= hard_risks * policy["hard_penalty"]
         confidence = serenity_confidence(total, len(risk_flags), market_key)
         est = serenity_estimate_range(confidence, total, len(risk_flags), market_key)
-        stop_loss = quote["price"] * (0.955 if market_key == "us" else 0.965)
+        stop_loss = quote["price"] * (0.925 if market_key == "us" else 0.94)
         take_profit = quote["price"] * (1 + min(est["high_pct"], 12) / 100)
         reasons = []
         reasons.extend(lens_reasons[:4])
         if candidate.get("themes"):
             reasons.append("产业链主题: " + "、".join(candidate["themes"][:4]))
         reasons.extend(chan["signals"][:4])
-        reasons.append(f"价格结构: 信号日 {quote['change_pct']:+.2f}%，5日 {quote['pct_5d']:+.2f}%")
+        reasons.extend(czsc["signals"][:3])
+        reasons.extend(uzi["signals"][:2])
+        reasons.append(f"价格结构: 信号日 {quote['change_pct']:+.2f}%，5日 {quote['pct_5d']:+.2f}%，未来2周观察")
         final.append(
             {
                 "code": symbol,
@@ -1151,9 +1291,13 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                 "score": round(total, 2),
                 "pre_score": lens_score,
                 "chan_score": chan["score"],
+                "czsc_score": czsc["score"],
+                "uzi_score": uzi["score"],
                 "setup_flags": setup_flags,
                 "hard_risk_count": hard_risks,
                 "confidence": confidence,
+                "recommendation_degree": confidence,
+                "estimated_2w_range": est,
                 "estimated_2d_range": est,
                 "stop_loss": round(stop_loss, 3),
                 "take_profit_reference": round(take_profit, 3),
@@ -1162,6 +1306,8 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                 "reasons": reasons[:8],
                 "risk_flags": risk_flags[:7],
                 "chan": chan,
+                "czsc": czsc,
+                "uzi": uzi,
                 "serenity": {
                     "score": lens_score,
                     "role": candidate.get("role", ""),
@@ -1180,8 +1326,8 @@ def make_serenity_decision(candidates: list[dict], market_key: str) -> dict:
     if not candidates:
         return {
             "action": "NO_TRADE",
-            "title": "今日不交易",
-            "message": "该市场没有足够完整的行情或结构信号。",
+            "title": "无推荐",
+            "message": "该市场没有足够完整的行情或结构信号，未来2周暂不推荐。",
             "primary": None,
             "watchlist": [],
         }
@@ -1189,17 +1335,17 @@ def make_serenity_decision(candidates: list[dict], market_key: str) -> dict:
     blockers = []
     threshold = SERENITY_MARKET_POLICY.get(market_key, SERENITY_MARKET_POLICY["hk"])["threshold"]
     if primary["confidence"] < threshold:
-        blockers.append(f"Serenity+技术综合胜率低于 {threshold}%")
+        blockers.append(f"推荐度低于 {threshold}")
     if primary.get("hard_risk_count", 0) >= 2:
         blockers.append("硬风险项过多")
-    if primary["estimated_2d_range"]["low_pct"] <= (-4.0 if market_key == "us" else -3.2):
+    if primary["estimated_2w_range"]["low_pct"] <= (-7.0 if market_key == "us" else -5.5):
         blockers.append("预估下行空间偏大")
     if len(primary["risk_flags"]) >= 4:
         blockers.append("风险标签过多")
     if blockers:
         return {
             "action": "NO_TRADE",
-            "title": "今日不交易",
+            "title": "无推荐",
             "message": "；".join(blockers),
             "primary": None,
             "blocked_candidate": primary,
@@ -1207,8 +1353,8 @@ def make_serenity_decision(candidates: list[dict], market_key: str) -> dict:
         }
     return {
         "action": "BUY_CANDIDATE",
-        "title": "今日主选",
-        "message": "Serenity 产业链因子、价格结构和二日风控同时通过阈值。",
+        "title": "两周推荐",
+        "message": "Serenity 产业链因子、CZSC结构、价格趋势和 UZI 风控同时通过阈值。",
         "primary": primary,
         "watchlist": candidates[1:9],
     }
@@ -1239,14 +1385,22 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
         code = quote["code"]
         kline = stock_kline(code)
         chan = chan_signal(kline)
+        czsc = czsc_structure_score(kline)
         metrics = chan.get("metrics") or {}
         serenity_candidate = SERENITY_A_BY_CODE.get(code)
         if serenity_candidate:
             serenity_score, serenity_reasons, serenity_risks = serenity_lens_score(serenity_candidate)
         else:
             serenity_score, serenity_reasons, serenity_risks = 0.0, [], []
-        total = item["pre_score"] + chan["score"] + serenity_score * 0.55
-        risk_flags = list(item["risk_flags"]) + serenity_risks + chan["warnings"]
+        risk_flags = list(item["risk_flags"]) + serenity_risks + chan["warnings"] + czsc["warnings"]
+        quote_for_uzi = {
+            "change_pct": quote["change_pct"],
+            "pct_5d": metrics.get("pct_5d", 0.0),
+            "vol_ratio": quote["vol_ratio"],
+            "amount_yi": quote["amount_wan"] / 10000,
+        }
+        uzi = uzi_risk_score(serenity_candidate or {}, quote_for_uzi, risk_flags, "a_share")
+        total = item["pre_score"] + chan["score"] * 0.75 + czsc["score"] + serenity_score * 0.65 + uzi["score"]
         setup_flags = metrics.get("setup_flags") or []
         hard_risks = 0
         if not setup_flags:
@@ -1264,9 +1418,9 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
         if hard_risks:
             total -= hard_risks * 8
         confidence = candidate_confidence(total, len(risk_flags), market.get("risk", "unknown"))
-        est = estimate_range(confidence, chan["score"], item["theme_score"], len(risk_flags))
-        stop_loss = max(quote["limit_down"], quote["price"] * 0.965)
-        take_profit = quote["price"] * (1 + min(est["high_pct"], 10) / 100)
+        est = estimate_range(confidence, chan["score"] + czsc["score"], item["theme_score"] + serenity_score, len(risk_flags))
+        stop_loss = max(quote["limit_down"], quote["price"] * 0.94)
+        take_profit = quote["price"] * (1 + min(est["high_pct"], 18) / 100)
         reasons = []
         reasons.extend(serenity_reasons[:3])
         if item["theme_tags"]:
@@ -1274,8 +1428,10 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
         if item["dragon_net_wan"] > 0:
             reasons.append(f"龙虎榜净买入约 {item['dragon_net_wan']:.0f} 万")
         reasons.extend(chan["signals"][:4])
+        reasons.extend(czsc["signals"][:3])
+        reasons.extend(uzi["signals"][:2])
         reasons.append(
-            f"流动性: 成交 {quote['amount_wan']/10000:.1f} 亿，换手 {quote['turnover_pct']:.1f}%"
+            f"流动性: 成交 {quote['amount_wan']/10000:.1f} 亿，换手 {quote['turnover_pct']:.1f}%，未来2周观察"
         )
         final.append(
             {
@@ -1292,10 +1448,14 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
                 "score": round(total, 2),
                 "pre_score": item["pre_score"],
                 "chan_score": chan["score"],
+                "czsc_score": czsc["score"],
                 "serenity_score": serenity_score,
+                "uzi_score": uzi["score"],
                 "setup_flags": setup_flags,
                 "hard_risk_count": hard_risks,
                 "confidence": confidence,
+                "recommendation_degree": confidence,
+                "estimated_2w_range": est,
                 "estimated_2d_range": est,
                 "stop_loss": round(stop_loss, 2),
                 "take_profit_reference": round(take_profit, 2),
@@ -1304,6 +1464,8 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
                 "reasons": reasons[:7],
                 "risk_flags": risk_flags[:6],
                 "chan": chan,
+                "czsc": czsc,
+                "uzi": uzi,
                 "serenity": {
                     "score": serenity_score,
                     "role": serenity_candidate.get("role", "") if serenity_candidate else "",
@@ -1332,8 +1494,8 @@ def make_decision(candidates: list[dict], market: dict) -> dict:
     if not candidates:
         return {
             "action": "NO_TRADE",
-            "title": "今日不交易",
-            "message": "没有足够强的候选池，系统选择空仓。",
+            "title": "无推荐",
+            "message": "没有足够强的候选池，未来2周暂不推荐。",
             "primary": None,
             "watchlist": [],
         }
@@ -1342,23 +1504,23 @@ def make_decision(candidates: list[dict], market: dict) -> dict:
     blockers = []
     if market.get("risk") == "high":
         blockers.append("指数环境触发高风险拦截")
-    if primary["confidence"] < 66:
-        blockers.append("预测胜率低于 66%")
+    if primary["confidence"] < 64:
+        blockers.append("推荐度低于 64")
     if primary.get("hard_risk_count", 0) >= 2:
-        blockers.append("硬风险项过多，不适合 2 日持有")
+        blockers.append("硬风险项过多，不适合未来2周持有")
     if len(primary["risk_flags"]) >= 3:
         blockers.append("候选股风险标签过多")
     if primary["amount_yi"] < 2.5:
         blockers.append("成交额不足，承接不够")
     if primary["change_pct"] >= 9.5:
         blockers.append("信号日已接近涨停，次日追高性价比不足")
-    if primary["estimated_2d_range"]["low_pct"] <= -3.0:
+    if primary["estimated_2w_range"]["low_pct"] <= -5.5:
         blockers.append("预估下行空间过大")
 
     if blockers:
         return {
             "action": "NO_TRADE",
-            "title": "今日不交易",
+            "title": "无推荐",
             "message": "；".join(blockers),
             "primary": None,
             "blocked_candidate": primary,
@@ -1366,8 +1528,8 @@ def make_decision(candidates: list[dict], market: dict) -> dict:
         }
     return {
         "action": "BUY_CANDIDATE",
-        "title": "今日主选",
-        "message": "满足二日持有的结构确认、回撤约束和风控阈值。",
+        "title": "两周推荐",
+        "message": "满足未来2周上涨的趋势结构、资金承接和风控阈值。",
         "primary": primary,
         "watchlist": candidates[1:9],
     }
@@ -1376,12 +1538,16 @@ def make_decision(candidates: list[dict], market: dict) -> dict:
 def run_selector(date_text: str | None = None, force: bool = False) -> dict:
     target_day = dt.date.fromisoformat(date_text) if date_text else default_target_date()
     signal_day = default_signal_date(target_day)
-    cache_key = f"{target_day.isoformat()}_{signal_day.isoformat()}.json"
+    generated_at = now_cn()
+    run_slug = snapshot_slug(generated_at)
+    cache_key = f"{target_day.isoformat()}_{signal_day.isoformat()}_{run_slug}.json"
     cache_path = PICKS / cache_key
-    if cache_path.exists() and not force:
-        cached = json.loads(cache_path.read_text(encoding="utf-8"))
-        if cached.get("model_version") == MODEL_VERSION:
-            return cached
+    if not force:
+        latest_path = PICKS / "latest.json"
+        if latest_path.exists():
+            cached = json.loads(latest_path.read_text(encoding="utf-8"))
+            if cached.get("model_version") == MODEL_VERSION and cached.get("target_date") == target_day.isoformat():
+                return cached
 
     hot_date, event_rows = find_hot_pool(signal_day)
     broad_rows = load_broad_market_pool()
@@ -1394,12 +1560,12 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
     us_scored = score_serenity_candidates("us", SERENITY_UNIVERSES["us"])
     hk_decision = make_serenity_decision(hk_scored["candidates"], "hk")
     us_decision = make_serenity_decision(us_scored["candidates"], "us")
-    next_day = next_weekday(target_day)
+    forecast_end = add_trade_weekdays(target_day, FORECAST_TRADE_DAYS)
     market_sections = {
         "a_share": {
             "key": "a_share",
             "label": "A股",
-            "description": "原始缠论/资金面模型，并加入 Serenity AI 上游瓶颈权重。",
+            "description": "A股强势池 + CZSC结构 + UZI风控 + Serenity AI 上游瓶颈权重。",
             "decision": decision,
             "stats": {
                 "raw_pool_size": scored["raw_pool_size"],
@@ -1412,7 +1578,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "hk": {
             "key": "hk",
             "label": "港股",
-            "description": "用 Serenity 产业链因子筛选港股 AI/半导体/云/光学相关标的，再用日线结构过滤。",
+            "description": "港股 AI/半导体/云/光学候选，按未来2周趋势结构和风险过滤。",
             "decision": hk_decision,
             "stats": {
                 "raw_pool_size": hk_scored["raw_pool_size"],
@@ -1425,7 +1591,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "us": {
             "key": "us",
             "label": "美股",
-            "description": "按 Serenity 原始强项：CPO/光子、InP、HBM/存储、neocloud、电力瓶颈进行加权。",
+            "description": "美股 CPO/光子、InP、HBM/存储、neocloud、电力瓶颈，两周趋势加权。",
             "decision": us_decision,
             "stats": {
                 "raw_pool_size": us_scored["raw_pool_size"],
@@ -1438,11 +1604,15 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
     }
     result = {
         "model_version": MODEL_VERSION,
-        "generated_at": now_cn().isoformat(timespec="seconds"),
+        "generated_at": generated_at.isoformat(timespec="seconds"),
+        "generated_label": generated_at.strftime("%Y-%m-%d %H:%M"),
+        "snapshot_key": cache_key,
         "target_date": target_day.isoformat(),
-        "next_trade_date": next_day.isoformat(),
+        "next_trade_date": forecast_end.isoformat(),
+        "forecast_end_date": forecast_end.isoformat(),
+        "forecast_horizon": f"{FORECAST_TRADE_DAYS}个交易日 / 约2周",
         "signal_date": hot_date,
-        "holding_plan": "买入后最多持有 2 个交易日；若触发止损或 MA10 失守，提前退出。",
+        "holding_plan": "未来2周观察窗口；若跌破止损线、MA20失守或推荐度显著下降，提前退出。",
         "decision": decision,
         "markets": market_sections,
         "market": market,
@@ -1455,11 +1625,14 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "dragon_count": scored["dragon_count"],
         },
         "chan_rules": CHAN_RULES,
+        "czsc_rules": CZSC_RULES,
+        "uzi_rules": UZI_RULES,
         "serenity_rules": SERENITY_RULES,
+        "research_runtime": runtime_research_status(),
         "serenity_source": serenity_source_status(),
         "accuracy_note": (
-            "预测准确率是规则模型按信号强度映射的先验估计；"
-            "需要每天保存结果后，用真实 2 日收益滚动校准。"
+            "推荐度是规则模型按两周趋势、产业链、CZSC结构、UZI风控和资金承接映射的先验估计；"
+            "需要持续保存半小时快照后，用真实两周收益滚动校准。"
         ),
         "disclaimer": "本工具是量化决策辅助，不构成投资建议，不保证盈利。",
     }
@@ -1500,7 +1673,7 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/history":
             query = urllib.parse.parse_qs(parsed.query)
             limit = int(query.get("limit", ["30"])[0])
-            self.send_json(history_payload(limit=max(1, min(limit, 90))))
+            self.send_json(history_payload(limit=max(1, min(limit, 240))))
             return
         if parsed.path == "/api/latest":
             latest = PICKS / "latest.json"
@@ -1528,7 +1701,12 @@ def scheduler_loop() -> None:
     while True:
         current = now_cn()
         key = current.strftime("%Y-%m-%d %H:%M")
-        if current.weekday() < 5 and current.hour == 8 and current.minute == 30 and key != last_run:
+        in_update_window = current.weekday() < 5 and (
+            (current.hour == 9 and current.minute in (0, 30))
+            or (10 <= current.hour <= 14 and current.minute in (0, 30))
+            or (current.hour == 15 and current.minute in (0, 30))
+        )
+        if in_update_window and key != last_run:
             last_run = key
             try:
                 run_selector(date_text=current.date().isoformat(), force=True)
@@ -1545,7 +1723,7 @@ class ReusableThreadingTCPServer(socketserver.ThreadingTCPServer):
 def serve(port: int, host: str) -> None:
     threading.Thread(target=scheduler_loop, daemon=True).start()
     with ReusableThreadingTCPServer((host, port), AppHandler) as httpd:
-        print(f"Chan stock selector running at http://{host}:{port}")
+        print(f"Smart stock selector running at http://{host}:{port}")
         httpd.serve_forever()
 
 

@@ -20,7 +20,7 @@ const els = {
   marketTabs: document.getElementById("marketTabs"),
 };
 
-const LOCAL_HISTORY_KEY = "chan-stock-history-v1";
+const LOCAL_HISTORY_KEY = "smart-stock-history-v2";
 const MARKET_ORDER = ["a_share", "hk", "us"];
 let activeMarket = "a_share";
 let currentData = null;
@@ -59,17 +59,23 @@ function summarizeClientPick(data) {
     target_date: data.target_date,
     signal_date: data.signal_date,
     generated_at: data.generated_at,
+    generated_label: data.generated_label,
+    forecast_end_date: data.forecast_end_date,
+    forecast_horizon: data.forecast_horizon,
     action: decision.action,
     title: decision.title,
     message: decision.message,
     has_primary: Boolean(decision.primary),
-    local_key: `${data.target_date}_${data.signal_date}`,
+    local_key: data.snapshot_key || `${data.target_date}_${data.signal_date}_${data.generated_at || ""}`,
   };
   if (primary) {
     summary.code = primary.code;
     summary.name = primary.name;
-    summary.confidence = primary.confidence;
-    summary.estimated_2d_range = primary.estimated_2d_range && primary.estimated_2d_range.text;
+    summary.confidence = primary.recommendation_degree || primary.confidence;
+    summary.recommendation_degree = primary.recommendation_degree || primary.confidence;
+    const range = primary.estimated_2w_range || primary.estimated_2d_range;
+    summary.estimated_2w_range = range && range.text;
+    summary.estimated_2d_range = range && range.text;
     summary.score = primary.score;
     summary.reason_tags = primary.reason_tags;
   }
@@ -92,7 +98,7 @@ function writeLocalHistory(history) {
 function storeLocalPick(data) {
   if (!data || !data.target_date || !data.signal_date) return;
   const history = readLocalHistory();
-  history[`${data.target_date}_${data.signal_date}`] = data;
+  history[data.snapshot_key || `${data.target_date}_${data.signal_date}_${data.generated_at || ""}`] = data;
   writeLocalHistory(history);
 }
 
@@ -109,10 +115,10 @@ function localSummaries() {
 function mergeHistory(serverRows) {
   const merged = new Map();
   (serverRows || []).forEach((item) => {
-    merged.set(`${item.target_date}_${item.signal_date}`, item);
+    merged.set(item.cache_key || `${item.target_date}_${item.signal_date}_${item.generated_at || ""}`, item);
   });
   localSummaries().forEach((item) => {
-    const key = `${item.target_date}_${item.signal_date}`;
+    const key = item.cache_key || item.local_key || `${item.target_date}_${item.signal_date}_${item.generated_at || ""}`;
     merged.set(key, { ...item, ...(merged.get(key) || {}) });
   });
   return [...merged.values()].sort((a, b) =>
@@ -131,19 +137,19 @@ function renderPrimary(data) {
     els.primaryBlock.innerHTML = `
       <div class="primary-stock">
         <div class="stock-title">
-          <strong>今日不交易</strong>
-          <span>空仓优先</span>
+          <strong>无推荐</strong>
+          <span>等待更强信号</span>
         </div>
         <p class="decision-copy">${decision.message}</p>
         ${
           blocked
-            ? `<p class="decision-copy">最高分候选是 ${blocked.code} ${blocked.name}，但没有通过风控阈值。</p>`
+            ? `<p class="decision-copy">最高分候选是 ${blocked.code} ${blocked.name}，但没有通过未来2周推荐阈值。</p>`
             : ""
         }
       </div>
     `;
-    els.confidenceMetric.textContent = blocked ? `${blocked.confidence}%` : "--";
-    els.rangeMetric.textContent = blocked ? blocked.estimated_2d_range.text : "--";
+    els.confidenceMetric.textContent = blocked ? `${blocked.recommendation_degree || blocked.confidence}%` : "--";
+    els.rangeMetric.textContent = blocked ? (blocked.estimated_2w_range || blocked.estimated_2d_range).text : "--";
     els.stopMetric.textContent = "--";
     return;
   }
@@ -163,8 +169,8 @@ function renderPrimary(data) {
       </div>
     </div>
   `;
-  els.confidenceMetric.textContent = `${primary.confidence}%`;
-  els.rangeMetric.textContent = primary.estimated_2d_range.text;
+  els.confidenceMetric.textContent = `${primary.recommendation_degree || primary.confidence}%`;
+  els.rangeMetric.textContent = (primary.estimated_2w_range || primary.estimated_2d_range).text;
   els.stopMetric.textContent = primary.stop_loss.toFixed(2);
 }
 
@@ -192,9 +198,9 @@ function renderTable(data) {
     tr.innerHTML = `
       <td>${index + 1}</td>
       <td><strong>${row.name}</strong><span class="muted">${row.code}</span></td>
-      <td>${row.score.toFixed(1)}<br><span class="muted">缠 ${row.chan_score.toFixed(1)} / S ${(row.serenity_score || (row.serenity && row.serenity.score) || 0).toFixed(1)}</span></td>
-      <td>${row.confidence}%</td>
-      <td>${row.estimated_2d_range.text}</td>
+      <td>${row.score.toFixed(1)}<br><span class="muted">缠 ${row.chan_score.toFixed(1)} / CZ ${(row.czsc_score || 0).toFixed(1)} / UZI ${(row.uzi_score || 0).toFixed(1)} / S ${(row.serenity_score || (row.serenity && row.serenity.score) || 0).toFixed(1)}</span></td>
+      <td>${row.recommendation_degree || row.confidence}%</td>
+      <td>${(row.estimated_2w_range || row.estimated_2d_range).text}</td>
       <td>${row.amount_yi ? `${row.amount_yi.toFixed(1)} 亿` : "见行情"}<br><span class="muted">${row.turnover_pct ? `换手 ${row.turnover_pct.toFixed(1)}%` : `量比 ${row.vol_ratio || "--"}`}</span></td>
       <td><div class="tagline">${row.role || row.reason_tags || "无题材标签"}</div></td>
       <td><div class="risk-tags">${risks}</div></td>
@@ -206,6 +212,8 @@ function renderTable(data) {
 function renderRules(data) {
   clearList(els.chanRules);
   data.chan_rules.quant_mapping.forEach((rule) => els.chanRules.append(li(rule)));
+  ((data.czsc_rules && data.czsc_rules.principles) || []).forEach((rule) => els.chanRules.append(li(`CZSC: ${rule}`)));
+  ((data.uzi_rules && data.uzi_rules.principles) || []).forEach((rule) => els.chanRules.append(li(`UZI: ${rule}`)));
   ((data.serenity_rules && data.serenity_rules.principles) || []).forEach((rule) => els.chanRules.append(li(`Serenity: ${rule}`)));
   if (data.serenity_source) {
     const source = data.serenity_source;
@@ -248,8 +256,8 @@ function render(data) {
   currentData = data;
   if (!data.markets || !data.markets[activeMarket]) activeMarket = "a_share";
   const section = selectedMarket(data);
-  els.subtitle.textContent = `${data.target_date} 开盘计划，基于 ${data.signal_date} 收盘数据；持有窗口到 ${data.next_trade_date}`;
-  els.signalDate.textContent = `${section.label || "A股"} · 信号日 ${data.signal_date}`;
+  els.subtitle.textContent = `${data.target_date} 推荐，基于 ${data.signal_date} 数据；观察到 ${data.forecast_end_date || data.next_trade_date}（${data.forecast_horizon || "约2周"}）`;
+  els.signalDate.textContent = `${section.label || "A股"} · ${data.generated_label || data.generated_at || ""}`;
   els.poolMetric.textContent = `${section.stats.raw_pool_size}/${section.stats.scored_size}`;
   renderMarketTabs(data);
   renderPrimary(data);
@@ -282,11 +290,11 @@ function renderMarketTabs(data) {
         <strong>${section.label}</strong>
         <b class="${decision.action === "BUY_CANDIDATE" ? "red" : "muted"}">${decision.title || "--"}</b>
       </span>
-      <span>${primary ? `${primary.name} ${primary.code}` : "空仓优先"}</span>
+      <span>${primary ? `${primary.name} ${primary.code}` : "无推荐"}</span>
       <small>${section.description || ""}</small>
       <span class="tab-foot">
-        <em>胜率 ${primary ? `${primary.confidence}%` : "--"}</em>
-        <em>${primary && primary.estimated_2d_range ? primary.estimated_2d_range.text : "--"}</em>
+        <em>推荐度 ${primary ? `${primary.recommendation_degree || primary.confidence}%` : "--"}</em>
+        <em>${primary ? ((primary.estimated_2w_range || primary.estimated_2d_range || {}).text || "--") : "--"}</em>
       </span>
     `;
     button.addEventListener("click", () => {
@@ -299,7 +307,7 @@ function renderMarketTabs(data) {
 
 function historyTitle(item) {
   if (!item) return "暂无历史记录";
-  if (!item.has_primary) return `${item.target_date} 空仓`;
+  if (!item.has_primary) return `${item.target_date} 无推荐`;
   return `${item.target_date} ${item.name} ${item.code}`;
 }
 
@@ -321,16 +329,16 @@ function renderHistory(history, currentTarget) {
     button.innerHTML = `
       <span>
         <strong>${historyTitle(item)}</strong>
-        <small>${item.title || "--"} · 信号日 ${item.signal_date || "--"} · ${item.model_version || "--"}</small>
+        <small>${item.title || "--"} · ${item.generated_label || item.generated_at || item.signal_date || "--"} · ${item.model_version || "--"}</small>
       </span>
       <span class="history-meta">
-        <b>${item.confidence ? `${item.confidence}%` : "--"}</b>
-        <small>${item.estimated_2d_range || item.message || "--"}</small>
+        <b>${item.recommendation_degree || item.confidence ? `${item.recommendation_degree || item.confidence}%` : "--"}</b>
+        <small>${item.estimated_2w_range || item.estimated_2d_range || item.message || "--"}</small>
       </span>
     `;
     button.addEventListener("click", async () => {
       els.dateInput.value = item.target_date;
-      const localPick = readLocalHistory()[`${item.target_date}_${item.signal_date}`];
+      const localPick = readLocalHistory()[item.cache_key || item.local_key || `${item.target_date}_${item.signal_date}_${item.generated_at || ""}`];
       if (localPick) {
         render(localPick);
         renderHistory(history, item.target_date);
@@ -343,7 +351,7 @@ function renderHistory(history, currentTarget) {
 }
 
 async function loadHistory() {
-  const response = await fetch("/api/history?limit=45");
+  const response = await fetch("/api/history?limit=120");
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || "历史记录读取失败");
   payload.history = mergeHistory(payload.history || []);
