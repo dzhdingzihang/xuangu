@@ -4,14 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>智能选股</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260604-smart1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260604-uzi-live1" />
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <div>
           <h1>智能选股</h1>
-          <p id="subtitle">每天 09:00 生成未来2周推荐，交易时段每半小时更新</p>
+          <p id="subtitle">实时价 + UZI 加权，寻找未来2周上涨机会</p>
         </div>
         <div class="toolbar">
           <label>
@@ -68,7 +68,7 @@
         <section class="market-tabs-panel">
           <div class="panel-head">
             <span class="label">三市场决策</span>
-            <span class="muted">CZSC + UZI + Serenity 多因子已加入权重</span>
+            <span class="muted">UZI 加权 + 实时价 + CZSC + Serenity</span>
           </div>
           <div id="marketTabs" class="market-tabs"></div>
         </section>
@@ -96,7 +96,7 @@
                     <th>评分</th>
                     <th>推荐度</th>
                     <th>预估</th>
-                    <th>成交/换手</th>
+                    <th>实时/成交</th>
                     <th>题材</th>
                     <th>风险</th>
                   </tr>
@@ -109,7 +109,7 @@
           <aside class="side-stack">
             <article class="side-panel">
               <div class="panel-head">
-                <span class="label">CZSC + UZI + Serenity 映射</span>
+                <span class="label">UZI + CZSC + Serenity 映射</span>
               </div>
               <ul id="chanRules" class="compact-list"></ul>
             </article>
@@ -130,10 +130,10 @@
 
         <section class="risk-band">
           <strong>风控规则</strong>
-          <span>未来2周观察；跌破止损线、MA20失守或推荐度显著下降即退出；若系统显示“无推荐”，默认不买。</span>
+          <span>按实时买入价计算两周观察；跌破止损线、MA20失守或推荐度显著下降即退出；若系统显示“无推荐”，默认不买。</span>
         </section>
       </main>
     </div>
-    <script src="/static/app.js?v=20260604-smart1"></script>
+    <script src="/static/app.js?v=20260604-uzi-live1"></script>
   </body>
 </html>

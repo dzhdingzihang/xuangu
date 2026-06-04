@@ -33,7 +33,7 @@ CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-06-04.1"
+MODEL_VERSION = "smart-selector-2026-06-04.2-uzi-live"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 
@@ -73,9 +73,9 @@ CZSC_RULES = {
 UZI_RULES = {
     "source": "wbh604/UZI-Skill",
     "principles": [
-        "借鉴 UZI 的多维评分、评审团共识、游资射程、杀猪盘检测和定性风险门控。",
-        "推荐度不是单纯技术分，而是产业链、趋势、资金承接、风险标签、流动性和题材一致性的综合分。",
-        "对模板化推广、过热追高、低质量流动性、融资/稀释压力和单一催化叙事进行降权。",
+        "加重 UZI 的多维评分、评审团共识、游资射程、杀猪盘检测和定性风险门控。",
+        "推荐度以指定价格买入后未来2周能否上涨为目标，实时价、买点纪律和下行空间直接参与评分。",
+        "优先选择有趋势结构、流动性承接、题材一致性和评审团共识的股票；对模板化推广、过热追高、融资/稀释和单一催化叙事重罚。",
     ],
 }
 
@@ -214,6 +214,42 @@ def next_weekday(day: dt.date) -> dt.date:
     while not is_trade_weekday(day):
         day += dt.timedelta(days=1)
     return day
+
+
+def market_session(market_key: str, moment: dt.datetime | None = None) -> dict:
+    moment = moment or now_cn()
+    minutes = moment.hour * 60 + moment.minute
+    if not is_trade_weekday(moment.date()):
+        return {"session": "closed", "label": "休市", "market": market_key}
+    if market_key == "a_share":
+        if 9 * 60 + 15 <= minutes < 9 * 60 + 30:
+            return {"session": "pre", "label": "集合竞价", "market": market_key}
+        if 9 * 60 + 30 <= minutes < 11 * 60 + 30 or 13 * 60 <= minutes < 15 * 60:
+            return {"session": "regular", "label": "盘中", "market": market_key}
+        if 15 * 60 <= minutes < 15 * 60 + 30:
+            return {"session": "post", "label": "盘后", "market": market_key}
+        return {"session": "closed", "label": "非交易时段", "market": market_key}
+    if market_key == "hk":
+        if 9 * 60 <= minutes < 9 * 60 + 30:
+            return {"session": "pre", "label": "盘前", "market": market_key}
+        if 9 * 60 + 30 <= minutes < 12 * 60 or 13 * 60 <= minutes < 16 * 60:
+            return {"session": "regular", "label": "盘中", "market": market_key}
+        if 16 * 60 <= minutes < 16 * 60 + 10:
+            return {"session": "post", "label": "盘后", "market": market_key}
+        return {"session": "closed", "label": "非交易时段", "market": market_key}
+    return {"session": "unknown", "label": "实时", "market": market_key}
+
+
+def yahoo_session_from_meta(meta: dict) -> dict:
+    periods = meta.get("currentTradingPeriod") or {}
+    now_ts = int(time.time())
+    for key, label in (("pre", "盘前"), ("regular", "盘中"), ("post", "盘后")):
+        period = periods.get(key) or {}
+        start = int(period.get("start") or 0)
+        end = int(period.get("end") or 0)
+        if start and end and start <= now_ts <= end:
+            return {"session": key, "label": label}
+    return {"session": "closed", "label": "非交易时段"}
 
 
 def add_trade_weekdays(day: dt.date, count: int) -> dt.date:
@@ -488,6 +524,7 @@ def merge_candidate_pools(event_rows: list[dict], broad_rows: list[dict]) -> lis
 
 def tencent_quote(codes: list[str]) -> dict[str, dict]:
     result: dict[str, dict] = {}
+    session = market_session("a_share")
     for start in range(0, len(codes), 70):
         batch = codes[start : start + 70]
         prefixed = [market_prefix(code) + code for code in batch]
@@ -506,9 +543,12 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
                 "code": code,
                 "name": vals[1],
                 "price": safe_float(vals[3]),
+                "current_price": safe_float(vals[3]),
+                "entry_price": safe_float(vals[3]),
                 "last_close": safe_float(vals[4]),
                 "open": safe_float(vals[5]),
                 "change_pct": safe_float(vals[32]),
+                "current_change_pct": safe_float(vals[32]),
                 "high": safe_float(vals[33]),
                 "low": safe_float(vals[34]),
                 "amount_wan": safe_float(vals[37]),
@@ -522,6 +562,14 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
                 "limit_down": safe_float(vals[48]),
                 "vol_ratio": safe_float(vals[49]),
                 "pe_static": safe_float(vals[52]),
+                "realtime": {
+                    "price": safe_float(vals[3]),
+                    "change_pct": safe_float(vals[32]),
+                    "session": session["session"],
+                    "session_label": session["label"],
+                    "source": "Tencent realtime quote",
+                    "updated_at": now_cn().isoformat(timespec="seconds"),
+                },
             }
         time.sleep(0.12)
     return result
@@ -728,11 +776,56 @@ def eastmoney_stock_kline(code: str, limit: int = 70) -> list[dict]:
     return rows
 
 
+def tencent_stock_kline(code: str, limit: int = 70) -> list[dict]:
+    symbol = market_prefix(code) + code
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    params = {"param": f"{symbol},day,,,{limit},qfq"}
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            headers={"User-Agent": UA, "Referer": "https://gu.qq.com/"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        payload = ((data.get("data") or {}).get(symbol) or {})
+        klines = payload.get("qfqday") or payload.get("day") or []
+    except Exception:
+        return []
+    rows = []
+    for idx, parts in enumerate(klines[-limit:]):
+        if len(parts) < 6:
+            continue
+        close = safe_float(parts[2])
+        prev_close = rows[-1]["close"] if rows else close
+        high = safe_float(parts[3])
+        low = safe_float(parts[4])
+        rows.append(
+            {
+                "date": parts[0],
+                "open": safe_float(parts[1]),
+                "close": close,
+                "high": high,
+                "low": low,
+                "volume": safe_float(parts[5]),
+                "amount": 0,
+                "amplitude": pct_change(high, low) if low else 0,
+                "change_pct": pct_change(close, prev_close),
+                "turnover": 0,
+            }
+        )
+    return rows
+
+
 def stock_kline(code: str, limit: int = 70) -> list[dict]:
     rows = baidu_stock_kline(code, limit)
     if rows:
         return rows
-    return eastmoney_stock_kline(code, limit)
+    rows = eastmoney_stock_kline(code, limit)
+    if rows:
+        return rows
+    return tencent_stock_kline(code, limit)
 
 
 def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
@@ -785,6 +878,58 @@ def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
             }
         )
     return rows[-limit:]
+
+
+def yahoo_realtime_quote(symbol: str) -> dict:
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}"
+    params = {"range": "1d", "interval": "1m", "includePrePost": "true"}
+    try:
+        req = urllib.request.Request(
+            url + "?" + urllib.parse.urlencode(params),
+            headers={"User-Agent": UA, "Accept": "application/json"},
+        )
+        raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
+        data = json.loads(raw)
+        result = ((data.get("chart") or {}).get("result") or [None])[0]
+        if not result:
+            return {}
+        meta = result.get("meta") or {}
+        quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+        closes = quote.get("close") or []
+        timestamps = result.get("timestamp") or []
+    except Exception:
+        return {}
+
+    last_price = 0.0
+    last_ts = 0
+    for idx in range(len(closes) - 1, -1, -1):
+        close = closes[idx]
+        if close not in (None, 0):
+            last_price = safe_float(close)
+            last_ts = int(timestamps[idx]) if idx < len(timestamps) else 0
+            break
+    regular_price = safe_float(meta.get("regularMarketPrice"))
+    price = last_price or regular_price
+    previous_close = safe_float(meta.get("chartPreviousClose") or meta.get("previousClose"))
+    change_pct = pct_change(price, previous_close) if price and previous_close else 0.0
+    session = yahoo_session_from_meta(meta)
+    updated_at = (
+        dt.datetime.fromtimestamp(last_ts, CN_TZ).isoformat(timespec="seconds")
+        if last_ts
+        else now_cn().isoformat(timespec="seconds")
+    )
+    if not price:
+        return {}
+    return {
+        "price": round(price, 4),
+        "change_pct": round(change_pct, 2),
+        "previous_close": previous_close,
+        "currency": meta.get("currency") or "",
+        "session": session["session"],
+        "session_label": session["label"],
+        "source": "Yahoo 1m includePrePost",
+        "updated_at": updated_at,
+    }
 
 
 def ema(values: list[float], span: int) -> list[float]:
@@ -910,9 +1055,101 @@ def uzi_risk_score(candidate: dict, quote: dict, risk_flags: list[str], market_k
         score -= 8
         warnings.append("UZI风控: 风险标签过多")
     if not warnings:
-        score += 4
+        score += 6
         reasons.append("UZI风控: 未触发杀猪盘/过热式硬拦截")
     return {"score": round(score, 2), "signals": reasons[:4], "warnings": warnings[:4]}
+
+
+def uzi_panel_score(candidate: dict, quote: dict, chan: dict, czsc: dict, risk_flags: list[str], market_key: str) -> dict:
+    """Lightweight UZI-Skill style investor-panel scoring for a two-week entry."""
+    metrics = chan.get("metrics") or {}
+    lens = candidate.get("lens") or {}
+    setup_flags = metrics.get("setup_flags") or []
+    distance_ma10 = safe_float(metrics.get("distance_ma10_pct"))
+    distance_ma20 = safe_float(metrics.get("distance_ma20_pct"))
+    pct_5d = safe_float(quote.get("pct_5d"))
+    change = safe_float(quote.get("change_pct"))
+    amount_yi = safe_float(quote.get("amount_yi"))
+    vol_ratio = safe_float(quote.get("vol_ratio"))
+    score = 0.0
+    signals: list[str] = []
+    warnings: list[str] = []
+    votes = {"bull": 0, "neutral": 0, "bear": 0}
+
+    if setup_flags:
+        score += 16
+        votes["bull"] += 2
+        signals.append("UZI评审团: 买点纪律通过，存在二买/三买或回踩确认")
+    else:
+        score -= 16
+        votes["bear"] += 2
+        warnings.append("UZI评审团: 没有明确买点确认，容易变成情绪追涨")
+
+    if -2 <= distance_ma10 <= 6 and distance_ma20 > -3:
+        score += 12
+        votes["bull"] += 1
+        signals.append("UZI评审团: 买入价靠近持股线，未来2周风控半径可控")
+    elif distance_ma10 > (9 if market_key != "us" else 11):
+        score -= 14
+        votes["bear"] += 1
+        warnings.append(f"UZI评审团: 买入价偏离 MA10 {distance_ma10:.1f}%，性价比下降")
+    else:
+        votes["neutral"] += 1
+
+    amount_floor = 3.0 if market_key == "a_share" else 0.0
+    if market_key != "a_share" or amount_yi >= amount_floor:
+        score += 8
+        votes["bull"] += 1
+        signals.append("UZI评审团: 流动性承接达到最低要求")
+    else:
+        score -= 12
+        votes["bear"] += 1
+        warnings.append("UZI评审团: 成交额不足，真实买入后滑点和回撤风险偏高")
+
+    if 0.75 <= vol_ratio <= 2.8:
+        score += 7
+        votes["bull"] += 1
+        signals.append("UZI评审团: 量能温和，未出现失控式爆量")
+    elif vol_ratio > 3.5:
+        score -= 12
+        votes["bear"] += 1
+        warnings.append("UZI评审团: 爆量分歧，可能是派发或一致性过热")
+
+    if pct_5d > (20 if market_key == "us" else 14) or change > (12 if market_key == "us" else 8.8):
+        score -= 16
+        votes["bear"] += 2
+        warnings.append("UZI评审团: 价格已被抢跑，不符合指定价买入后再赚两周的钱")
+    elif -3 <= pct_5d <= (12 if market_key != "us" else 18):
+        score += 10
+        votes["bull"] += 1
+        signals.append("UZI评审团: 近5日涨幅未透支，仍有两周赔率")
+
+    if lens:
+        if safe_float(lens.get("catalyst")) >= 5 or safe_float(lens.get("customer")) >= 6:
+            score += 7
+            votes["bull"] += 1
+            signals.append("UZI评审团: 产业催化或客户链路能支撑两周持有叙事")
+        if safe_float(lens.get("financing")) < 0:
+            score -= 10
+            votes["bear"] += 1
+            warnings.append("UZI评审团: 融资/稀释压力削弱两周上涨质量")
+
+    if len(risk_flags) >= 4:
+        score -= 12
+        votes["bear"] += 1
+        warnings.append("UZI评审团: 风险标签过多，宁可少赚也不追")
+    elif len(risk_flags) <= 1:
+        score += 6
+        votes["bull"] += 1
+        signals.append("UZI评审团: 风险标签少，满足保守买入偏好")
+
+    return {
+        "score": round(score, 2),
+        "signals": signals[:5],
+        "warnings": warnings[:5],
+        "votes": votes,
+        "summary": f"多 {votes['bull']} / 中 {votes['neutral']} / 空 {votes['bear']}",
+    }
 
 
 def chan_signal(kline: list[dict]) -> dict:
@@ -1129,13 +1366,13 @@ def preliminary_score(hot: dict, quote: dict, dragon: dict | None) -> dict:
 
 
 def candidate_confidence(score: float, risk_count: int, market_risk: str) -> int:
-    confidence = 50 + (score - 72) * 0.28
-    confidence -= min(risk_count * 3, 18)
+    confidence = 50 + (score - 82) * 0.24
+    confidence -= min(risk_count * 2.7, 18)
     if market_risk == "medium":
         confidence -= 5
     elif market_risk == "high":
         confidence -= 12
-    return int(max(35, min(86, round(confidence))))
+    return int(max(35, min(90, round(confidence))))
 
 
 def estimate_range(confidence: int, technical: float, theme: float, risk_count: int) -> dict:
@@ -1189,11 +1426,11 @@ def serenity_lens_score(candidate: dict) -> tuple[float, list[str], list[str]]:
 
 
 def serenity_confidence(score: float, risk_count: int, market_key: str) -> int:
-    base = 48 + (score - 74) * 0.30
-    base -= min(risk_count * 3.5, 20)
+    base = 48 + (score - 82) * 0.27
+    base -= min(risk_count * 3.2, 20)
     if market_key in ("hk", "us"):
         base -= 1
-    return int(max(35, min(86, round(base))))
+    return int(max(35, min(90, round(base))))
 
 
 def serenity_estimate_range(confidence: int, score: float, risk_count: int, market_key: str) -> dict:
@@ -1237,14 +1474,43 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         quote = quote_from_kline(kline)
         if not quote or quote["price"] <= 0:
             continue
+        realtime = yahoo_realtime_quote(symbol) if market_key in ("hk", "us") else {}
+        entry_price = safe_float(realtime.get("price")) or quote["price"]
+        current_change_pct = safe_float(realtime.get("change_pct")) if realtime else quote["change_pct"]
+        live_quote = {
+            **quote,
+            "price": entry_price,
+            "entry_price": entry_price,
+            "current_price": entry_price,
+            "change_pct": current_change_pct,
+            "current_change_pct": current_change_pct,
+            "realtime": realtime
+            or {
+                "price": quote["price"],
+                "change_pct": quote["change_pct"],
+                "session": market_session(market_key)["session"],
+                "session_label": market_session(market_key)["label"],
+                "source": "Daily kline fallback",
+                "updated_at": now_cn().isoformat(timespec="seconds"),
+            },
+        }
         chan = chan_signal(kline)
         czsc = czsc_structure_score(kline)
         metrics = chan.get("metrics") or {}
         lens_score, lens_reasons, lens_risks = serenity_lens_score(candidate)
         setup_flags = metrics.get("setup_flags") or []
         risk_flags = list(lens_risks) + chan["warnings"] + czsc["warnings"]
-        uzi = uzi_risk_score(candidate, {**quote, "amount_yi": 0}, risk_flags, market_key)
-        total = lens_score * policy["lens_weight"] + chan["score"] * policy["chan_weight"] + czsc["score"] + uzi["score"]
+        uzi = uzi_risk_score(candidate, {**live_quote, "amount_yi": 0}, risk_flags, market_key)
+        uzi_panel = uzi_panel_score(candidate, {**live_quote, "amount_yi": 0}, chan, czsc, risk_flags, market_key)
+        risk_flags.extend(uzi_panel["warnings"])
+        risk_flags.extend(uzi["warnings"])
+        total = (
+            lens_score * (policy["lens_weight"] * 0.85)
+            + chan["score"] * (policy["chan_weight"] * 0.65)
+            + czsc["score"] * 0.7
+            + uzi["score"] * 1.2
+            + uzi_panel["score"] * 1.45
+        )
         hard_risks = 0
         if not setup_flags:
             hard_risks += 1
@@ -1254,9 +1520,9 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         if quote["pct_5d"] > policy["pct5_limit"]:
             hard_risks += 1
             risk_flags.append(f"5日涨幅 {quote['pct_5d']:.1f}%，短线兑现压力高")
-        if quote["change_pct"] > policy["change_limit"]:
+        if current_change_pct > policy["change_limit"]:
             hard_risks += 1
-            risk_flags.append("信号日涨幅过大，隔日追高风险")
+            risk_flags.append("实时涨幅过大，当前价格追高风险")
         if quote["vol_ratio"] > 3:
             risk_flags.append("放量过猛，容易出现分歧")
             total -= 5
@@ -1264,16 +1530,17 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
             total -= hard_risks * policy["hard_penalty"]
         confidence = serenity_confidence(total, len(risk_flags), market_key)
         est = serenity_estimate_range(confidence, total, len(risk_flags), market_key)
-        stop_loss = quote["price"] * (0.925 if market_key == "us" else 0.94)
-        take_profit = quote["price"] * (1 + min(est["high_pct"], 12) / 100)
+        stop_loss = entry_price * (0.925 if market_key == "us" else 0.94)
+        take_profit = entry_price * (1 + min(est["high_pct"], 12) / 100)
         reasons = []
         reasons.extend(lens_reasons[:4])
         if candidate.get("themes"):
             reasons.append("产业链主题: " + "、".join(candidate["themes"][:4]))
         reasons.extend(chan["signals"][:4])
         reasons.extend(czsc["signals"][:3])
+        reasons.extend(uzi_panel["signals"][:3])
         reasons.extend(uzi["signals"][:2])
-        reasons.append(f"价格结构: 信号日 {quote['change_pct']:+.2f}%，5日 {quote['pct_5d']:+.2f}%，未来2周观察")
+        reasons.append(f"实时买入价: {entry_price:.3f}，{live_quote['realtime']['session_label']} {current_change_pct:+.2f}%；5日 {quote['pct_5d']:+.2f}%，未来2周观察")
         final.append(
             {
                 "code": symbol,
@@ -1281,8 +1548,13 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                 "name": candidate["name"],
                 "market_key": market_key,
                 "role": candidate.get("role", ""),
-                "price": round(quote["price"], 3),
-                "change_pct": round(quote["change_pct"], 2),
+                "price": round(entry_price, 3),
+                "entry_price": round(entry_price, 3),
+                "signal_price": round(quote["price"], 3),
+                "change_pct": round(current_change_pct, 2),
+                "signal_change_pct": round(quote["change_pct"], 2),
+                "current_change_pct": round(current_change_pct, 2),
+                "realtime": live_quote["realtime"],
                 "amount_yi": 0,
                 "turnover_pct": 0,
                 "vol_ratio": round(quote["vol_ratio"], 2),
@@ -1294,6 +1566,8 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                 "chan_score": chan["score"],
                 "czsc_score": czsc["score"],
                 "uzi_score": uzi["score"],
+                "uzi_panel_score": uzi_panel["score"],
+                "uzi_panel": uzi_panel,
                 "setup_flags": setup_flags,
                 "hard_risk_count": hard_risks,
                 "confidence": confidence,
@@ -1355,7 +1629,7 @@ def make_serenity_decision(candidates: list[dict], market_key: str) -> dict:
     return {
         "action": "BUY_CANDIDATE",
         "title": "两周推荐",
-        "message": "Serenity 产业链因子、CZSC结构、价格趋势和 UZI 风控同时通过阈值。",
+        "message": "实时买入价、UZI评审团、CZSC结构和产业链因子同时通过两周上涨阈值。",
         "primary": primary,
         "watchlist": candidates[1:9],
     }
@@ -1396,12 +1670,25 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
         risk_flags = list(item["risk_flags"]) + serenity_risks + chan["warnings"] + czsc["warnings"]
         quote_for_uzi = {
             "change_pct": quote["change_pct"],
+            "current_change_pct": quote.get("current_change_pct", quote["change_pct"]),
+            "price": quote["price"],
+            "entry_price": quote["price"],
             "pct_5d": metrics.get("pct_5d", 0.0),
             "vol_ratio": quote["vol_ratio"],
             "amount_yi": quote["amount_wan"] / 10000,
         }
         uzi = uzi_risk_score(serenity_candidate or {}, quote_for_uzi, risk_flags, "a_share")
-        total = item["pre_score"] + chan["score"] * 0.75 + czsc["score"] + serenity_score * 0.65 + uzi["score"]
+        uzi_panel = uzi_panel_score(serenity_candidate or {}, quote_for_uzi, chan, czsc, risk_flags, "a_share")
+        risk_flags.extend(uzi_panel["warnings"])
+        risk_flags.extend(uzi["warnings"])
+        total = (
+            item["pre_score"] * 0.75
+            + chan["score"] * 0.55
+            + czsc["score"] * 0.75
+            + serenity_score * 0.45
+            + uzi["score"] * 1.2
+            + uzi_panel["score"] * 1.55
+        )
         setup_flags = metrics.get("setup_flags") or []
         hard_risks = 0
         if not setup_flags:
@@ -1430,16 +1717,22 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
             reasons.append(f"龙虎榜净买入约 {item['dragon_net_wan']:.0f} 万")
         reasons.extend(chan["signals"][:4])
         reasons.extend(czsc["signals"][:3])
+        reasons.extend(uzi_panel["signals"][:3])
         reasons.extend(uzi["signals"][:2])
         reasons.append(
-            f"流动性: 成交 {quote['amount_wan']/10000:.1f} 亿，换手 {quote['turnover_pct']:.1f}%，未来2周观察"
+            f"实时买入价: {quote['price']:.2f}，{quote['realtime']['session_label']} {quote['change_pct']:+.2f}%；成交 {quote['amount_wan']/10000:.1f} 亿，未来2周观察"
         )
         final.append(
             {
                 "code": code,
                 "name": quote["name"],
                 "price": quote["price"],
+                "entry_price": quote["entry_price"],
+                "signal_price": quote["last_close"],
                 "change_pct": quote["change_pct"],
+                "current_change_pct": quote["current_change_pct"],
+                "signal_change_pct": quote["change_pct"],
+                "realtime": quote["realtime"],
                 "amount_yi": round(quote["amount_wan"] / 10000, 2),
                 "turnover_pct": quote["turnover_pct"],
                 "vol_ratio": quote["vol_ratio"],
@@ -1452,6 +1745,8 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
                 "czsc_score": czsc["score"],
                 "serenity_score": serenity_score,
                 "uzi_score": uzi["score"],
+                "uzi_panel_score": uzi_panel["score"],
+                "uzi_panel": uzi_panel,
                 "setup_flags": setup_flags,
                 "hard_risk_count": hard_risks,
                 "confidence": confidence,
@@ -1530,7 +1825,7 @@ def make_decision(candidates: list[dict], market: dict) -> dict:
     return {
         "action": "BUY_CANDIDATE",
         "title": "两周推荐",
-        "message": "满足未来2周上涨的趋势结构、资金承接和风控阈值。",
+        "message": "满足实时买入价下未来2周上涨的买点纪律、资金承接和 UZI 风控阈值。",
         "primary": primary,
         "watchlist": candidates[1:9],
     }
@@ -1566,7 +1861,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "a_share": {
             "key": "a_share",
             "label": "A股",
-            "description": "A股强势池 + CZSC结构 + UZI风控 + Serenity AI 上游瓶颈权重。",
+            "description": "A股实时价 + UZI评审团/风控重权重 + CZSC结构 + Serenity AI 上游瓶颈。",
             "decision": decision,
             "stats": {
                 "raw_pool_size": scored["raw_pool_size"],
@@ -1579,7 +1874,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "hk": {
             "key": "hk",
             "label": "港股",
-            "description": "港股 AI/半导体/云/光学候选，按未来2周趋势结构和风险过滤。",
+            "description": "港股实时价/盘前盘后状态 + UZI评审团 + 两周趋势结构和风险过滤。",
             "decision": hk_decision,
             "stats": {
                 "raw_pool_size": hk_scored["raw_pool_size"],
@@ -1592,7 +1887,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "us": {
             "key": "us",
             "label": "美股",
-            "description": "美股 CPO/光子、InP、HBM/存储、neocloud、电力瓶颈，两周趋势加权。",
+            "description": "美股盘前/盘中/盘后实时价 + UZI评审团 + CPO/光子、HBM、neocloud、电力瓶颈。",
             "decision": us_decision,
             "stats": {
                 "raw_pool_size": us_scored["raw_pool_size"],
@@ -1613,7 +1908,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "forecast_end_date": forecast_end.isoformat(),
         "forecast_horizon": f"{FORECAST_TRADE_DAYS}个交易日 / 约2周",
         "signal_date": hot_date,
-        "holding_plan": "未来2周观察窗口；若跌破止损线、MA20失守或推荐度显著下降，提前退出。",
+        "holding_plan": "按实时/盘前盘中盘后买入价进入未来2周观察窗口；若跌破止损线、MA20失守或推荐度显著下降，提前退出。",
         "decision": decision,
         "markets": market_sections,
         "market": market,
@@ -1629,10 +1924,15 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "czsc_rules": CZSC_RULES,
         "uzi_rules": UZI_RULES,
         "serenity_rules": SERENITY_RULES,
+        "live_quote_policy": {
+            "objective": "以当前可成交参考价买入后，未来2周取得正收益；少赚可以，优先避免亏损。",
+            "a_share": "腾讯财经实时行情；非交易时段保留最近行情并标注时段。",
+            "hk_us": "Yahoo Finance 1分钟 includePrePost；美股尽量纳入盘前/盘中/盘后价格，港股按可得实时/收盘状态降级。",
+        },
         "research_runtime": runtime_research_status(),
         "serenity_source": serenity_source_status(),
         "accuracy_note": (
-            "推荐度是规则模型按两周趋势、产业链、CZSC结构、UZI风控和资金承接映射的先验估计；"
+            "推荐度是规则模型按实时买入价、两周趋势、产业链、CZSC结构、UZI评审团/风控和资金承接映射的先验估计；"
             "需要持续保存半小时快照后，用真实两周收益滚动校准。"
         ),
         "disclaimer": "本工具是量化决策辅助，不构成投资建议，不保证盈利。",

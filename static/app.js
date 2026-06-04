@@ -42,6 +42,11 @@ function pctClass(value) {
   return value >= 0 ? "red" : "green";
 }
 
+function priceText(value) {
+  if (typeof value !== "number") return "--";
+  return value >= 100 ? value.toFixed(2) : value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
+
 function clearList(node) {
   node.replaceChildren();
 }
@@ -162,16 +167,16 @@ function renderPrimary(data) {
       </div>
       <p class="decision-copy">${decision.message} ${data.holding_plan}</p>
       <div class="price-row">
-        <div class="price-cell"><span>收盘价</span><strong>${primary.price.toFixed(2)}</strong></div>
-        <div class="price-cell"><span>信号日涨跌</span><strong class="${pctClass(primary.change_pct)}">${signed(primary.change_pct)}</strong></div>
-        <div class="price-cell"><span>止损</span><strong class="green">${primary.stop_loss.toFixed(2)}</strong></div>
-        <div class="price-cell"><span>参考止盈</span><strong class="red">${primary.take_profit_reference.toFixed(2)}</strong></div>
+        <div class="price-cell"><span>${primary.realtime ? primary.realtime.session_label : "实时"}买入价</span><strong>${priceText(primary.entry_price || primary.price)}</strong></div>
+        <div class="price-cell"><span>实时涨跌</span><strong class="${pctClass(primary.current_change_pct ?? primary.change_pct)}">${signed(primary.current_change_pct ?? primary.change_pct)}</strong></div>
+        <div class="price-cell"><span>止损</span><strong class="green">${priceText(primary.stop_loss)}</strong></div>
+        <div class="price-cell"><span>参考止盈</span><strong class="red">${priceText(primary.take_profit_reference)}</strong></div>
       </div>
     </div>
   `;
   els.confidenceMetric.textContent = `${primary.recommendation_degree || primary.confidence}%`;
   els.rangeMetric.textContent = (primary.estimated_2w_range || primary.estimated_2d_range).text;
-  els.stopMetric.textContent = primary.stop_loss.toFixed(2);
+  els.stopMetric.textContent = priceText(primary.stop_loss);
 }
 
 function renderReasons(data) {
@@ -198,10 +203,10 @@ function renderTable(data) {
     tr.innerHTML = `
       <td>${index + 1}</td>
       <td><strong>${row.name}</strong><span class="muted">${row.code}</span></td>
-      <td>${row.score.toFixed(1)}<br><span class="muted">缠 ${row.chan_score.toFixed(1)} / CZ ${(row.czsc_score || 0).toFixed(1)} / UZI ${(row.uzi_score || 0).toFixed(1)} / S ${(row.serenity_score || (row.serenity && row.serenity.score) || 0).toFixed(1)}</span></td>
+      <td>${row.score.toFixed(1)}<br><span class="muted">UZI评审 ${(row.uzi_panel_score || 0).toFixed(1)} / 风控 ${(row.uzi_score || 0).toFixed(1)} / 缠 ${row.chan_score.toFixed(1)} / CZ ${(row.czsc_score || 0).toFixed(1)} / S ${(row.serenity_score || (row.serenity && row.serenity.score) || 0).toFixed(1)}</span></td>
       <td>${row.recommendation_degree || row.confidence}%</td>
       <td>${(row.estimated_2w_range || row.estimated_2d_range).text}</td>
-      <td>${row.amount_yi ? `${row.amount_yi.toFixed(1)} 亿` : "见行情"}<br><span class="muted">${row.turnover_pct ? `换手 ${row.turnover_pct.toFixed(1)}%` : `量比 ${row.vol_ratio || "--"}`}</span></td>
+      <td>${priceText(row.entry_price || row.price)}<br><span class="muted">${row.realtime ? row.realtime.session_label : "实时"} ${signed(row.current_change_pct ?? row.change_pct)} · ${row.amount_yi ? `${row.amount_yi.toFixed(1)} 亿` : "见行情"}</span></td>
       <td><div class="tagline">${row.role || row.reason_tags || "无题材标签"}</div></td>
       <td><div class="risk-tags">${risks}</div></td>
     `;
@@ -211,9 +216,9 @@ function renderTable(data) {
 
 function renderRules(data) {
   clearList(els.chanRules);
+  ((data.uzi_rules && data.uzi_rules.principles) || []).forEach((rule) => els.chanRules.append(li(`UZI: ${rule}`)));
   data.chan_rules.quant_mapping.forEach((rule) => els.chanRules.append(li(rule)));
   ((data.czsc_rules && data.czsc_rules.principles) || []).forEach((rule) => els.chanRules.append(li(`CZSC: ${rule}`)));
-  ((data.uzi_rules && data.uzi_rules.principles) || []).forEach((rule) => els.chanRules.append(li(`UZI: ${rule}`)));
   ((data.serenity_rules && data.serenity_rules.principles) || []).forEach((rule) => els.chanRules.append(li(`Serenity: ${rule}`)));
   if (data.serenity_source) {
     const source = data.serenity_source;
