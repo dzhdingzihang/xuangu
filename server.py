@@ -9,6 +9,7 @@ decision-support tool, not a guarantee of profit.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
 import http.server
 import json
@@ -880,7 +881,7 @@ def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
     return rows[-limit:]
 
 
-def yahoo_realtime_quote(symbol: str) -> dict:
+def yahoo_realtime_quote(symbol: str, timeout: int = 6) -> dict:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}"
     params = {"range": "1d", "interval": "1m", "includePrePost": "true"}
     try:
@@ -888,7 +889,7 @@ def yahoo_realtime_quote(symbol: str) -> dict:
             url + "?" + urllib.parse.urlencode(params),
             headers={"User-Agent": UA, "Accept": "application/json"},
         )
-        raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
+        raw = urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "ignore")
         data = json.loads(raw)
         result = ((data.get("chart") or {}).get("result") or [None])[0]
         if not result:
@@ -930,6 +931,24 @@ def yahoo_realtime_quote(symbol: str) -> dict:
         "source": "Yahoo 1m includePrePost",
         "updated_at": updated_at,
     }
+
+
+def yahoo_realtime_quotes(symbols: list[str]) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    if not symbols:
+        return result
+    workers = min(8, max(1, len(symbols)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(yahoo_realtime_quote, symbol, 6): symbol for symbol in symbols}
+        for future in concurrent.futures.as_completed(futures):
+            symbol = futures[future]
+            try:
+                quote = future.result()
+            except Exception:
+                quote = {}
+            if quote:
+                result[symbol] = quote
+    return result
 
 
 def ema(values: list[float], span: int) -> list[float]:
@@ -1462,6 +1481,7 @@ def quote_from_kline(kline: list[dict]) -> dict:
 
 def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
     policy = SERENITY_MARKET_POLICY.get(market_key, SERENITY_MARKET_POLICY["hk"])
+    realtime_map = yahoo_realtime_quotes([item["symbol"] for item in candidates]) if market_key in ("hk", "us") else {}
     final = []
     for candidate in candidates:
         symbol = candidate["symbol"]
@@ -1474,7 +1494,7 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         quote = quote_from_kline(kline)
         if not quote or quote["price"] <= 0:
             continue
-        realtime = yahoo_realtime_quote(symbol) if market_key in ("hk", "us") else {}
+        realtime = realtime_map.get(symbol) if market_key in ("hk", "us") else {}
         entry_price = safe_float(realtime.get("price")) or quote["price"]
         current_change_pct = safe_float(realtime.get("change_pct")) if realtime else quote["change_pct"]
         live_quote = {
@@ -1654,7 +1674,7 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
 
     preliminary.sort(key=lambda item: item["pre_score"], reverse=True)
     final = []
-    max_kline_checks = int(os.environ.get("CHAN_MAX_KLINE_CHECKS", "60"))
+    max_kline_checks = int(os.environ.get("CHAN_MAX_KLINE_CHECKS", "36"))
     for item in preliminary[:max_kline_checks]:
         quote = item["quote"]
         code = quote["code"]
