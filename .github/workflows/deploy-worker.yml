@@ -27,9 +27,6 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Install optional CZSC research runtime
-        run: python -m pip install "czsc==0.9.68" || echo "czsc optional install failed; using built-in lightweight CZSC factors"
-
       - name: Generate smart pick snapshot
         run: python server.py --once --force
 
