@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>智能选股</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260620-dashboard2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260620-dashboard3" />
   </head>
   <body>
     <div class="app-shell">
@@ -17,8 +17,10 @@
           <a class="active" href="#">决策看板</a>
           <a href="#candidateRows">候选排行</a>
           <a href="#historyList">历史记录</a>
+          <a href="#decisionPanel">组合跟踪</a>
           <a href="#marketBlock">市场行情</a>
           <a href="#decisionPanel">策略说明</a>
+          <a href="#marketTabs">设置</a>
         </nav>
         <div class="update-meta">
           <span id="topUpdateTime">数据更新：读取中</span>
@@ -125,7 +127,7 @@
               </div>
               <div id="candidateTabs" class="candidate-tabs"></div>
             </div>
-            <div class="table-wrap">
+            <div class="table-wrap candidate-table-wrap">
               <table>
                 <thead>
                   <tr>
@@ -161,6 +163,6 @@
         </section>
       </main>
     </div>
-    <script src="/static/app.js?v=20260620-dashboard2"></script>
+    <script src="/static/app.js?v=20260620-dashboard3"></script>
   </body>
 </html>

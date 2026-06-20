@@ -356,9 +356,9 @@ function renderPrimary(data) {
       <p class="decision-copy">${escapeHtml(decision.message || "")}</p>
       <div class="price-row">
         <div class="price-cell"><span>建议买入价</span><strong>${priceText(shown.entry_price || shown.price)}</strong></div>
-        <div class="price-cell"><span>预估收益</span><strong>${escapeHtml(range.text || "--")}</strong></div>
         <div class="price-cell"><span>止盈价</span><strong class="red">${priceText(shown.take_profit_reference)}</strong></div>
         <div class="price-cell"><span>止损价</span><strong class="green">${priceText(shown.stop_loss)}</strong></div>
+        <div class="price-cell wide"><span>预估收益区间</span><strong>${escapeHtml(range.text || "--")}</strong></div>
       </div>
     </div>
   `;
@@ -592,8 +592,8 @@ function renderCandidateDetail(row, section) {
   if (!els.candidateDetail || !row) return;
   const confidence = row.recommendation_degree || row.confidence || 0;
   const range = row.estimated_2w_range || row.estimated_2d_range || {};
-  const reasons = (row.reasons || []).slice(0, 5).map((item) => `<li>${escapeHtml(readableReason(item))}</li>`).join("");
-  const risks = (row.risk_flags || []).slice(0, 5).map((item) => `<li>${escapeHtml(readableRisk(item))}</li>`).join("") || "<li>未触发硬风险，但仍需要按止损执行。</li>";
+  const reasons = (row.reasons || []).slice(0, 3).map((item) => `<li>${escapeHtml(readableReason(item))}</li>`).join("");
+  const risks = (row.risk_flags || []).slice(0, 3).map((item) => `<li>${escapeHtml(readableRisk(item))}</li>`).join("") || "<li>未触发硬风险，但仍需要按止损执行。</li>";
   const scoreItems = [
     ["UZI评审", row.uzi_panel_score, 60],
     ["UZI风控", row.uzi_score, 30],
@@ -611,14 +611,11 @@ function renderCandidateDetail(row, section) {
       </div>
       <span class="status ${actionClass(confidence, true)}">${recommendationLabel(confidence, true)} · ${confidence}%</span>
     </div>
-    <div class="candidate-detail-grid">
-      <div class="candidate-trade-box">
-        <div><span>建议买入价</span><strong>${priceText(row.entry_price || row.price)}</strong></div>
-        <div><span>止盈参考</span><strong class="red">${priceText(row.take_profit_reference)}</strong></div>
-        <div><span>止损线</span><strong class="green">${priceText(row.stop_loss)}</strong></div>
-        <div><span>两周预估</span><strong>${escapeHtml(range.text || "--")}</strong></div>
-      </div>
-      <div class="candidate-mini-chart">${klineChartSvg(row, { width: 430, height: 210 })}</div>
+    <div class="candidate-trade-box compact">
+      <div><span>建议买入</span><strong>${priceText(row.entry_price || row.price)}</strong></div>
+      <div><span>止盈</span><strong class="red">${priceText(row.take_profit_reference)}</strong></div>
+      <div><span>止损</span><strong class="green">${priceText(row.stop_loss)}</strong></div>
+      <div><span>两周预估</span><strong>${escapeHtml(range.text || "--")}</strong></div>
     </div>
     <div class="candidate-explain-grid">
       <section class="candidate-explain positive-note">
