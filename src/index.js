@@ -92,7 +92,7 @@ function blockerLevel(decision, primary) {
 
 async function loadManifest(env) {
   const manifest = await readAssetJson(env, "/data/picks/manifest.json");
-  return manifest && Array.isArray(manifest.files) ? manifest.files : [];
+  return manifest && typeof manifest === "object" ? manifest : { files: [], summaries: [] };
 }
 
 async function loadPickByFile(env, file) {
@@ -114,14 +114,13 @@ async function latestPick(env) {
 }
 
 async function pickForTarget(env, targetDate) {
-  const files = await loadManifest(env);
-  const matches = [];
-  for (const file of files) {
-    const pick = await loadPickByFile(env, file);
-    if (pick && pick.target_date === targetDate) matches.push(pick);
-  }
-  matches.sort((a, b) => `${b.generated_at || ""}`.localeCompare(`${a.generated_at || ""}`));
-  return matches[0] || null;
+  const manifest = await loadManifest(env);
+  const summaries = Array.isArray(manifest.summaries) ? manifest.summaries : [];
+  const match = summaries
+    .filter((item) => item.target_date === targetDate && item.cache_key)
+    .sort((a, b) => `${b.generated_at || ""}`.localeCompare(`${a.generated_at || ""}`))[0];
+  if (match) return loadPickByFile(env, match.cache_key);
+  return null;
 }
 
 async function handleApi(request, env) {
@@ -155,13 +154,8 @@ async function handleApi(request, env) {
 
   if (url.pathname === "/api/history") {
     const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 120), 240));
-    const files = await loadManifest(env);
-    const rows = [];
-    for (const file of files) {
-      const pick = await loadPickByFile(env, file);
-      if (!pick) continue;
-      rows.push({ ...summarizePick(pick), cache_key: file });
-    }
+    const manifest = await loadManifest(env);
+    const rows = Array.isArray(manifest.summaries) ? [...manifest.summaries] : [];
     rows.sort((a, b) =>
       `${b.target_date || ""}${b.generated_at || ""}`.localeCompare(`${a.target_date || ""}${a.generated_at || ""}`),
     );
