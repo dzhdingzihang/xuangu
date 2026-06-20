@@ -37,7 +37,7 @@ input {
 
 .app-shell {
   min-height: 100vh;
-  padding: 16px 22px 26px;
+  padding: 0 28px 26px;
 }
 
 .topbar {
@@ -49,27 +49,79 @@ input {
   top: 0;
   z-index: 10;
   max-width: 1440px;
-  margin: 0 auto 14px;
-  padding: 10px 0 14px;
+  margin: 0 auto;
+  padding: 10px 0;
   border-bottom: 1px solid rgba(216, 224, 234, 0.72);
   background: rgba(244, 247, 251, 0.94);
   backdrop-filter: blur(10px);
 }
 
 .brand-mini {
-  display: grid;
-  gap: 3px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 160px;
 }
 
 .brand-mini strong {
-  font-size: 22px;
+  font-size: 23px;
   line-height: 1.1;
 }
 
-.brand-mini span,
+.brand-mark {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #15b8a6, #1f5eff);
+  color: white;
+  font-size: 19px;
+  font-weight: 900;
+}
+
+.update-meta,
 .muted {
   color: var(--muted);
   font-size: 12px;
+}
+
+.update-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 180px;
+  text-align: right;
+}
+
+.nav-tabs {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  min-width: 0;
+}
+
+.nav-tabs a {
+  position: relative;
+  color: #1f2937;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.nav-tabs a.active {
+  color: var(--blue-dark);
+}
+
+.nav-tabs a.active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -18px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--blue);
 }
 
 .toolbar {
@@ -120,7 +172,7 @@ main {
   justify-content: space-between;
   gap: 24px;
   overflow: hidden;
-  border-radius: 8px;
+  border-radius: 0 0 8px 8px;
   border: 1px solid rgba(28, 52, 84, 0.38);
   background:
     linear-gradient(90deg, rgba(2, 9, 24, 0.88), rgba(2, 12, 28, 0.42) 48%, rgba(2, 12, 28, 0.18)),
@@ -324,7 +376,7 @@ main {
 
 .stock-brief-grid {
   display: grid;
-  grid-template-columns: minmax(0, 0.88fr) minmax(480px, 1.12fr);
+  grid-template-columns: minmax(330px, 0.82fr) minmax(0, 1.18fr) 340px;
   gap: 16px;
 }
 
@@ -552,9 +604,99 @@ main {
   color: var(--muted);
 }
 
+.chart-panel {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 16px;
+}
+
+.mini-chart {
+  height: 100%;
+  min-height: 276px;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.chart-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.chart-head strong,
+.chart-head span {
+  display: block;
+}
+
+.chart-head strong {
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+
+.chart-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chart-head b {
+  font-size: 18px;
+}
+
+.mini-chart svg {
+  width: 100%;
+  height: auto;
+}
+
+.mini-chart .grid line {
+  stroke: #dce4ed;
+  stroke-width: 1;
+}
+
+.mini-chart .bars rect {
+  fill: rgba(7, 132, 95, 0.28);
+}
+
+.mini-chart .chart-line {
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mini-chart circle {
+  fill: var(--green);
+}
+
+.chart-empty {
+  display: grid;
+  place-content: center;
+  min-height: 260px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.chart-empty strong {
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.lower-grid {
+  display: grid;
+  grid-template-columns: minmax(380px, 0.76fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
 .history-list {
   display: grid;
   gap: 14px;
+  max-height: 380px;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .history-day {
@@ -669,7 +811,7 @@ main {
 
 table {
   width: 100%;
-  min-width: 980px;
+  min-width: 760px;
   border-collapse: collapse;
 }
 
@@ -774,7 +916,8 @@ td strong {
   .topbar,
   .stock-brief-grid,
   .market-tabs,
-  .market-context-grid {
+  .market-context-grid,
+  .lower-grid {
     grid-template-columns: 1fr;
   }
 
@@ -782,8 +925,18 @@ td strong {
     display: grid;
   }
 
+  .nav-tabs {
+    overflow: auto;
+    padding-bottom: 4px;
+  }
+
+  .update-meta {
+    text-align: left;
+  }
+
   .hero-panel {
     display: grid;
+    border-radius: 8px;
   }
 }
 

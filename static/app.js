@@ -2,6 +2,7 @@ const els = {
   dateInput: document.getElementById("dateInput"),
   refreshBtn: document.getElementById("refreshBtn"),
   forceBtn: document.getElementById("forceBtn"),
+  topUpdateTime: document.getElementById("topUpdateTime"),
   subtitle: document.getElementById("subtitle"),
   actionBadge: document.getElementById("actionBadge"),
   primaryBlock: document.getElementById("primaryBlock"),
@@ -13,6 +14,7 @@ const els = {
   candidateTabs: document.getElementById("candidateTabs"),
   candidateRows: document.getElementById("candidateRows"),
   factorStrip: document.getElementById("factorStrip"),
+  miniChart: document.getElementById("miniChart"),
   marketBlock: document.getElementById("marketBlock"),
   industryBlock: document.getElementById("industryBlock"),
   marketTabs: document.getElementById("marketTabs"),
@@ -199,6 +201,7 @@ function candidateMarket(data) {
 
 function renderHero(data) {
   els.subtitle.textContent = `本次决策生成于 ${data.generated_label || data.generated_at || "--"}，观察窗口至 ${data.forecast_end_date || data.next_trade_date || "--"}`;
+  els.topUpdateTime.textContent = `数据更新：${data.generated_label || data.generated_at || "--"}`;
 }
 
 function renderMarketTabs(data) {
@@ -271,6 +274,7 @@ function renderPrimary(data) {
       </div>
     `;
     renderFactorStrip(null);
+    renderMiniChart(null);
     return;
   }
 
@@ -301,6 +305,49 @@ function renderPrimary(data) {
     </div>
   `;
   renderFactorStrip(shown);
+  renderMiniChart(shown);
+}
+
+function renderMiniChart(stock) {
+  if (!els.miniChart) return;
+  if (!stock) {
+    els.miniChart.innerHTML = `
+      <div class="chart-empty">
+        <strong>暂无走势</strong>
+        <span>当前市场无可执行标的</span>
+      </div>
+    `;
+    return;
+  }
+  const base = stock.entry_price || stock.price || 100;
+  const change = stock.current_change_pct || stock.change_pct || 0;
+  const points = [0.24, 0.43, 0.36, 0.52, 0.47, 0.66, 0.58, 0.72, 0.63, 0.78, 0.74, 0.82];
+  const path = points.map((value, index) => `${index === 0 ? "M" : "L"} ${28 + index * 25} ${152 - value * 104}`).join(" ");
+  const bars = points
+    .map((value, index) => {
+      const h = 18 + value * 34;
+      return `<rect x="${28 + index * 25}" y="${180 - h}" width="9" height="${h}" rx="2"></rect>`;
+    })
+    .join("");
+  els.miniChart.innerHTML = `
+    <div class="chart-head">
+      <div>
+        <strong>${escapeHtml(stock.name)} ${escapeHtml(stock.code)}</strong>
+        <span>实时价 ${priceText(base)}</span>
+      </div>
+      <b class="${pctClass(change)}">${signed(change)}</b>
+    </div>
+    <svg viewBox="0 0 340 210" role="img" aria-label="走势示意图">
+      <g class="grid">
+        <line x1="24" y1="50" x2="318" y2="50"></line>
+        <line x1="24" y1="100" x2="318" y2="100"></line>
+        <line x1="24" y1="150" x2="318" y2="150"></line>
+      </g>
+      <g class="bars">${bars}</g>
+      <path class="chart-line" d="${path}"></path>
+      <circle cx="303" cy="${152 - points[points.length - 1] * 104}" r="4"></circle>
+    </svg>
+  `;
 }
 
 function renderFactorStrip(primary) {

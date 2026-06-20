@@ -10,7 +10,18 @@
     <div class="app-shell">
       <header class="topbar">
         <div class="brand-mini">
+          <span class="brand-mark">↗</span>
           <strong>智能选股</strong>
+        </div>
+        <nav class="nav-tabs" aria-label="主导航">
+          <a class="active" href="#">决策看板</a>
+          <a href="#candidateRows">候选排行</a>
+          <a href="#historyList">历史记录</a>
+          <a href="#marketBlock">市场行情</a>
+          <a href="#decisionPanel">策略说明</a>
+        </nav>
+        <div class="update-meta">
+          <span id="topUpdateTime">数据更新：读取中</span>
           <span>AI Quant Stock Selector</span>
         </div>
         <div class="toolbar">
@@ -87,44 +98,50 @@
               </div>
               <div id="factorStrip" class="factor-strip"></div>
             </article>
+
+            <aside class="chart-panel">
+              <div id="miniChart" class="mini-chart"></div>
+            </aside>
           </div>
         </section>
 
-        <section class="history-panel">
-          <div class="section-title">
-            <div>
-              <span class="label">历史推荐记录</span>
-              <h2>按推荐时间追溯每次快照</h2>
+        <section class="lower-grid">
+          <article class="history-panel">
+            <div class="section-title">
+              <div>
+                <span class="label">历史推荐记录</span>
+                <h2>按推荐时间追溯每次快照</h2>
+              </div>
+              <span id="historyStatus" class="muted">读取缓存中</span>
             </div>
-            <span id="historyStatus" class="muted">读取缓存中</span>
-          </div>
-          <div id="historyList" class="history-list"></div>
-        </section>
+            <div id="historyList" class="history-list"></div>
+          </article>
 
-        <section class="table-panel">
-          <div class="section-title">
-            <div>
-              <span class="label">候选排序</span>
-              <h2>当日 Top5</h2>
+          <article class="table-panel">
+            <div class="section-title">
+              <div>
+                <span class="label">候选排序</span>
+                <h2>当日 Top5</h2>
+              </div>
+              <div id="candidateTabs" class="candidate-tabs"></div>
             </div>
-            <div id="candidateTabs" class="candidate-tabs"></div>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>排名</th>
-                  <th>股票</th>
-                  <th>推荐度</th>
-                  <th>建议价格</th>
-                  <th>预估收益</th>
-                  <th>推荐理由</th>
-                  <th>风险摘要</th>
-                </tr>
-              </thead>
-              <tbody id="candidateRows"></tbody>
-            </table>
-          </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>排名</th>
+                    <th>股票</th>
+                    <th>推荐度</th>
+                    <th>建议价格</th>
+                    <th>预估收益</th>
+                    <th>推荐理由</th>
+                    <th>风险摘要</th>
+                  </tr>
+                </thead>
+                <tbody id="candidateRows"></tbody>
+              </table>
+            </div>
+          </article>
         </section>
 
         <section class="market-context-grid">
