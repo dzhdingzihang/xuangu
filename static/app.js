@@ -29,6 +29,7 @@ let activeMarket = "a_share";
 let activeCandidateMarket = "a_share";
 let currentData = null;
 let selectedCandidateKey = "";
+let selectedHistoryKey = "";
 
 function todayText() {
   const d = new Date();
@@ -711,6 +712,8 @@ function renderCandidateDetail(row, section) {
   const latest = ((row.kline || []).filter((item) => Number(item.close) > 0).at(-1) || {});
   const currentPrice = row.current_price || row.realtime_price || (row.realtime && row.realtime.price) || Number(latest.close) || row.entry_price || row.price;
   const change = stockChange(row);
+  const reasons = (row.reasons || []).slice(0, 5).map((item) => `<li>${escapeHtml(readableReason(item))}</li>`).join("");
+  const risks = (row.risk_flags || []).slice(0, 5).map((item) => `<li>${escapeHtml(readableRisk(item))}</li>`).join("");
   els.candidateDetail.innerHTML = `
     <div class="candidate-detail-row">
       <span class="candidate-rank">${row.__rank || 1}</span>
@@ -724,6 +727,16 @@ function renderCandidateDetail(row, section) {
       <div class="candidate-metric"><span>止损价</span><strong class="green">${priceText(row.stop_loss)}</strong></div>
       <div class="candidate-metric score"><span>综合评分</span><strong>${confidence}分</strong>${starRating(confidence)}</div>
       <button class="detail-jump" type="button">查看单股说明</button>
+    </div>
+    <div class="candidate-detail-explain">
+      <section class="candidate-detail-note positive-note">
+        <h4>推荐理由</h4>
+        <ul>${reasons || "<li>暂无足够清晰的推荐理由。</li>"}</ul>
+      </section>
+      <section class="candidate-detail-note risk-note">
+        <h4>风险说明</h4>
+        <ul>${risks || "<li>未触发硬风险，但仍需要按止损价执行。</li>"}</ul>
+      </section>
     </div>
   `;
   const jump = els.candidateDetail.querySelector(".detail-jump");
@@ -773,9 +786,10 @@ function renderHistory(history, currentTarget) {
     group.className = "history-day";
     group.innerHTML = `<h3>${shortDate(date)} 推荐</h3>`;
     rows.forEach((item) => {
+      const snapshotKey = item.cache_key || item.snapshot_key || item.local_key || `${item.target_date}_${item.signal_date}_${item.generated_at || ""}`;
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `history-snapshot ${item.target_date === currentTarget ? "active" : ""}`;
+      button.className = `history-snapshot ${snapshotKey === selectedHistoryKey ? "active" : ""}`;
       button.innerHTML = `
         <span class="snapshot-time">${timeText(item)}</span>
         <span class="snapshot-markets">
@@ -786,11 +800,11 @@ function renderHistory(history, currentTarget) {
       `;
       button.addEventListener("click", async () => {
         els.dateInput.value = item.target_date;
-        const snapshotKey = item.cache_key || item.snapshot_key || item.local_key || `${item.target_date}_${item.signal_date}_${item.generated_at || ""}`;
+        selectedHistoryKey = snapshotKey;
         const localPick = readLocalHistory()[snapshotKey];
         if (localPick) {
           render(localPick);
-          renderHistory(history, item.target_date);
+          renderHistory(history, snapshotKey);
           return;
         }
         await loadSnapshot(snapshotKey, history);
@@ -854,9 +868,10 @@ async function loadSnapshot(snapshotKey, history = []) {
   const response = await fetch(`/api/pick?snapshot=${encodeURIComponent(snapshotKey)}`);
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "历史快照读取失败");
+  selectedHistoryKey = snapshotKey;
   render(data);
   storeLocalPick(data);
-  renderHistory(history.length ? history : mergeHistory([]), data.target_date);
+  renderHistory(history.length ? history : mergeHistory([]), snapshotKey);
   return data;
 }
 

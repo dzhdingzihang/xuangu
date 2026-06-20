@@ -1093,7 +1093,7 @@ main {
 
 .history-list {
   display: grid;
-  gap: 12px;
+  gap: 9px;
   align-content: start;
   flex: 1;
   max-height: none;
@@ -1103,9 +1103,9 @@ main {
 
 .history-day {
   display: grid;
-  gap: 8px;
+  gap: 7px;
   border-top: 1px solid var(--line-soft);
-  padding-top: 12px;
+  padding-top: 10px;
 }
 
 .history-day:first-child {
@@ -1120,14 +1120,14 @@ main {
 
 .history-snapshot {
   display: grid;
-  grid-template-columns: 82px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
   align-items: stretch;
   border: 1px solid var(--line-soft);
   border-radius: 8px;
   background: var(--panel-soft);
   color: var(--text);
-  padding: 10px;
+  padding: 7px;
   text-align: left;
   cursor: pointer;
 }
@@ -1135,6 +1135,7 @@ main {
 .history-snapshot.active {
   border-color: var(--blue);
   background: #eef4ff;
+  box-shadow: inset 3px 0 0 var(--blue);
 }
 
 .snapshot-time {
@@ -1143,20 +1144,21 @@ main {
   border-radius: 8px;
   background: white;
   color: var(--blue-dark);
+  font-size: 15px;
   font-weight: 900;
 }
 
 .snapshot-markets {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
 .history-market {
   display: grid;
-  gap: 5px;
+  gap: 3px;
   border-radius: 8px;
-  padding: 9px;
+  padding: 7px 8px;
 }
 
 .history-market.buy {
@@ -1177,7 +1179,7 @@ main {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: 12px;
   font-style: normal;
   font-weight: 800;
 }
@@ -1386,6 +1388,37 @@ tbody tr.selected-row {
   cursor: pointer;
   font-weight: 900;
   white-space: nowrap;
+}
+
+.candidate-detail-explain {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+  min-width: 760px;
+}
+
+.candidate-detail-note {
+  border-radius: 8px;
+  padding: 12px 14px;
+  min-height: 118px;
+  max-height: 210px;
+  overflow: auto;
+}
+
+.candidate-detail-note h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.candidate-detail-note ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 18px;
+  color: inherit;
+  font-size: 12.5px;
+  line-height: 1.48;
 }
 
 .candidate-score-strip {
