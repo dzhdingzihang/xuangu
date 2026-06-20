@@ -2164,7 +2164,16 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
 
 def scheduler_loop() -> None:
     last_run = ""
-    update_slots = {(8, 58), (9, 58), (10, 58), (12, 58), (13, 58), (14, 58)}
+    update_slots = {
+        (8, 58),
+        (9, 58),
+        (10, 58),
+        (12, 58),
+        (13, 58),
+        (14, 58),
+        (21, 28),
+        (23, 58),
+    }
     while True:
         current = now_cn()
         key = current.strftime("%Y-%m-%d %H:%M")

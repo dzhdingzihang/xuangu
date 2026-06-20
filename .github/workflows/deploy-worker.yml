@@ -4,7 +4,11 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "58 0,1,2,4,5,6 * * 1-5"
+    # Beijing trading-day checkpoints:
+    # 08:58, 09:58, 10:58, 12:58, 13:58, 14:58, 23:58
+    - cron: "58 0,1,2,4,5,6,15 * * 1-5"
+    # Beijing 21:28
+    - cron: "28 13 * * 1-5"
   workflow_dispatch:
 
 jobs:
@@ -28,9 +32,11 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install Serenity skill
+        if: github.event_name != 'push'
         run: python scripts/install_serenity_skill.py
 
       - name: Generate smart pick snapshot
+        if: github.event_name != 'push'
         run: python server.py --once --force
 
       - name: Install Node dependencies
@@ -40,6 +46,7 @@ jobs:
         run: npm run build
 
       - name: Commit generated snapshot
+        if: github.event_name != 'push'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update daily pick snapshot"

@@ -338,10 +338,16 @@ main {
 }
 
 .pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 999px;
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 900;
+  line-height: 1;
+  min-width: max-content;
+  white-space: nowrap;
 }
 
 .pill.buy,
@@ -586,12 +592,18 @@ main {
 }
 
 .status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 999px;
   padding: 7px 11px;
   background: #e8f2ff;
   color: var(--blue-dark);
   font-size: 12px;
   font-weight: 900;
+  line-height: 1;
+  min-width: max-content;
+  white-space: nowrap;
 }
 
 .status.buy {
@@ -1290,10 +1302,10 @@ tbody tr.selected-row {
 
 .candidate-detail-row {
   display: grid;
-  grid-template-columns: 34px minmax(150px, 1.3fr) repeat(5, minmax(92px, 0.82fr)) minmax(130px, 0.9fr);
+  grid-template-columns: 34px minmax(138px, 1.25fr) repeat(5, minmax(76px, 0.74fr)) minmax(128px, 0.92fr);
   gap: 10px;
   align-items: center;
-  min-width: 820px;
+  min-width: 760px;
 }
 
 .candidate-rank {
@@ -1313,6 +1325,9 @@ tbody tr.selected-row {
 }
 
 .candidate-name-block strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 17px;
 }
 
@@ -1342,6 +1357,14 @@ tbody tr.selected-row {
   font-size: 17px;
 }
 
+.candidate-metric span,
+.candidate-metric strong,
+.candidate-metric em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .candidate-metric em {
   font-style: normal;
   font-weight: 900;
@@ -1354,12 +1377,15 @@ tbody tr.selected-row {
 
 .detail-jump {
   height: 44px;
+  min-width: 122px;
+  padding: 0 14px;
   border: 0;
   border-radius: 8px;
   background: var(--blue);
   color: white;
   cursor: pointer;
   font-weight: 900;
+  white-space: nowrap;
 }
 
 .candidate-score-strip {
