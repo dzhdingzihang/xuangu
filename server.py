@@ -1587,6 +1587,23 @@ def quote_from_kline(kline: list[dict]) -> dict:
     }
 
 
+def compact_kline(kline: list[dict], limit: int = 32) -> list[dict]:
+    rows = []
+    for row in kline[-limit:]:
+        rows.append(
+            {
+                "date": row.get("date"),
+                "open": round(safe_float(row.get("open")), 4),
+                "high": round(safe_float(row.get("high")), 4),
+                "low": round(safe_float(row.get("low")), 4),
+                "close": round(safe_float(row.get("close")), 4),
+                "volume": round(safe_float(row.get("volume")), 2),
+                "change_pct": round(safe_float(row.get("change_pct")), 2),
+            }
+        )
+    return rows
+
+
 def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
     policy = SERENITY_MARKET_POLICY.get(market_key, SERENITY_MARKET_POLICY["hk"])
     realtime_map = yahoo_realtime_quotes([item["symbol"] for item in candidates]) if market_key in ("hk", "us") else {}
@@ -1708,6 +1725,7 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                 "dragon_reason": "",
                 "reasons": reasons[:8],
                 "risk_flags": risk_flags[:7],
+                "kline": compact_kline(kline),
                 "chan": chan,
                 "czsc": czsc,
                 "uzi": uzi,
@@ -1888,6 +1906,7 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
                 "dragon_reason": (dragon_map.get(code) or {}).get("reason", ""),
                 "reasons": reasons[:7],
                 "risk_flags": risk_flags[:6],
+                "kline": compact_kline(kline),
                 "chan": chan,
                 "czsc": czsc,
                 "uzi": uzi,
@@ -2145,14 +2164,11 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
 
 def scheduler_loop() -> None:
     last_run = ""
+    update_slots = {(8, 58), (9, 58), (10, 58), (12, 58), (13, 58), (14, 58)}
     while True:
         current = now_cn()
         key = current.strftime("%Y-%m-%d %H:%M")
-        in_update_window = current.weekday() < 5 and (
-            (current.hour == 9 and current.minute in (0, 30))
-            or (10 <= current.hour <= 14 and current.minute in (0, 30))
-            or (current.hour == 15 and current.minute in (0, 30))
-        )
+        in_update_window = current.weekday() < 5 and (current.hour, current.minute) in update_slots
         if in_update_window and key != last_run:
             last_run = key
             try:

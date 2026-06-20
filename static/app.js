@@ -13,9 +13,11 @@ const els = {
   historyList: document.getElementById("historyList"),
   candidateTabs: document.getElementById("candidateTabs"),
   candidateRows: document.getElementById("candidateRows"),
+  candidateDetail: document.getElementById("candidateDetail"),
   factorStrip: document.getElementById("factorStrip"),
   miniChart: document.getElementById("miniChart"),
   marketBlock: document.getElementById("marketBlock"),
+  industryPanel: document.getElementById("industryPanel"),
   industryBlock: document.getElementById("industryBlock"),
   marketTabs: document.getElementById("marketTabs"),
 };
@@ -26,6 +28,7 @@ const MARKET_LABELS = { a_share: "A股", hk: "港股", us: "美股" };
 let activeMarket = "a_share";
 let activeCandidateMarket = "a_share";
 let currentData = null;
+let selectedCandidateKey = "";
 
 function todayText() {
   const d = new Date();
@@ -69,7 +72,7 @@ function timeText(item) {
 
 function recommendationLabel(value, hasPrimary) {
   if (!hasPrimary) return "不买";
-  if (value >= 72) return "建议买入";
+  if (value >= 72) return "推荐买入";
   if (value >= 62) return "谨慎买入";
   return "观察";
 }
@@ -78,6 +81,60 @@ function confidenceTone(value) {
   if (value >= 70) return "strong";
   if (value >= 58) return "watch";
   return "weak";
+}
+
+function actionClass(value, hasPrimary) {
+  if (!hasPrimary) return "level-no";
+  if (value >= 72) return "level-buy";
+  if (value >= 62) return "level-caution";
+  return "level-watch";
+}
+
+function candidateKey(row) {
+  return `${activeCandidateMarket}:${row && (row.code || row.symbol || row.name)}`;
+}
+
+function readableReason(text) {
+  const raw = String(text || "");
+  const rules = [
+    ["女上位", "MA5 是最近 5 天的平均成本，MA10 是最近 10 天的平均成本。MA5 在 MA10 上方，说明最近买入的人愿意用更高价格成交，短线资金比前一段更强。"],
+    ["多头排列", "价格和短中期均线从上到下排得比较顺，像楼梯往上走，趋势没有明显拐头。"],
+    ["持股线", "MA10 可以理解成短线持股参考线，股价还守在线上，说明短线趋势暂时没有被破坏。"],
+    ["二买", "上涨后先回踩，再重新站回来，代表不是盲目追高，而是回落后又有资金接住。"],
+    ["三买", "突破前面的震荡区后，回踩没有跌回去，说明突破有机会是真的。"],
+    ["MACD背驰改善", "股价接近低点时，下跌力量变弱，后面更容易出现修复。"],
+    ["CZSC近似", "这是把缠论结构量化后的信号，意思是当前走势结构没有明显走坏。"],
+    ["Serenity因子", "这是看产业链位置，越靠近稀缺供给、AI 投入和真实订单，越容易被资金重新定价。"],
+    ["Serenity Skill", "这是产业链五维复核，分数高代表确定性、弹性和催化节奏更协调。"],
+    ["UZI评审团", "这是模拟多位投资者一起打分，只有趋势、买点、风险和赔率同时说得过去才加分。"],
+    ["UZI风控", "这是专门看会不会买在太贵、太热、太危险的位置，分越高代表当前价位更容易控制亏损。"],
+    ["题材命中", "当前股票踩中了市场正在关注的主题，容易获得更多资金关注。"],
+    ["龙虎榜净买入", "龙虎榜显示有席位净买入，说明短线活跃资金有参与。"],
+    ["实时买入价", "这里用的是当前能参考的买入价格，不是只看昨收，所以更贴近实际下单。"],
+    ["产业链主题", "它所在方向和近期资金关注的产业链有关，题材热度能给两周走势提供推力。"],
+    ["成本位置", "离常用均线不远，代表止损距离相对可控，不是追得太高。"],
+  ];
+  const hit = rules.find(([key]) => raw.includes(key));
+  return hit ? `${raw}。简单说：${hit[1]}` : raw;
+}
+
+function readableRisk(text) {
+  const raw = String(text || "");
+  const rules = [
+    ["偏离 MA10 过大", "股价已经离短线平均成本太远，继续追容易买在短期高点。"],
+    ["5日涨幅", "最近几天已经涨了不少，先买的人可能会卖出兑现利润。"],
+    ["实时涨幅过大", "今天已经被抢得太高，当前价格再买的赔率变差。"],
+    ["放量过猛", "成交突然放太大，说明分歧也变大，容易冲高回落。"],
+    ["跌破 MA20", "中期趋势线失守，两周持有的稳定性会下降。"],
+    ["跌破 MA10", "短线持股线失守，说明最近买盘承接不够强。"],
+    ["MACD 柱缩短", "上涨动能开始变弱，虽然价格高，但推动力可能跟不上。"],
+    ["融资", "公司融资或稀释压力会削弱上涨质量。"],
+    ["稀释", "增发或融资可能摊薄股东权益，资金会更谨慎。"],
+    ["追高", "当前价位不够舒服，买进去后更容易先承受回撤。"],
+    ["硬风险", "有多个风控条件没有通过，系统宁愿少赚，也先避免亏损。"],
+  ];
+  const hit = rules.find(([key]) => raw.includes(key));
+  return hit ? `${raw}。看法：${hit[1]}` : raw;
 }
 
 function clearList(node) {
@@ -216,12 +273,12 @@ function renderMarketTabs(data) {
     const range = candidate && (candidate.estimated_2w_range || candidate.estimated_2d_range);
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `market-card ${key === activeMarket ? "active" : ""} ${primary ? "buy-card" : "no-card"}`;
+    button.className = `market-card ${key === activeMarket ? "active" : ""} ${actionClass(confidence, Boolean(primary))}`;
     if (primary) {
       button.innerHTML = `
         <div class="market-card-head">
           <strong>${escapeHtml(section.label || MARKET_LABELS[key])}</strong>
-          <span class="pill buy">${recommendationLabel(confidence, true)}</span>
+          <span class="pill ${actionClass(confidence, true)}">${recommendationLabel(confidence, true)}</span>
         </div>
         <div class="market-pick">
           <b>${escapeHtml(primary.name)} ${escapeHtml(primary.code)}</b>
@@ -238,7 +295,7 @@ function renderMarketTabs(data) {
       button.innerHTML = `
         <div class="market-card-head">
           <strong>${escapeHtml(section.label || MARKET_LABELS[key])}</strong>
-          <span class="pill no">无推荐</span>
+          <span class="pill level-no">不买 / 无推荐</span>
         </div>
         <div class="no-trade-copy">
           <b>不买 / 无推荐</b>
@@ -260,7 +317,8 @@ function renderPrimary(data) {
   const primary = decision.primary;
   const blocked = decision.blocked_candidate;
   const shown = primary || blocked;
-  els.actionBadge.className = `status ${primary ? "buy" : "no-trade"}`;
+  const badgeConfidence = shown ? shown.recommendation_degree || shown.confidence || 0 : 0;
+  els.actionBadge.className = `status ${actionClass(badgeConfidence, Boolean(primary))}`;
   els.actionBadge.textContent = primary ? recommendationLabel(primary.recommendation_degree || primary.confidence, true) : "不买";
 
   if (!shown) {
@@ -308,6 +366,85 @@ function renderPrimary(data) {
   renderMiniChart(shown);
 }
 
+function klineChartSvg(stock, options = {}) {
+  const kline = (stock && stock.kline) || [];
+  if (!kline.length) {
+    return `
+      <div class="chart-empty">
+        <strong>暂无真实K线</strong>
+        <span>该历史快照还没有保存 OHLC 数据</span>
+      </div>
+    `;
+  }
+  const rows = kline
+    .filter((row) => Number(row.high) > 0 && Number(row.low) > 0 && Number(row.close) > 0)
+    .slice(-32);
+  if (!rows.length) {
+    return `
+      <div class="chart-empty">
+        <strong>暂无真实K线</strong>
+        <span>行情源没有返回有效 OHLC</span>
+      </div>
+    `;
+  }
+  const width = options.width || 340;
+  const height = options.height || 210;
+  const top = 22;
+  const bottom = 42;
+  const left = 22;
+  const right = 16;
+  const chartHeight = height - top - bottom;
+  const highs = rows.map((row) => Number(row.high));
+  const lows = rows.map((row) => Number(row.low));
+  const maxPrice = Math.max(...highs);
+  const minPrice = Math.min(...lows);
+  const span = Math.max(maxPrice - minPrice, 0.001);
+  const step = (width - left - right) / rows.length;
+  const candleWidth = Math.max(4, Math.min(9, step * 0.58));
+  const y = (price) => top + ((maxPrice - price) / span) * chartHeight;
+  const candles = rows
+    .map((row, index) => {
+      const x = left + index * step + step / 2;
+      const open = Number(row.open) || Number(row.close);
+      const close = Number(row.close);
+      const high = Number(row.high);
+      const low = Number(row.low);
+      const up = close >= open;
+      const colorClass = up ? "up" : "down";
+      const bodyTop = Math.min(y(open), y(close));
+      const bodyHeight = Math.max(Math.abs(y(open) - y(close)), 2);
+      return `
+        <g class="candle ${colorClass}">
+          <line x1="${x.toFixed(2)}" y1="${y(high).toFixed(2)}" x2="${x.toFixed(2)}" y2="${y(low).toFixed(2)}"></line>
+          <rect x="${(x - candleWidth / 2).toFixed(2)}" y="${bodyTop.toFixed(2)}" width="${candleWidth.toFixed(2)}" height="${bodyHeight.toFixed(2)}" rx="1"></rect>
+        </g>
+      `;
+    })
+    .join("");
+  const labels = [
+    { y: top, text: priceText(maxPrice) },
+    { y: top + chartHeight / 2, text: priceText((maxPrice + minPrice) / 2) },
+    { y: top + chartHeight, text: priceText(minPrice) },
+  ]
+    .map((item) => `<text x="2" y="${item.y + 4}" class="axis-label">${item.text}</text>`)
+    .join("");
+  const last = rows[rows.length - 1];
+  const first = rows[0];
+  return `
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(stock.name)}真实日K线">
+      <g class="grid">
+        <line x1="${left}" y1="${top}" x2="${width - right}" y2="${top}"></line>
+        <line x1="${left}" y1="${top + chartHeight / 2}" x2="${width - right}" y2="${top + chartHeight / 2}"></line>
+        <line x1="${left}" y1="${top + chartHeight}" x2="${width - right}" y2="${top + chartHeight}"></line>
+      </g>
+      <g class="axis">${labels}</g>
+      <g>${candles}</g>
+      <text x="${left}" y="${height - 12}" class="date-label">${shortDate(first.date)}</text>
+      <text x="${width - right - 38}" y="${height - 12}" class="date-label">${shortDate(last.date)}</text>
+    </svg>
+  `;
+}
+
 function renderMiniChart(stock) {
   if (!els.miniChart) return;
   if (!stock) {
@@ -321,32 +458,15 @@ function renderMiniChart(stock) {
   }
   const base = stock.entry_price || stock.price || 100;
   const change = stock.current_change_pct || stock.change_pct || 0;
-  const points = [0.24, 0.43, 0.36, 0.52, 0.47, 0.66, 0.58, 0.72, 0.63, 0.78, 0.74, 0.82];
-  const path = points.map((value, index) => `${index === 0 ? "M" : "L"} ${28 + index * 25} ${152 - value * 104}`).join(" ");
-  const bars = points
-    .map((value, index) => {
-      const h = 18 + value * 34;
-      return `<rect x="${28 + index * 25}" y="${180 - h}" width="9" height="${h}" rx="2"></rect>`;
-    })
-    .join("");
   els.miniChart.innerHTML = `
     <div class="chart-head">
       <div>
         <strong>${escapeHtml(stock.name)} ${escapeHtml(stock.code)}</strong>
-        <span>实时价 ${priceText(base)}</span>
+        <span>实时价 ${priceText(base)} · 真实日K</span>
       </div>
       <b class="${pctClass(change)}">${signed(change)}</b>
     </div>
-    <svg viewBox="0 0 340 210" role="img" aria-label="走势示意图">
-      <g class="grid">
-        <line x1="24" y1="50" x2="318" y2="50"></line>
-        <line x1="24" y1="100" x2="318" y2="100"></line>
-        <line x1="24" y1="150" x2="318" y2="150"></line>
-      </g>
-      <g class="bars">${bars}</g>
-      <path class="chart-line" d="${path}"></path>
-      <circle cx="303" cy="${152 - points[points.length - 1] * 104}" r="4"></circle>
-    </svg>
+    ${klineChartSvg(stock)}
   `;
 }
 
@@ -354,6 +474,13 @@ function renderFactorStrip(primary) {
   clearList(els.factorStrip);
   if (!primary) return;
   const serenityAlpha = primary.serenity && primary.serenity.alpha_profile;
+  const maxScores = {
+    UZI评审: 60,
+    UZI风控: 30,
+    CZSC: 35,
+    缠论: 60,
+    Serenity: 120,
+  };
   const factors = [
     ["UZI评审", primary.uzi_panel_score],
     ["UZI风控", primary.uzi_score],
@@ -363,12 +490,13 @@ function renderFactorStrip(primary) {
   ];
   factors.forEach(([label, value]) => {
     const chip = document.createElement("span");
-    chip.innerHTML = `<b>${escapeHtml(label)}</b>${typeof value === "number" ? value.toFixed(1) : "--"}`;
+    const max = maxScores[label];
+    chip.innerHTML = `<b>${escapeHtml(label)}</b>${typeof value === "number" ? `${value.toFixed(1)}/${max}` : `--/${max}`}`;
     els.factorStrip.append(chip);
   });
   if (serenityAlpha && serenityAlpha.rating && typeof serenityAlpha.score === "number") {
     const chip = document.createElement("span");
-    chip.innerHTML = `<b>Serenity评级</b>${escapeHtml(serenityAlpha.rating)} / ${serenityAlpha.score}`;
+    chip.innerHTML = `<b>Serenity评级</b>${escapeHtml(serenityAlpha.rating)} / ${serenityAlpha.score}/100`;
     els.factorStrip.append(chip);
   }
 }
@@ -383,9 +511,9 @@ function renderReasons(data) {
     els.riskList.append(li("无推荐时默认不买"));
     return;
   }
-  (primary.reasons || []).slice(0, 6).forEach((reason) => els.reasons.append(li(reason)));
+  (primary.reasons || []).slice(0, 6).forEach((reason) => els.reasons.append(li(readableReason(reason))));
   if ((primary.risk_flags || []).length) {
-    primary.risk_flags.slice(0, 6).forEach((flag) => els.riskList.append(li(flag)));
+    primary.risk_flags.slice(0, 6).forEach((flag) => els.riskList.append(li(readableRisk(flag))));
   } else {
     els.riskList.append(li("未触发硬风险"));
   }
@@ -413,28 +541,97 @@ function renderCandidateRows(data) {
   const decision = section.decision || {};
   const rows = [decision.primary, ...(decision.watchlist || [])].filter(Boolean).slice(0, 5);
   clearList(els.candidateRows);
+  if (els.candidateDetail) els.candidateDetail.replaceChildren();
   if (!rows.length) {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td colspan="7" class="empty-cell">该市场暂无可展示候选。</td>`;
     els.candidateRows.append(tr);
+    if (els.candidateDetail) {
+      els.candidateDetail.innerHTML = `<div class="candidate-empty">当前市场没有候选详情。</div>`;
+    }
     return;
+  }
+  if (!rows.some((row) => candidateKey(row) === selectedCandidateKey)) {
+    selectedCandidateKey = candidateKey(rows[0]);
   }
   rows.forEach((row, index) => {
     const range = row.estimated_2w_range || row.estimated_2d_range || {};
-    const reasons = (row.reasons || []).slice(0, 2).map(escapeHtml).join("<br>");
-    const risks = (row.risk_flags || []).slice(0, 2).map(escapeHtml).join("<br>") || "无硬风险";
+    const confidence = row.recommendation_degree || row.confidence || 0;
+    const reasons = (row.reasons || []).slice(0, 2).map((item) => escapeHtml(readableReason(item))).join("<br>");
+    const risks = (row.risk_flags || []).slice(0, 2).map((item) => escapeHtml(readableRisk(item))).join("<br>") || "无硬风险";
     const tr = document.createElement("tr");
+    tr.className = candidateKey(row) === selectedCandidateKey ? "selected-row" : "";
+    tr.tabIndex = 0;
     tr.innerHTML = `
       <td>${index + 1}</td>
       <td><strong>${escapeHtml(row.name)}</strong><span class="muted">${escapeHtml(row.code)}</span></td>
-      <td><strong class="${confidenceTone(row.recommendation_degree || row.confidence)}">${row.recommendation_degree || row.confidence}%</strong></td>
+      <td><span class="mini-action ${actionClass(confidence, true)}">${recommendationLabel(confidence, true)}</span><strong class="${confidenceTone(confidence)}">${confidence}%</strong></td>
       <td>${priceText(row.entry_price || row.price)}<br><span class="muted">止损 ${priceText(row.stop_loss)}</span></td>
       <td><span class="${pctClass((range.high_pct || 0))}">${escapeHtml(range.text || "--")}</span></td>
       <td><div class="table-note positive-note">${reasons || "暂无理由"}</div></td>
       <td><div class="table-note risk-note">${risks}</div></td>
     `;
+    tr.addEventListener("click", () => {
+      selectedCandidateKey = candidateKey(row);
+      renderCandidateRows(data);
+    });
+    tr.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectedCandidateKey = candidateKey(row);
+        renderCandidateRows(data);
+      }
+    });
     els.candidateRows.append(tr);
   });
+  const selected = rows.find((row) => candidateKey(row) === selectedCandidateKey) || rows[0];
+  renderCandidateDetail(selected, section);
+}
+
+function renderCandidateDetail(row, section) {
+  if (!els.candidateDetail || !row) return;
+  const confidence = row.recommendation_degree || row.confidence || 0;
+  const range = row.estimated_2w_range || row.estimated_2d_range || {};
+  const reasons = (row.reasons || []).slice(0, 5).map((item) => `<li>${escapeHtml(readableReason(item))}</li>`).join("");
+  const risks = (row.risk_flags || []).slice(0, 5).map((item) => `<li>${escapeHtml(readableRisk(item))}</li>`).join("") || "<li>未触发硬风险，但仍需要按止损执行。</li>";
+  const scoreItems = [
+    ["UZI评审", row.uzi_panel_score, 60],
+    ["UZI风控", row.uzi_score, 30],
+    ["CZSC", row.czsc_score, 35],
+    ["缠论", row.chan_score, 60],
+    ["Serenity", row.serenity_score || (row.serenity && row.serenity.score), 120],
+  ]
+    .map(([label, value, max]) => `<span><b>${escapeHtml(label)}</b>${typeof value === "number" ? value.toFixed(1) : "--"}/${max}</span>`)
+    .join("");
+  els.candidateDetail.innerHTML = `
+    <div class="candidate-detail-head">
+      <div>
+        <span class="label">${escapeHtml((section && section.label) || MARKET_LABELS[activeCandidateMarket] || "")} 候选详情</span>
+        <h3>${escapeHtml(row.name)} ${escapeHtml(row.code)}</h3>
+      </div>
+      <span class="status ${actionClass(confidence, true)}">${recommendationLabel(confidence, true)} · ${confidence}%</span>
+    </div>
+    <div class="candidate-detail-grid">
+      <div class="candidate-trade-box">
+        <div><span>建议买入价</span><strong>${priceText(row.entry_price || row.price)}</strong></div>
+        <div><span>止盈参考</span><strong class="red">${priceText(row.take_profit_reference)}</strong></div>
+        <div><span>止损线</span><strong class="green">${priceText(row.stop_loss)}</strong></div>
+        <div><span>两周预估</span><strong>${escapeHtml(range.text || "--")}</strong></div>
+      </div>
+      <div class="candidate-mini-chart">${klineChartSvg(row, { width: 430, height: 210 })}</div>
+    </div>
+    <div class="candidate-explain-grid">
+      <section class="candidate-explain positive-note">
+        <h4>为什么可能涨</h4>
+        <ul>${reasons || "<li>暂无足够清晰的推荐理由。</li>"}</ul>
+      </section>
+      <section class="candidate-explain risk-note">
+        <h4>哪里可能亏</h4>
+        <ul>${risks}</ul>
+      </section>
+    </div>
+    <div class="factor-strip candidate-score-strip">${scoreItems}</div>
+  `;
 }
 
 function marketSummaryForHistory(item, key) {
@@ -519,11 +716,10 @@ function renderIndustry(data) {
   clearList(els.industryBlock);
   const top = (data.industry_heat && data.industry_heat.top) || [];
   if (!top.length) {
-    const p = document.createElement("p");
-    p.textContent = "行业接口暂不可用，不参与本次硬拦截。";
-    els.industryBlock.append(p);
+    if (els.industryPanel) els.industryPanel.hidden = true;
     return;
   }
+  if (els.industryPanel) els.industryPanel.hidden = false;
   top.slice(0, 6).forEach((item) => {
     const row = document.createElement("div");
     row.className = "industry-row";
