@@ -293,22 +293,13 @@ def parse_cache_name(path: pathlib.Path) -> tuple[str, str, str] | None:
     return match.group(1), match.group(2), match.group(3) or "000000"
 
 
-def summarize_pick(pick: dict) -> dict:
-    decision = pick.get("decision") or {}
+def summarize_decision(decision: dict) -> dict:
     primary = decision.get("primary") or decision.get("blocked_candidate")
     summary = {
-        "target_date": pick.get("target_date"),
-        "signal_date": pick.get("signal_date"),
-        "generated_at": pick.get("generated_at"),
-        "generated_label": pick.get("generated_label"),
-        "snapshot_key": pick.get("snapshot_key"),
-        "forecast_end_date": pick.get("forecast_end_date"),
-        "forecast_horizon": pick.get("forecast_horizon"),
         "action": decision.get("action"),
         "title": decision.get("title"),
         "message": decision.get("message"),
         "has_primary": bool(decision.get("primary")),
-        "model_version": pick.get("model_version"),
     }
     if primary:
         range_obj = primary.get("estimated_2w_range") or primary.get("estimated_2d_range") or {}
@@ -330,6 +321,28 @@ def summarize_pick(pick: dict) -> dict:
                 "reason_tags": primary.get("reason_tags"),
             }
         )
+    return summary
+
+
+def summarize_pick(pick: dict) -> dict:
+    decision = pick.get("decision") or {}
+    summary = {
+        "target_date": pick.get("target_date"),
+        "signal_date": pick.get("signal_date"),
+        "generated_at": pick.get("generated_at"),
+        "generated_label": pick.get("generated_label"),
+        "snapshot_key": pick.get("snapshot_key"),
+        "forecast_end_date": pick.get("forecast_end_date"),
+        "forecast_horizon": pick.get("forecast_horizon"),
+        "model_version": pick.get("model_version"),
+        **summarize_decision(decision),
+    }
+    markets = pick.get("markets") or {}
+    if markets:
+        summary["markets"] = {
+            key: summarize_decision((section or {}).get("decision") or {})
+            for key, section in markets.items()
+        }
     return summary
 
 

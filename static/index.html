@@ -4,14 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>智能选股</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260620-clarity1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260620-dashboard1" />
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <div>
-          <h1>智能选股</h1>
-          <p id="subtitle">实时价 + UZI + Serenity，筛选未来2周上涨机会</p>
+        <div class="brand-mini">
+          <strong>智能选股</strong>
+          <span>AI Quant Stock Selector</span>
         </div>
         <div class="toolbar">
           <label>
@@ -24,133 +24,125 @@
       </header>
 
       <main>
-        <section class="market-tabs-panel priority-panel">
+        <section class="hero-panel">
+          <div class="hero-copy">
+            <span class="hero-kicker">AI + UZI + CZSC + Serenity</span>
+            <h1>智能选股</h1>
+            <p id="subtitle">正在读取本次决策时间和观察窗口</p>
+          </div>
+          <div class="hero-badges">
+            <span>未来2周</span>
+            <span>实时价</span>
+            <span>风控优先</span>
+          </div>
+        </section>
+
+        <section class="market-decision-panel">
+          <div class="section-title">
+            <div>
+              <span class="label">市场选择</span>
+              <h2>今天是否值得买</h2>
+            </div>
+            <span class="muted">目标是在指定价格买入后，未来2周获得正收益</span>
+          </div>
+          <div id="marketTabs" class="market-tabs market-decision-cards">
+            <div class="market-card placeholder"><strong>A股</strong><span>读取中</span></div>
+            <div class="market-card placeholder"><strong>港股</strong><span>读取中</span></div>
+            <div class="market-card placeholder"><strong>美股</strong><span>读取中</span></div>
+          </div>
+        </section>
+
+        <section class="stock-brief-panel" id="decisionPanel">
           <div class="panel-head">
-            <span class="label">市场选择</span>
-            <span class="muted">A股 · 港股 · 美股</span>
+            <span class="label">单股说明</span>
+            <span id="signalDate" class="muted"></span>
           </div>
-          <div id="marketTabs" class="market-tabs">
-            <div class="market-tab placeholder"><strong>A股</strong><span>读取中</span><small>--</small></div>
-            <div class="market-tab placeholder"><strong>港股</strong><span>读取中</span><small>--</small></div>
-            <div class="market-tab placeholder"><strong>美股</strong><span>读取中</span><small>--</small></div>
-          </div>
-        </section>
-
-        <section class="decision-grid">
-          <article class="decision-panel" id="decisionPanel">
-            <div class="panel-head">
-              <span class="label">今日操作</span>
-              <span class="status" id="actionBadge">加载中</span>
-            </div>
-            <div id="primaryBlock" class="primary-block">
-              <div class="skeleton line"></div>
-              <div class="skeleton title"></div>
-              <div class="skeleton row"></div>
-            </div>
-          </article>
-
-          <article class="reason-panel">
-            <div class="panel-head">
-              <span class="label">理由与风险</span>
-              <span id="signalDate" class="muted"></span>
-            </div>
-            <div class="reason-columns">
-              <div>
-                <h2>为什么选它</h2>
-                <ul id="reasons" class="reason-list">
-                  <li>正在读取推荐理由</li>
-                </ul>
+          <div class="stock-brief-grid">
+            <article class="decision-panel">
+              <div class="panel-head compact-head">
+                <span class="label">操作建议</span>
+                <span class="status" id="actionBadge">加载中</span>
               </div>
-              <div>
-                <h2>需要防什么</h2>
-                <ul id="riskList" class="reason-list risk-list">
-                  <li>正在读取风险标签</li>
-                </ul>
+              <div id="primaryBlock" class="primary-block">
+                <div class="skeleton line"></div>
+                <div class="skeleton title"></div>
+                <div class="skeleton row"></div>
               </div>
-            </div>
-          </article>
-        </section>
+            </article>
 
-        <section class="metrics-strip">
-          <div class="metric">
-            <span>推荐度</span>
-            <strong id="confidenceMetric">--</strong>
-          </div>
-          <div class="metric">
-            <span>未来2周涨幅预估</span>
-            <strong id="rangeMetric">--</strong>
-          </div>
-          <div class="metric">
-            <span>止损线</span>
-            <strong id="stopMetric">--</strong>
-          </div>
-          <div class="metric">
-            <span>样本池</span>
-            <strong id="poolMetric">--</strong>
+            <article class="reason-panel">
+              <div class="reason-columns">
+                <div class="reason-box reason-positive">
+                  <h2>推荐理由</h2>
+                  <ul id="reasons" class="reason-list">
+                    <li>正在读取推荐理由</li>
+                  </ul>
+                </div>
+                <div class="reason-box reason-risk">
+                  <h2>风险说明</h2>
+                  <ul id="riskList" class="reason-list risk-list">
+                    <li>正在读取风险标签</li>
+                  </ul>
+                </div>
+              </div>
+              <div id="factorStrip" class="factor-strip"></div>
+            </article>
           </div>
         </section>
 
         <section class="history-panel">
-          <div class="panel-head">
-            <span class="label">历史决策</span>
+          <div class="section-title">
+            <div>
+              <span class="label">历史推荐记录</span>
+              <h2>按推荐时间追溯每次快照</h2>
+            </div>
             <span id="historyStatus" class="muted">读取缓存中</span>
           </div>
           <div id="historyList" class="history-list"></div>
         </section>
 
-        <section class="content-grid">
-          <article class="table-panel">
-            <div class="panel-head">
+        <section class="table-panel">
+          <div class="section-title">
+            <div>
               <span class="label">候选排序</span>
-              <span class="muted">分数越高，只代表未来2周上涨信号越强</span>
+              <h2>当日 Top5</h2>
             </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>排名</th>
-                    <th>股票</th>
-                    <th>评分</th>
-                    <th>推荐度</th>
-                    <th>预估</th>
-                    <th>实时/成交</th>
-                    <th>题材</th>
-                    <th>风险</th>
-                  </tr>
-                </thead>
-                <tbody id="candidateRows"></tbody>
-              </table>
-            </div>
-          </article>
-
-          <aside class="side-stack">
-            <article class="side-panel">
-              <div class="panel-head">
-                <span class="label">UZI + CZSC + Serenity 映射</span>
-              </div>
-              <ul id="chanRules" class="compact-list"></ul>
-            </article>
-            <article class="side-panel">
-              <div class="panel-head">
-                <span class="label">市场环境</span>
-              </div>
-              <div id="marketBlock" class="market-block"></div>
-            </article>
-            <article class="side-panel">
-              <div class="panel-head">
-                <span class="label">行业热度</span>
-              </div>
-              <div id="industryBlock" class="industry-block"></div>
-            </article>
-          </aside>
+            <div id="candidateTabs" class="candidate-tabs"></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>排名</th>
+                  <th>股票</th>
+                  <th>推荐度</th>
+                  <th>建议价格</th>
+                  <th>预估收益</th>
+                  <th>推荐理由</th>
+                  <th>风险摘要</th>
+                </tr>
+              </thead>
+              <tbody id="candidateRows"></tbody>
+            </table>
+          </div>
         </section>
 
-        <section class="risk-band">
-          <strong>风控规则</strong>
-          <span>按实时买入价计算两周观察；跌破止损线、MA20失守或推荐度显著下降即退出；若系统显示“无推荐”，默认不买。</span>
+        <section class="market-context-grid">
+          <article class="side-panel">
+            <div class="panel-head">
+              <span class="label">市场环境</span>
+            </div>
+            <div id="marketBlock" class="market-block"></div>
+          </article>
+          <article class="side-panel">
+            <div class="panel-head">
+              <span class="label">行业热度</span>
+            </div>
+            <div id="industryBlock" class="industry-block"></div>
+          </article>
         </section>
       </main>
     </div>
-    <script src="/static/app.js?v=20260620-clarity1"></script>
+    <script src="/static/app.js?v=20260620-dashboard1"></script>
   </body>
 </html>

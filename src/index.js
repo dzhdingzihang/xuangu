@@ -32,22 +32,13 @@ async function readAssetJson(env, path) {
   return response.json();
 }
 
-function summarizePick(pick) {
-  const decision = pick.decision || {};
+function summarizeDecision(decision) {
   const primary = decision.primary || decision.blocked_candidate;
   const summary = {
-    target_date: pick.target_date,
-    signal_date: pick.signal_date,
-    generated_at: pick.generated_at,
-    generated_label: pick.generated_label,
-    snapshot_key: pick.snapshot_key,
-    forecast_end_date: pick.forecast_end_date,
-    forecast_horizon: pick.forecast_horizon,
     action: decision.action,
     title: decision.title,
     message: decision.message,
     has_primary: Boolean(decision.primary),
-    model_version: pick.model_version,
   };
   if (primary) {
     const range = primary.estimated_2w_range || primary.estimated_2d_range;
@@ -65,6 +56,26 @@ function summarizePick(pick) {
     summary.blocker_level = blockerLevel(decision, primary);
     summary.score = primary.score;
     summary.reason_tags = primary.reason_tags;
+  }
+  return summary;
+}
+
+function summarizePick(pick) {
+  const summary = {
+    target_date: pick.target_date,
+    signal_date: pick.signal_date,
+    generated_at: pick.generated_at,
+    generated_label: pick.generated_label,
+    snapshot_key: pick.snapshot_key,
+    forecast_end_date: pick.forecast_end_date,
+    forecast_horizon: pick.forecast_horizon,
+    model_version: pick.model_version,
+    ...summarizeDecision(pick.decision || {}),
+  };
+  if (pick.markets) {
+    summary.markets = Object.fromEntries(
+      Object.entries(pick.markets).map(([key, section]) => [key, summarizeDecision((section && section.decision) || {})]),
+    );
   }
   return summary;
 }
