@@ -3,7 +3,7 @@ const JSON_HEADERS = {
   "cache-control": "no-store",
 };
 
-const MODEL_VERSION = "smart-selector-2026-06-04.1";
+const MODEL_VERSION = "smart-selector-2026-06-04.2-uzi-live";
 
 function json(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -50,17 +50,33 @@ function summarizePick(pick) {
     model_version: pick.model_version,
   };
   if (primary) {
+    const range = primary.estimated_2w_range || primary.estimated_2d_range;
     summary.code = primary.code;
     summary.name = primary.name;
     summary.confidence = primary.recommendation_degree || primary.confidence;
     summary.recommendation_degree = primary.recommendation_degree || primary.confidence;
-    const range = primary.estimated_2w_range || primary.estimated_2d_range;
     summary.estimated_2w_range = range && range.text;
     summary.estimated_2d_range = range && range.text;
+    summary.entry_price = primary.entry_price || primary.price;
+    summary.current_change_pct = primary.current_change_pct || primary.change_pct;
+    summary.realtime_session = primary.realtime && primary.realtime.session_label;
+    summary.risk_count = (primary.risk_flags || []).length;
+    summary.hard_risk_count = primary.hard_risk_count || 0;
+    summary.blocker_level = blockerLevel(decision, primary);
     summary.score = primary.score;
     summary.reason_tags = primary.reason_tags;
   }
   return summary;
+}
+
+function blockerLevel(decision, primary) {
+  if (decision.primary) return "pass";
+  const message = decision.message || "";
+  const hard = Number((primary && primary.hard_risk_count) || 0);
+  const riskCount = ((primary && primary.risk_flags) || []).length;
+  if (message.includes("指数环境触发高风险拦截") || hard >= 2 || riskCount >= 5) return "hard_block";
+  if (message.includes("推荐度低于") || message.includes("预估下行空间")) return "soft_block";
+  return "no_signal";
 }
 
 async function loadManifest(env) {
@@ -73,6 +89,11 @@ async function loadPickByFile(env, file) {
   const pick = await readAssetJson(env, `/data/picks/${file}`);
   if (!pick) return null;
   return pick;
+}
+
+async function loadPickBySnapshot(env, snapshotKey) {
+  if (!snapshotKey) return null;
+  return loadPickByFile(env, snapshotKey);
 }
 
 async function latestPick(env) {
@@ -111,6 +132,16 @@ async function handleApi(request, env) {
     return json(latest);
   }
 
+  if (url.pathname === "/api/latest-summary") {
+    const latest = await latestPick(env);
+    if (!latest) return json({ error: "暂无历史决策缓存" }, 404);
+    return json({
+      ok: true,
+      time: nowCN(),
+      latest: summarizePick(latest),
+    });
+  }
+
   if (url.pathname === "/api/history") {
     const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 120), 240));
     const files = await loadManifest(env);
@@ -133,6 +164,12 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === "/api/pick") {
+    const snapshotKey = url.searchParams.get("snapshot");
+    if (snapshotKey) {
+      const snapshot = await loadPickBySnapshot(env, snapshotKey);
+      if (!snapshot) return json({ error: "未找到指定历史快照" }, 404);
+      return json(snapshot);
+    }
     const targetDate = url.searchParams.get("date");
     const pick = targetDate ? await pickForTarget(env, targetDate) : await latestPick(env);
     const fallback = pick || (await latestPick(env));

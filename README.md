@@ -53,9 +53,11 @@
 
 ```text
 GET /api/status
+GET /api/latest-summary
 GET /api/latest
 GET /api/history?limit=120
 GET /api/pick?date=2026-06-04
+GET /api/pick?snapshot=2026-06-19_2026-06-19_190401.json
 ```
 
 常用字段：
@@ -66,6 +68,11 @@ GET /api/pick?date=2026-06-04
 - `forecast_horizon`：推荐观察周期。
 - `markets.a_share` / `markets.hk` / `markets.us`：三市场决策。
 - `history[].snapshot_key`：历史快照唯一标识。
+
+说明：
+
+- 首页历史记录应优先使用 `snapshot_key` 拉取指定快照，避免同一天多次更新时只看到当天最新结果。
+- `latest-summary` 只返回轻量摘要，适合监控和快速状态检查；完整候选、UZI、CZSC 诊断仍在 `latest` / `pick` 中。
 
 ## 本地运行
 
@@ -91,6 +98,14 @@ python3 server.py --once --force
 ```bash
 python3 server.py --once --date 2026-06-04 --force
 ```
+
+两周回测：
+
+```bash
+python3 scripts/backtest_may.py
+```
+
+回测窗口使用 10 个交易日，并输出两周收益、期间最大回撤和止损触发率。
 
 构建 Cloudflare Worker 静态资源：
 

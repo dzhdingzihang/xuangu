@@ -343,16 +343,27 @@ function renderHistory(history, currentTarget) {
     `;
     button.addEventListener("click", async () => {
       els.dateInput.value = item.target_date;
-      const localPick = readLocalHistory()[item.cache_key || item.local_key || `${item.target_date}_${item.signal_date}_${item.generated_at || ""}`];
+      const snapshotKey = item.cache_key || item.snapshot_key || item.local_key || `${item.target_date}_${item.signal_date}_${item.generated_at || ""}`;
+      const localPick = readLocalHistory()[snapshotKey];
       if (localPick) {
         render(localPick);
         renderHistory(history, item.target_date);
         return;
       }
-      await load(false, { showBusy: false });
+      await loadSnapshot(snapshotKey, history);
     });
     els.historyList.append(button);
   });
+}
+
+async function loadSnapshot(snapshotKey, history = []) {
+  const response = await fetch(`/api/pick?snapshot=${encodeURIComponent(snapshotKey)}`);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "历史快照读取失败");
+  render(data);
+  storeLocalPick(data);
+  renderHistory(history.length ? history : mergeHistory([]), data.target_date);
+  return data;
 }
 
 async function loadHistory() {

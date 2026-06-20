@@ -309,19 +309,39 @@ def summarize_pick(pick: dict) -> dict:
         "model_version": pick.get("model_version"),
     }
     if primary:
+        range_obj = primary.get("estimated_2w_range") or primary.get("estimated_2d_range") or {}
         summary.update(
             {
                 "code": primary.get("code"),
                 "name": primary.get("name"),
                 "confidence": primary.get("recommendation_degree") or primary.get("confidence"),
                 "recommendation_degree": primary.get("recommendation_degree") or primary.get("confidence"),
-                "estimated_2w_range": (primary.get("estimated_2w_range") or primary.get("estimated_2d_range") or {}).get("text"),
-                "estimated_2d_range": (primary.get("estimated_2w_range") or primary.get("estimated_2d_range") or {}).get("text"),
+                "estimated_2w_range": range_obj.get("text"),
+                "estimated_2d_range": range_obj.get("text"),
+                "entry_price": primary.get("entry_price") or primary.get("price"),
+                "current_change_pct": primary.get("current_change_pct") or primary.get("change_pct"),
+                "realtime_session": ((primary.get("realtime") or {}).get("session_label")),
+                "risk_count": len(primary.get("risk_flags") or []),
+                "hard_risk_count": primary.get("hard_risk_count", 0),
+                "blocker_level": blocker_level(decision, primary),
                 "score": primary.get("score"),
                 "reason_tags": primary.get("reason_tags"),
             }
         )
     return summary
+
+
+def blocker_level(decision: dict, primary: dict | None = None) -> str:
+    if decision.get("primary"):
+        return "pass"
+    message = decision.get("message") or ""
+    hard = safe_float((primary or {}).get("hard_risk_count"))
+    risk_count = len((primary or {}).get("risk_flags") or [])
+    if "指数环境触发高风险拦截" in message or hard >= 2 or risk_count >= 5:
+        return "hard_block"
+    if "推荐度低于" in message or "预估下行空间" in message:
+        return "soft_block"
+    return "no_signal"
 
 
 def history_payload(limit: int = 30) -> dict:
@@ -353,6 +373,18 @@ def history_payload(limit: int = 30) -> dict:
         "latest": latest,
         "history": rows[:limit],
     }
+
+
+def load_pick_snapshot(snapshot_key: str) -> dict | None:
+    if not snapshot_key or "/" in snapshot_key or not snapshot_key.endswith(".json"):
+        return None
+    path = PICKS / snapshot_key
+    if not path.exists() or not parse_cache_name(path):
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def safe_float(value, default: float = 0.0) -> float:
@@ -1494,7 +1526,7 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         quote = quote_from_kline(kline)
         if not quote or quote["price"] <= 0:
             continue
-        realtime = realtime_map.get(symbol) if market_key in ("hk", "us") else {}
+        realtime = (realtime_map.get(symbol) or {}) if market_key in ("hk", "us") else {}
         entry_price = safe_float(realtime.get("price")) or quote["price"]
         current_change_pct = safe_float(realtime.get("change_pct")) if realtime else quote["change_pct"]
         live_quote = {
@@ -1984,6 +2016,14 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/pick":
             query = urllib.parse.parse_qs(parsed.query)
+            snapshot_key = query.get("snapshot", [""])[0]
+            if snapshot_key:
+                snapshot = load_pick_snapshot(snapshot_key)
+                if snapshot:
+                    self.send_json(snapshot)
+                    return
+                self.send_json({"error": "未找到指定历史快照"}, 404)
+                return
             date_text = query.get("date", [None])[0]
             force = query.get("force", ["0"])[0] == "1"
             try:
@@ -1995,6 +2035,14 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             limit = int(query.get("limit", ["30"])[0])
             self.send_json(history_payload(limit=max(1, min(limit, 240))))
+            return
+        if parsed.path == "/api/latest-summary":
+            latest = PICKS / "latest.json"
+            if not latest.exists():
+                self.send_json({"error": "暂无历史决策缓存"}, 404)
+                return
+            payload = json.loads(latest.read_text(encoding="utf-8"))
+            self.send_json({"ok": True, "time": now_cn().isoformat(timespec="seconds"), "latest": summarize_pick(payload)})
             return
         if parsed.path == "/api/latest":
             latest = PICKS / "latest.json"

@@ -16,6 +16,8 @@ import server  # noqa: E402
 
 START = dt.date(2026, 5, 1)
 END = dt.date(2026, 5, 30)
+HORIZON_DAYS = 10
+STOP_LOSS_PCT = -6.0
 
 
 def trade_days() -> list[dt.date]:
@@ -37,13 +39,22 @@ def slice_until(rows: list[dict], signal_day: dt.date) -> list[dict]:
     return [row for row in rows if row.get("date", "") <= signal_day.isoformat()]
 
 
-def two_day_return(rows: list[dict], signal_day: dt.date) -> float | None:
+def horizon_outcome(rows: list[dict], signal_day: dt.date) -> dict | None:
     idx = next((i for i, row in enumerate(rows) if row.get("date") == signal_day.isoformat()), None)
-    if idx is None or idx + 2 >= len(rows):
+    if idx is None or idx + HORIZON_DAYS >= len(rows):
         return None
     entry = rows[idx]["close"]
-    exit_ = rows[idx + 2]["close"]
-    return server.pct_change(exit_, entry)
+    window = rows[idx + 1 : idx + HORIZON_DAYS + 1]
+    exit_ = window[-1]["close"]
+    lows = [row["low"] for row in window if row.get("low")]
+    max_drawdown = min((server.pct_change(low, entry) for low in lows), default=0.0)
+    stop_hit = max_drawdown <= STOP_LOSS_PCT
+    return {
+        "ret_10d": server.pct_change(exit_, entry),
+        "max_drawdown": max_drawdown,
+        "stop_hit": stop_hit,
+        "exit_date": window[-1]["date"],
+    }
 
 
 def score_row(candidate: dict, market_key: str, rows: list[dict], weights: dict) -> dict | None:
@@ -70,7 +81,8 @@ def score_row(candidate: dict, market_key: str, rows: list[dict], weights: dict)
         risks.append("信号日涨幅过大")
     score = lens_score * weights["lens"] + chan["score"] * weights["chan"] - hard * weights["hard_penalty"]
     confidence = server.serenity_confidence(score, len(risks), market_key)
-    realized = two_day_return(rows, weights["signal_day"])
+    outcome = horizon_outcome(rows, weights["signal_day"])
+    realized = outcome["ret_10d"] if outcome else None
     return {
         "symbol": candidate["symbol"],
         "name": candidate["name"],
@@ -82,7 +94,10 @@ def score_row(candidate: dict, market_key: str, rows: list[dict], weights: dict)
         "risks": len(risks),
         "change_pct": quote["change_pct"],
         "pct_5d": quote["pct_5d"],
-        "ret_2d": realized,
+        "ret_10d": realized,
+        "max_drawdown": outcome["max_drawdown"] if outcome else None,
+        "stop_hit": outcome["stop_hit"] if outcome else None,
+        "exit_date": outcome["exit_date"] if outcome else None,
         "would_buy": confidence >= weights["threshold"] and hard < 2 and len(risks) < 4,
         "reasons": lens_reasons[:3] + chan["signals"][:3],
     }
@@ -97,7 +112,7 @@ def run_market(market_key: str, weights: dict, cache: dict[str, list[dict]]) -> 
         scored = []
         for candidate in candidates:
             item = score_row(candidate, market_key, cache[candidate["symbol"]], weights)
-            if item and item["ret_2d"] is not None:
+            if item and item["ret_10d"] is not None:
                 scored.append(item)
         if not scored:
             continue
@@ -109,17 +124,22 @@ def run_market(market_key: str, weights: dict, cache: dict[str, list[dict]]) -> 
 
 def summarize(rows: list[dict]) -> dict:
     buys = [row for row in rows if row["would_buy"]]
-    candidate_returns = [row["ret_2d"] for row in rows if row["ret_2d"] is not None]
-    trade_returns = [row["ret_2d"] for row in buys if row["ret_2d"] is not None]
+    candidate_returns = [row["ret_10d"] for row in rows if row["ret_10d"] is not None]
+    trade_returns = [row["ret_10d"] for row in buys if row["ret_10d"] is not None]
+    trade_drawdowns = [row["max_drawdown"] for row in buys if row.get("max_drawdown") is not None]
+    stop_hits = [row for row in buys if row.get("stop_hit")]
     return {
         "signals": len(rows),
         "buys": len(buys),
+        "horizon_trade_days": HORIZON_DAYS,
+        "stop_loss_pct": STOP_LOSS_PCT,
         "candidate_hit_rate": round(sum(1 for r in candidate_returns if r > 0) / len(candidate_returns) * 100, 1) if candidate_returns else 0,
         "candidate_avg_ret": round(statistics.mean(candidate_returns), 2) if candidate_returns else 0,
         "trade_hit_rate": round(sum(1 for r in trade_returns if r > 0) / len(trade_returns) * 100, 1) if trade_returns else 0,
         "trade_avg_ret": round(statistics.mean(trade_returns), 2) if trade_returns else 0,
         "trade_median_ret": round(statistics.median(trade_returns), 2) if trade_returns else 0,
-        "trade_max_draw": round(min(trade_returns), 2) if trade_returns else 0,
+        "trade_max_draw": round(min(trade_drawdowns), 2) if trade_drawdowns else 0,
+        "stop_hit_rate": round(len(stop_hits) / len(buys) * 100, 1) if buys else 0,
         "trade_best": round(max(trade_returns), 2) if trade_returns else 0,
     }
 
@@ -144,7 +164,7 @@ def optimize(market_key: str) -> tuple[dict, list[dict], dict]:
         buys = summary["buys"]
         if buys == 0:
             continue
-        if summary["trade_avg_ret"] <= 0 or summary["trade_hit_rate"] < 50 or summary["trade_max_draw"] < -5:
+        if summary["trade_avg_ret"] <= 0 or summary["trade_hit_rate"] < 50 or summary["trade_max_draw"] < STOP_LOSS_PCT:
             continue
         objective = (
             summary["trade_avg_ret"] * 2
@@ -179,7 +199,16 @@ def main() -> None:
         print("\n", market, json.dumps(summary, ensure_ascii=False), json.dumps(weights, ensure_ascii=False))
         for row in rows:
             mark = "BUY" if row["would_buy"] else "SKIP"
-            print(row["target"], mark, row["symbol"], row["name"], row["confidence"], f"{row['ret_2d']:+.2f}%")
+            print(
+                row["target"],
+                mark,
+                row["symbol"],
+                row["name"],
+                row["confidence"],
+                f"{row['ret_10d']:+.2f}%",
+                f"DD {row['max_drawdown']:+.2f}%",
+                "STOP" if row["stop_hit"] else "",
+            )
     out = ROOT / "data" / "backtests" / "may_2026_serenity.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
