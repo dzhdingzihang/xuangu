@@ -6,6 +6,7 @@ const els = {
   actionBadge: document.getElementById("actionBadge"),
   primaryBlock: document.getElementById("primaryBlock"),
   reasons: document.getElementById("reasons"),
+  riskList: document.getElementById("riskList"),
   signalDate: document.getElementById("signalDate"),
   confidenceMetric: document.getElementById("confidenceMetric"),
   rangeMetric: document.getElementById("rangeMetric"),
@@ -45,6 +46,17 @@ function pctClass(value) {
 function priceText(value) {
   if (typeof value !== "number") return "--";
   return value >= 100 ? value.toFixed(2) : value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function plainNumber(value, suffix = "") {
+  if (typeof value !== "number") return "--";
+  return `${value.toFixed(1)}${suffix}`;
+}
+
+function confidenceTone(value) {
+  if (value >= 70) return "strong";
+  if (value >= 58) return "watch";
+  return "weak";
 }
 
 function clearList(node) {
@@ -141,14 +153,28 @@ function renderPrimary(data) {
     const blocked = decision.blocked_candidate;
     els.primaryBlock.innerHTML = `
       <div class="primary-stock">
-        <div class="stock-title">
-          <strong>无推荐</strong>
-          <span>等待更强信号</span>
+        <div class="action-layout no-pick">
+          <div>
+            <span class="decision-kicker">今日结论</span>
+            <div class="stock-title">
+              <strong>不买</strong>
+              <span>${blocked ? `${blocked.name} ${blocked.code}` : "等待更强信号"}</span>
+            </div>
+          </div>
+          <div class="decision-score ${confidenceTone(blocked ? blocked.recommendation_degree || blocked.confidence : 0)}">
+            <span>推荐度</span>
+            <strong>${blocked ? `${blocked.recommendation_degree || blocked.confidence}%` : "--"}</strong>
+          </div>
         </div>
         <p class="decision-copy">${decision.message}</p>
         ${
           blocked
-            ? `<p class="decision-copy">最高分候选是 ${blocked.code} ${blocked.name}，但没有通过未来2周推荐阈值。</p>`
+            ? `<div class="price-row compact">
+                <div class="price-cell"><span>最高候选</span><strong>${blocked.name}</strong></div>
+                <div class="price-cell"><span>参考买入价</span><strong>${priceText(blocked.entry_price || blocked.price)}</strong></div>
+                <div class="price-cell"><span>两周预估</span><strong>${(blocked.estimated_2w_range || blocked.estimated_2d_range).text}</strong></div>
+                <div class="price-cell"><span>风险数量</span><strong>${(blocked.risk_flags || []).length}</strong></div>
+              </div>`
             : ""
         }
       </div>
@@ -161,9 +187,18 @@ function renderPrimary(data) {
 
   els.primaryBlock.innerHTML = `
     <div class="primary-stock">
-      <div class="stock-title">
-        <strong>${primary.name}</strong>
-        <span>${primary.code}</span>
+      <div class="action-layout">
+        <div>
+          <span class="decision-kicker">今日结论</span>
+          <div class="stock-title">
+            <strong>买入候选</strong>
+            <span>${primary.name} ${primary.code}</span>
+          </div>
+        </div>
+        <div class="decision-score ${confidenceTone(primary.recommendation_degree || primary.confidence)}">
+          <span>推荐度</span>
+          <strong>${primary.recommendation_degree || primary.confidence}%</strong>
+        </div>
       </div>
       <p class="decision-copy">${decision.message} ${data.holding_plan}</p>
       <div class="price-row">
@@ -171,6 +206,13 @@ function renderPrimary(data) {
         <div class="price-cell"><span>实时涨跌</span><strong class="${pctClass(primary.current_change_pct ?? primary.change_pct)}">${signed(primary.current_change_pct ?? primary.change_pct)}</strong></div>
         <div class="price-cell"><span>止损</span><strong class="green">${priceText(primary.stop_loss)}</strong></div>
         <div class="price-cell"><span>参考止盈</span><strong class="red">${priceText(primary.take_profit_reference)}</strong></div>
+      </div>
+      <div class="score-breakdown">
+        <span>UZI评审 ${plainNumber(primary.uzi_panel_score)}</span>
+        <span>UZI风控 ${plainNumber(primary.uzi_score)}</span>
+        <span>缠论 ${plainNumber(primary.chan_score)}</span>
+        <span>CZSC ${plainNumber(primary.czsc_score)}</span>
+        <span>Serenity ${plainNumber(primary.serenity_score || (primary.serenity && primary.serenity.score))}</span>
       </div>
     </div>
   `;
@@ -181,14 +223,20 @@ function renderPrimary(data) {
 
 function renderReasons(data) {
   clearList(els.reasons);
+  clearList(els.riskList);
   const decision = selectedMarket(data).decision;
   const primary = decision.primary || decision.blocked_candidate;
   if (!primary) {
     els.reasons.append(li(decision.message));
+    els.riskList.append(li("无可执行买点"));
     return;
   }
   primary.reasons.forEach((reason) => els.reasons.append(li(reason)));
-  primary.risk_flags.forEach((flag) => els.reasons.append(li(`风险: ${flag}`)));
+  if (primary.risk_flags.length) {
+    primary.risk_flags.forEach((flag) => els.riskList.append(li(flag)));
+  } else {
+    els.riskList.append(li("未触发硬风险"));
+  }
 }
 
 function renderTable(data) {
@@ -197,14 +245,16 @@ function renderTable(data) {
   clearList(els.candidateRows);
   rows.forEach((row, index) => {
     const tr = document.createElement("tr");
+    const serenityAlpha = row.serenity && row.serenity.alpha_profile;
+    const alphaText = serenityAlpha ? ` · S评级${serenityAlpha.rating}/${serenityAlpha.score}` : "";
     const risks = row.risk_flags.length
       ? row.risk_flags.map((risk) => `<span class="risk-tag">${risk}</span>`).join("")
       : '<span class="muted">无硬风险</span>';
     tr.innerHTML = `
       <td>${index + 1}</td>
       <td><strong>${row.name}</strong><span class="muted">${row.code}</span></td>
-      <td>${row.score.toFixed(1)}<br><span class="muted">UZI评审 ${(row.uzi_panel_score || 0).toFixed(1)} / 风控 ${(row.uzi_score || 0).toFixed(1)} / 缠 ${row.chan_score.toFixed(1)} / CZ ${(row.czsc_score || 0).toFixed(1)} / S ${(row.serenity_score || (row.serenity && row.serenity.score) || 0).toFixed(1)}</span></td>
-      <td>${row.recommendation_degree || row.confidence}%</td>
+      <td>${row.score.toFixed(1)}<br><span class="muted">UZI评审 ${(row.uzi_panel_score || 0).toFixed(1)} / 风控 ${(row.uzi_score || 0).toFixed(1)} / 缠 ${row.chan_score.toFixed(1)} / CZ ${(row.czsc_score || 0).toFixed(1)} / S ${(row.serenity_score || (row.serenity && row.serenity.score) || 0).toFixed(1)}${alphaText}</span></td>
+      <td><strong class="${confidenceTone(row.recommendation_degree || row.confidence)}">${row.recommendation_degree || row.confidence}%</strong></td>
       <td>${(row.estimated_2w_range || row.estimated_2d_range).text}</td>
       <td>${priceText(row.entry_price || row.price)}<br><span class="muted">${row.realtime ? row.realtime.session_label : "实时"} ${signed(row.current_change_pct ?? row.change_pct)} · ${row.amount_yi ? `${row.amount_yi.toFixed(1)} 亿` : "见行情"}</span></td>
       <td><div class="tagline">${row.role || row.reason_tags || "无题材标签"}</div></td>

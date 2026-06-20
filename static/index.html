@@ -4,14 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>智能选股</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260604-uzi-live1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260620-clarity1" />
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <div>
           <h1>智能选股</h1>
-          <p id="subtitle">实时价 + UZI 加权，寻找未来2周上涨机会</p>
+          <p id="subtitle">实时价 + UZI + Serenity，筛选未来2周上涨机会</p>
         </div>
         <div class="toolbar">
           <label>
@@ -24,10 +24,22 @@
       </header>
 
       <main>
+        <section class="market-tabs-panel priority-panel">
+          <div class="panel-head">
+            <span class="label">市场选择</span>
+            <span class="muted">A股 · 港股 · 美股</span>
+          </div>
+          <div id="marketTabs" class="market-tabs">
+            <div class="market-tab placeholder"><strong>A股</strong><span>读取中</span><small>--</small></div>
+            <div class="market-tab placeholder"><strong>港股</strong><span>读取中</span><small>--</small></div>
+            <div class="market-tab placeholder"><strong>美股</strong><span>读取中</span><small>--</small></div>
+          </div>
+        </section>
+
         <section class="decision-grid">
           <article class="decision-panel" id="decisionPanel">
             <div class="panel-head">
-              <span class="label">决策</span>
+              <span class="label">今日操作</span>
               <span class="status" id="actionBadge">加载中</span>
             </div>
             <div id="primaryBlock" class="primary-block">
@@ -39,10 +51,23 @@
 
           <article class="reason-panel">
             <div class="panel-head">
-              <span class="label">选择理由</span>
+              <span class="label">理由与风险</span>
               <span id="signalDate" class="muted"></span>
             </div>
-            <ul id="reasons" class="reason-list"></ul>
+            <div class="reason-columns">
+              <div>
+                <h2>为什么选它</h2>
+                <ul id="reasons" class="reason-list">
+                  <li>正在读取推荐理由</li>
+                </ul>
+              </div>
+              <div>
+                <h2>需要防什么</h2>
+                <ul id="riskList" class="reason-list risk-list">
+                  <li>正在读取风险标签</li>
+                </ul>
+              </div>
+            </div>
           </article>
         </section>
 
@@ -63,14 +88,6 @@
             <span>样本池</span>
             <strong id="poolMetric">--</strong>
           </div>
-        </section>
-
-        <section class="market-tabs-panel">
-          <div class="panel-head">
-            <span class="label">三市场决策</span>
-            <span class="muted">UZI 加权 + 实时价 + CZSC + Serenity</span>
-          </div>
-          <div id="marketTabs" class="market-tabs"></div>
         </section>
 
         <section class="history-panel">
@@ -134,6 +151,6 @@
         </section>
       </main>
     </div>
-    <script src="/static/app.js?v=20260604-uzi-live1"></script>
+    <script src="/static/app.js?v=20260620-clarity1"></script>
   </body>
 </html>
