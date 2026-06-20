@@ -20,6 +20,7 @@
 - `waditu/czsc`：参考分型、笔、中枢、信号-事件-交易框架；生产环境使用内置轻量 CZSC 结构因子，避免每半小时部署时安装完整研究库导致更新变慢。
 - `wbh604/UZI-Skill`：加重多维评分、投资者评审团共识、游资射程、龙虎榜、过热和杀猪盘过滤；UZI 买点纪律、流动性和陷阱风险会直接影响推荐度。
 - `yan-labs/serenity-aleabitoreddit`：参考 AI capex 上游瓶颈、CPO/光通信、InP/化合物半导体、HBM/存储、neocloud、电力等产业链因子。
+- Serenity Skill：额外按“需求去噪 → 财务科目映射 → 错误分类小盘 → 错误定价验证 → 验证链 → alpha 五维评分”复核产业链候选。
 - 市场风控：指数环境、涨停追高、过热、流动性、下行空间、MA20 失守等会降低推荐度或直接给出无推荐。
 
 当前模型版本：`smart-selector-2026-06-04.2-uzi-live`
@@ -148,6 +149,28 @@ python3 run.py 贵州茅台 --no-browser
 python3 run.py AAPL --no-browser
 python3 run.py 002273.SZ --depth lite --no-browser
 ```
+
+## Serenity Skill
+
+安装到 Agents skill 目录：
+
+```bash
+python3 scripts/install_serenity_skill.py
+```
+
+如果你已经有完整 Serenity skill 源目录，且目录内包含 `SKILL.md`、`LICENSE`、`references`、`assets`、`scripts`、`examples`、`agents` 等文件或目录，可以指定来源：
+
+```bash
+python3 scripts/install_serenity_skill.py --source /path/to/serenity-skill
+```
+
+安装目标：
+
+```text
+$HOME/.agents/skills/serenity-skill
+```
+
+选股系统会检测该目录，并把 Serenity 的瓶颈五维 alpha 评分纳入候选股的 `serenity.alpha_profile`、推荐理由和综合分。
 
 ## 风险提示
 

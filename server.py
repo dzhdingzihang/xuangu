@@ -34,9 +34,10 @@ CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-06-04.2-uzi-live"
+MODEL_VERSION = "smart-selector-2026-06-04.3-serenity-skill"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
+SERENITY_SKILL_DIR = pathlib.Path.home() / ".agents" / "skills" / "serenity-skill"
 
 for path in (CACHE, PICKS):
     path.mkdir(parents=True, exist_ok=True)
@@ -112,6 +113,7 @@ SERENITY_RULES = {
         "小市值、低关注度、供给受限、被机构定价滞后的上游环节获得更高权重。",
         "有 Mag7/头部云厂商客户、签约收入或明确量产/资格认证进展时加权。",
         "大额 ATM/持续稀释、弱交易对手、单一客户断供风险、已被情绪追高时降权。",
+        "按 Serenity Skill 六步法复核：需求去噪、财务映射、错误分类小盘、错误定价验证、验证链、alpha 五维评分。",
     ],
     "calibration": "该因子来自公开研究框架，作为产业链权重，不是自动买入信号；仍需通过价格结构和风控过滤。",
 }
@@ -1005,6 +1007,7 @@ def runtime_research_status() -> dict:
     status = {
         "czsc": {"installed": False, "version": None, "mode": "builtin-lightweight"},
         "uzi_skill": {"installed": True, "mode": "methodology-weighted", "repo": "wbh604/UZI-Skill"},
+        "serenity_skill": serenity_skill_status(),
     }
     try:
         import czsc  # type: ignore
@@ -1017,6 +1020,20 @@ def runtime_research_status() -> dict:
     except Exception:
         pass
     return status
+
+
+def serenity_skill_status() -> dict:
+    skill_file = SERENITY_SKILL_DIR / "SKILL.md"
+    references = SERENITY_SKILL_DIR / "references"
+    reference_files = []
+    if references.exists():
+        reference_files = sorted(path.name for path in references.iterdir() if path.is_file())[:8]
+    return {
+        "installed": skill_file.exists(),
+        "mode": "skill-weighted" if skill_file.exists() else "built-in-lens",
+        "path": str(SERENITY_SKILL_DIR),
+        "references": reference_files,
+    }
 
 
 def mean(values: list[float]) -> float:
@@ -1440,7 +1457,48 @@ def estimate_range(confidence: int, technical: float, theme: float, risk_count: 
     }
 
 
-def serenity_lens_score(candidate: dict) -> tuple[float, list[str], list[str]]:
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def serenity_alpha_profile(candidate: dict) -> dict:
+    lens = candidate.get("lens") or {}
+    bottleneck = safe_float(lens.get("bottleneck"))
+    upstream = safe_float(lens.get("upstream"))
+    capex = safe_float(lens.get("capex"))
+    customer = safe_float(lens.get("customer"))
+    smallcap = safe_float(lens.get("smallcap"))
+    financing = safe_float(lens.get("financing"))
+    catalyst = safe_float(lens.get("catalyst"))
+    certainty = clamp((bottleneck + capex + max(customer, 0)) / 6, 0, 5)
+    clarity = clamp((bottleneck + upstream) / 4, 0, 5)
+    purity = clamp((bottleneck + upstream + max(smallcap, 0)) / 6, 0, 5)
+    elasticity = clamp((max(smallcap, 0) + bottleneck + max(catalyst, 0)) / 6, 0, 5)
+    timeframe = clamp((max(catalyst, 0) + capex + max(financing, 0)) / 6, 0, 5)
+    score = round(mean([certainty, clarity, purity, elasticity, timeframe]) * 20, 2)
+    rating = "强" if score >= 80 else "中" if score >= 60 else "弱" if score >= 40 else "无"
+    warnings = []
+    if certainty < 2.5:
+        warnings.append("Serenity Skill: 需求或卡位确定性不足")
+    if timeframe < 2.5:
+        warnings.append("Serenity Skill: relabel 时间窗不够清晰")
+    if financing <= 1:
+        warnings.append("Serenity Skill: 融资/稀释压力需要验证")
+    return {
+        "score": score,
+        "rating": rating,
+        "dimensions": {
+            "certainty": round(certainty, 2),
+            "clarity": round(clarity, 2),
+            "purity": round(purity, 2),
+            "elasticity": round(elasticity, 2),
+            "timeframe": round(timeframe, 2),
+        },
+        "warnings": warnings,
+    }
+
+
+def serenity_lens_score(candidate: dict) -> tuple[float, list[str], list[str], dict]:
     lens = candidate.get("lens") or {}
     score = 0.0
     reasons: list[str] = []
@@ -1455,6 +1513,8 @@ def serenity_lens_score(candidate: dict) -> tuple[float, list[str], list[str]]:
 
     score += bottleneck * 2.3 + upstream * 1.8 + capex * 1.8 + customer * 1.4 + smallcap * 1.1
     score += financing * 1.4 + catalyst * 1.3
+    alpha = serenity_alpha_profile(candidate)
+    score += alpha["score"] * 0.22
     if bottleneck >= 8:
         reasons.append("Serenity因子: 上游瓶颈/稀缺供给突出")
     if upstream >= 7:
@@ -1467,13 +1527,16 @@ def serenity_lens_score(candidate: dict) -> tuple[float, list[str], list[str]]:
         reasons.append("Serenity因子: 市值弹性相对更高")
     if catalyst >= 6:
         reasons.append("Serenity因子: 存在量产/合同/政策/指数等催化线索")
+    if alpha["score"] >= 60:
+        reasons.append(f"Serenity Skill: alpha五维评级{alpha['rating']}，分数 {alpha['score']:.1f}")
+    risks.extend(alpha["warnings"])
     if financing < 0:
         risks.append("Serenity风险: 融资质量/稀释压力较弱")
         score += financing * 2.0
     elif financing <= 2:
         risks.append("Serenity风险: 需重点跟踪 ATM/稀释或债务压力")
         score -= 4
-    return round(score, 2), reasons, risks
+    return round(score, 2), reasons, risks, alpha
 
 
 def serenity_confidence(score: float, risk_count: int, market_key: str) -> int:
@@ -1549,7 +1612,7 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         chan = chan_signal(kline)
         czsc = czsc_structure_score(kline)
         metrics = chan.get("metrics") or {}
-        lens_score, lens_reasons, lens_risks = serenity_lens_score(candidate)
+        lens_score, lens_reasons, lens_risks, alpha_profile = serenity_lens_score(candidate)
         setup_flags = metrics.get("setup_flags") or []
         risk_flags = list(lens_risks) + chan["warnings"] + czsc["warnings"]
         uzi = uzi_risk_score(candidate, {**live_quote, "amount_yi": 0}, risk_flags, market_key)
@@ -1640,6 +1703,7 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                     "role": candidate.get("role", ""),
                     "principles": lens_reasons,
                     "risks": lens_risks,
+                    "alpha_profile": alpha_profile,
                     "policy": policy,
                 },
             }
@@ -1716,9 +1780,9 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
         metrics = chan.get("metrics") or {}
         serenity_candidate = SERENITY_A_BY_CODE.get(code)
         if serenity_candidate:
-            serenity_score, serenity_reasons, serenity_risks = serenity_lens_score(serenity_candidate)
+            serenity_score, serenity_reasons, serenity_risks, serenity_alpha = serenity_lens_score(serenity_candidate)
         else:
-            serenity_score, serenity_reasons, serenity_risks = 0.0, [], []
+            serenity_score, serenity_reasons, serenity_risks, serenity_alpha = 0.0, [], [], {}
         risk_flags = list(item["risk_flags"]) + serenity_risks + chan["warnings"] + czsc["warnings"]
         quote_for_uzi = {
             "change_pct": quote["change_pct"],
@@ -1819,6 +1883,7 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
                     "role": serenity_candidate.get("role", "") if serenity_candidate else "",
                     "principles": serenity_reasons,
                     "risks": serenity_risks,
+                    "alpha_profile": serenity_alpha,
                 },
             }
         )

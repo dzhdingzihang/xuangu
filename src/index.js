@@ -3,7 +3,7 @@ const JSON_HEADERS = {
   "cache-control": "no-store",
 };
 
-const MODEL_VERSION = "smart-selector-2026-06-04.2-uzi-live";
+const MODEL_VERSION = "smart-selector-2026-06-04.3-serenity-skill";
 
 function json(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
