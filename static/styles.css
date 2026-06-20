@@ -305,6 +305,7 @@ main {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
 }
 
 .market-card strong {
@@ -315,6 +316,13 @@ main {
   display: flex;
   align-items: center;
   gap: 9px;
+  min-width: 0;
+}
+
+.market-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .market-icon {
@@ -338,6 +346,7 @@ main {
 }
 
 .pill {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -409,8 +418,8 @@ main {
 .market-card-body {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(170px, 0.82fr) minmax(260px, 1fr);
-  gap: 14px;
+  grid-template-columns: minmax(138px, 0.82fr) minmax(188px, 1fr);
+  gap: 10px;
   align-items: end;
 }
 
@@ -431,17 +440,20 @@ main {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 22px;
+  font-size: 20px;
 }
 
 .market-stock-name em {
   color: #23314d;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-style: normal;
   font-weight: 800;
 }
 
 .market-score strong {
-  font-size: 38px;
+  font-size: 36px;
   line-height: 1;
 }
 
@@ -478,10 +490,11 @@ main {
 .market-metrics span {
   min-width: 0;
   border-left: 1px solid var(--line-soft);
-  padding-left: 14px;
+  padding-left: 10px;
   color: #172033;
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 900;
+  white-space: nowrap;
 }
 
 .market-metrics small {
@@ -494,7 +507,7 @@ main {
 
 .market-metrics .market-range {
   grid-column: 1 / -1;
-  margin-top: 12px;
+  margin-top: 10px;
   color: var(--green);
 }
 
@@ -509,9 +522,9 @@ main {
 
 .sparkline {
   position: absolute;
-  right: 8px;
+  right: 4px;
   bottom: -2px;
-  width: 120px;
+  width: 104px;
   height: 44px;
   opacity: 0.42;
 }
@@ -575,7 +588,7 @@ main {
   display: grid;
   grid-template-columns: minmax(260px, 0.55fr) minmax(480px, 1.35fr) minmax(430px, 1.1fr);
   gap: 12px;
-  align-items: stretch;
+  align-items: start;
 }
 
 .decision-panel,
@@ -618,7 +631,7 @@ main {
 
 .primary-stock {
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
 
 .operation-title {
@@ -652,7 +665,7 @@ main {
   justify-content: space-between;
   gap: 14px;
   border-bottom: 1px solid var(--line-soft);
-  padding: 10px 0;
+  padding: 8px 0;
 }
 
 .operation-lines span {
@@ -668,7 +681,7 @@ main {
 .operation-cta {
   display: grid;
   place-items: center;
-  min-height: 78px;
+  min-height: 58px;
   border-radius: 8px;
   margin-top: 4px;
   color: var(--green);
@@ -690,7 +703,7 @@ main {
 }
 
 .operation-cta strong {
-  font-size: 24px;
+  font-size: 22px;
 }
 
 .operation-cta span {
@@ -734,6 +747,8 @@ main {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.55;
+  max-height: 62px;
+  overflow: auto;
 }
 
 .price-row {
@@ -778,8 +793,9 @@ main {
 
 .reason-panel {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
   gap: 10px;
+  align-content: start;
   min-width: 0;
 }
 
@@ -792,7 +808,7 @@ main {
 
 .reason-box {
   min-height: 0;
-  max-height: 286px;
+  max-height: 250px;
   overflow: auto;
   border-radius: 8px;
   border: 1px solid var(--line-soft);
@@ -909,13 +925,11 @@ main {
   border: 1px solid var(--line-soft);
   border-radius: 8px;
   background: linear-gradient(180deg, #ffffff, #f8fbff);
-  padding: 14px;
+  padding: 14px 14px 10px;
   box-shadow: var(--shadow-soft);
 }
 
 .mini-chart {
-  height: 100%;
-  min-height: 348px;
   display: grid;
   align-content: start;
   gap: 8px;
