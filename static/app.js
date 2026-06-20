@@ -58,6 +58,86 @@ function priceText(value) {
   return value >= 100 ? value.toFixed(2) : value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function numericScore(value, max = 100) {
+  if (typeof value !== "number") return null;
+  return clampNumber((value / max) * 100, 0, 100);
+}
+
+function scoreDisplay(value, max = 100) {
+  const normalized = numericScore(value, max);
+  return normalized === null ? "--" : Math.round(normalized);
+}
+
+function stockScore(stock) {
+  return Math.round(stock && (stock.recommendation_degree || stock.confidence || 0));
+}
+
+function actionSubtitle(label) {
+  if (label === "推荐买入") return "把握趋势主升股";
+  if (label === "谨慎买入") return "控制仓位，等回踩更稳";
+  if (label === "观察") return "信号未完全确认";
+  return "等待更强买点";
+}
+
+function starRating(score) {
+  const full = clampNumber(Math.round((score || 0) / 20), 0, 5);
+  return `<span class="stars" aria-label="${full}星">${"★".repeat(full)}${"☆".repeat(5 - full)}</span>`;
+}
+
+function industryText(stock) {
+  if (!stock) return "--";
+  const tags = stock.theme_tags || stock.reason_tags || [];
+  if (stock.industry || stock.sector || stock.role) return stock.industry || stock.sector || stock.role;
+  if (Array.isArray(tags) && tags[0]) return tags[0];
+  if (typeof tags === "string" && tags.trim()) return tags.split(/[+、,，/]/).filter(Boolean)[0] || tags;
+  return "--";
+}
+
+function stockChange(stock) {
+  if (!stock) return 0;
+  return stock.current_change_pct || stock.change_pct || stock.intraday_change_pct || 0;
+}
+
+function sparklineSvg(stock, tone = "green") {
+  const rows = ((stock && stock.kline) || []).filter((row) => Number(row.close) > 0).slice(-24);
+  if (rows.length < 2) {
+    return `<svg class="sparkline ${tone}" viewBox="0 0 120 44" aria-hidden="true"><path d="M4 30 C28 18, 46 26, 68 18 S100 22, 116 10"></path></svg>`;
+  }
+  const closes = rows.map((row) => Number(row.close));
+  const max = Math.max(...closes);
+  const min = Math.min(...closes);
+  const span = Math.max(max - min, 0.001);
+  const width = 120;
+  const height = 44;
+  const points = closes
+    .map((close, index) => {
+      const x = 4 + (index / (closes.length - 1)) * (width - 8);
+      const y = 6 + ((max - close) / span) * (height - 12);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return `<svg class="sparkline ${tone}" viewBox="0 0 ${width} ${height}" aria-hidden="true"><polyline points="${points}"></polyline></svg>`;
+}
+
+function movingAverage(values, period) {
+  return values.map((_, index) => {
+    if (index + 1 < period) return null;
+    const slice = values.slice(index + 1 - period, index + 1);
+    return slice.reduce((sum, value) => sum + value, 0) / period;
+  });
+}
+
+function formatVolume(value) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "--";
+  const lots = value / 100;
+  if (lots >= 10000) return `${(lots / 10000).toFixed(2)}万手`;
+  return `${Math.round(lots).toLocaleString("zh-CN")}手`;
+}
+
 function shortDate(dateText) {
   const parts = String(dateText || "").split("-");
   if (parts.length !== 3) return dateText || "--";
@@ -269,37 +349,45 @@ function renderMarketTabs(data) {
     const decision = section.decision || {};
     const primary = decision.primary || null;
     const candidate = primary || decision.blocked_candidate || null;
-    const confidence = candidate ? candidate.recommendation_degree || candidate.confidence : 0;
+    const confidence = candidate ? stockScore(candidate) : 0;
     const range = candidate && (candidate.estimated_2w_range || candidate.estimated_2d_range);
+    const label = recommendationLabel(confidence, Boolean(primary));
+    const level = actionClass(confidence, Boolean(primary));
+    const tone = level === "level-caution" ? "amber" : level === "level-no" ? "red" : "green";
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `market-card ${key === activeMarket ? "active" : ""} ${actionClass(confidence, Boolean(primary))}`;
+    button.className = `market-card ${key === activeMarket ? "active" : ""} ${level}`;
     if (primary) {
       button.innerHTML = `
         <div class="market-card-head">
-          <strong>${escapeHtml(section.label || MARKET_LABELS[key])}</strong>
-          <span class="pill ${actionClass(confidence, true)}">${recommendationLabel(confidence, true)}</span>
+          <div class="market-name"><span class="market-icon">${escapeHtml((section.label || MARKET_LABELS[key]).slice(0, 1))}</span><strong>${escapeHtml(section.label || MARKET_LABELS[key])}</strong></div>
+          <span class="pill ${level}">${label}</span>
         </div>
-        <div class="market-pick">
-          <b>${escapeHtml(primary.name)} ${escapeHtml(primary.code)}</b>
-          <em>推荐度 ${confidence}%</em>
+        <div class="market-card-body">
+          <div class="market-main">
+            <div class="market-stock-name"><b>${escapeHtml(primary.name)}</b><em>${escapeHtml(primary.code)}</em></div>
+            <div class="market-score ${confidenceTone(confidence)}"><strong>${confidence}</strong><span>分</span></div>
+            ${starRating(confidence)}
+          </div>
+          <div class="market-metrics">
+            <span><small>建议买入价</small>${priceText(primary.entry_price || primary.price)}</span>
+            <span><small>止盈价</small>${priceText(primary.take_profit_reference)}</span>
+            <span><small>止损价</small>${priceText(primary.stop_loss)}</span>
+            <span class="market-range"><small>预估收益区间</small>${escapeHtml((range && range.text) || "--")}</span>
+          </div>
+          ${sparklineSvg(primary, tone)}
         </div>
-        <div class="market-price-grid">
-          <span><small>建议买入</small>${priceText(primary.entry_price || primary.price)}</span>
-          <span><small>止盈</small>${priceText(primary.take_profit_reference)}</span>
-          <span><small>止损</small>${priceText(primary.stop_loss)}</span>
-        </div>
-        <p>${escapeHtml((range && range.text) || "--")}</p>
       `;
     } else {
       button.innerHTML = `
         <div class="market-card-head">
-          <strong>${escapeHtml(section.label || MARKET_LABELS[key])}</strong>
+          <div class="market-name"><span class="market-icon">${escapeHtml((section.label || MARKET_LABELS[key]).slice(0, 1))}</span><strong>${escapeHtml(section.label || MARKET_LABELS[key])}</strong></div>
           <span class="pill level-no">不买 / 无推荐</span>
         </div>
         <div class="no-trade-copy">
           <b>不买 / 无推荐</b>
-          <span>${escapeHtml(decision.message || "当前没有符合策略的优质标的")}</span>
+          <span>${escapeHtml(decision.message || "当前市场环境下未发现符合策略的优质标的，请继续观察，等待更佳机会")}</span>
+          ${sparklineSvg(candidate, "red")}
         </div>
       `;
     }
@@ -313,15 +401,17 @@ function renderMarketTabs(data) {
 }
 
 function renderPrimary(data) {
-  const { decision } = selectedMarket(data);
+  const section = selectedMarket(data);
+  const { decision } = section;
   const primary = decision.primary;
   const blocked = decision.blocked_candidate;
   const shown = primary || blocked;
-  const badgeConfidence = shown ? shown.recommendation_degree || shown.confidence || 0 : 0;
+  const badgeConfidence = shown ? stockScore(shown) : 0;
   els.actionBadge.className = `status ${actionClass(badgeConfidence, Boolean(primary))}`;
   els.actionBadge.textContent = primary ? recommendationLabel(primary.recommendation_degree || primary.confidence, true) : "不买";
 
   if (!shown) {
+    els.signalDate.textContent = `${section.label || "A股"} · 不买 / 无推荐 · 更新时间：${data.generated_label || data.generated_at || "--"}`;
     els.primaryBlock.innerHTML = `
       <div class="primary-stock">
         <div class="stock-title">
@@ -336,30 +426,25 @@ function renderPrimary(data) {
     return;
   }
 
-  const confidence = shown.recommendation_degree || shown.confidence || 0;
+  const confidence = stockScore(shown);
+  const label = primary ? recommendationLabel(confidence, true) : "不买";
   const range = shown.estimated_2w_range || shown.estimated_2d_range || {};
+  els.signalDate.textContent = `${section.label || "A股"} · ${shown.name} ${shown.code} · ${label} · 所属行业：${industryText(shown)} · 更新时间：${data.generated_label || data.generated_at || "--"}`;
   els.primaryBlock.innerHTML = `
     <div class="primary-stock">
-      <div class="action-layout">
-        <div>
-          <span class="decision-kicker">${primary ? "当前选中市场" : "被拦截候选"}</span>
-          <div class="stock-title">
-            <strong>${primary ? recommendationLabel(confidence, true) : "不买"}</strong>
-            <span>${escapeHtml(shown.name)} ${escapeHtml(shown.code)}</span>
-          </div>
-        </div>
-        <div class="decision-score ${confidenceTone(confidence)}">
-          <span>推荐度</span>
-          <strong>${confidence}%</strong>
-        </div>
+      <div class="operation-title"><span class="operation-icon">+</span><strong>操作建议</strong></div>
+      <div class="operation-lines">
+        <div><span>建议买入价</span><strong>${priceText(shown.entry_price || shown.price)}</strong></div>
+        <div><span>止盈价</span><strong class="red">${priceText(shown.take_profit_reference)}</strong></div>
+        <div><span>止损价</span><strong class="green">${priceText(shown.stop_loss)}</strong></div>
+        <div><span>预计收益区间</span><strong>${escapeHtml(range.text || "--")}</strong></div>
+        <div><span>持有周期</span><strong>2周以内</strong></div>
       </div>
-      <p class="decision-copy">${escapeHtml(decision.message || "")}</p>
-      <div class="price-row">
-        <div class="price-cell"><span>建议买入价</span><strong>${priceText(shown.entry_price || shown.price)}</strong></div>
-        <div class="price-cell"><span>止盈价</span><strong class="red">${priceText(shown.take_profit_reference)}</strong></div>
-        <div class="price-cell"><span>止损价</span><strong class="green">${priceText(shown.stop_loss)}</strong></div>
-        <div class="price-cell wide"><span>预估收益区间</span><strong>${escapeHtml(range.text || "--")}</strong></div>
+      <div class="operation-cta ${actionClass(confidence, Boolean(primary))}">
+        <strong>${label}</strong>
+        <span>${actionSubtitle(label)}</span>
       </div>
+      <p class="decision-copy">${escapeHtml(decision.message || "按建议价附近执行，跌破止损价必须退出。")}</p>
     </div>
   `;
   renderFactorStrip(shown);
@@ -387,21 +472,39 @@ function klineChartSvg(stock, options = {}) {
       </div>
     `;
   }
-  const width = options.width || 340;
-  const height = options.height || 210;
-  const top = 22;
-  const bottom = 42;
+  const width = options.width || 430;
+  const height = options.height || 270;
+  const top = 20;
+  const bottom = 64;
   const left = 22;
   const right = 16;
-  const chartHeight = height - top - bottom;
+  const volumeHeight = 44;
+  const gap = 12;
+  const chartHeight = height - top - bottom - volumeHeight - gap;
   const highs = rows.map((row) => Number(row.high));
   const lows = rows.map((row) => Number(row.low));
+  const closes = rows.map((row) => Number(row.close));
   const maxPrice = Math.max(...highs);
   const minPrice = Math.min(...lows);
   const span = Math.max(maxPrice - minPrice, 0.001);
   const step = (width - left - right) / rows.length;
   const candleWidth = Math.max(4, Math.min(9, step * 0.58));
   const y = (price) => top + ((maxPrice - price) / span) * chartHeight;
+  const volumeTop = top + chartHeight + gap;
+  const volumes = rows.map((row) => Number(row.volume || row.vol || 0));
+  const maxVolume = Math.max(...volumes, 1);
+  const maPath = (period) => {
+    const ma = movingAverage(closes, period);
+    const points = ma
+      .map((value, index) => {
+        if (value === null) return null;
+        const x = left + index * step + step / 2;
+        return `${x.toFixed(2)},${y(value).toFixed(2)}`;
+      })
+      .filter(Boolean)
+      .join(" ");
+    return points ? `<polyline class="ma-line ma${period}" points="${points}"></polyline>` : "";
+  };
   const candles = rows
     .map((row, index) => {
       const x = left + index * step + step / 2;
@@ -421,6 +524,17 @@ function klineChartSvg(stock, options = {}) {
       `;
     })
     .join("");
+  const volumeBars = rows
+    .map((row, index) => {
+      const x = left + index * step + step / 2;
+      const open = Number(row.open) || Number(row.close);
+      const close = Number(row.close);
+      const volume = Number(row.volume || row.vol || 0);
+      const barHeight = Math.max((volume / maxVolume) * volumeHeight, 1);
+      const colorClass = close >= open ? "up" : "down";
+      return `<rect class="volume-bar ${colorClass}" x="${(x - candleWidth / 2).toFixed(2)}" y="${(volumeTop + volumeHeight - barHeight).toFixed(2)}" width="${candleWidth.toFixed(2)}" height="${barHeight.toFixed(2)}" rx="1"></rect>`;
+    })
+    .join("");
   const labels = [
     { y: top, text: priceText(maxPrice) },
     { y: top + chartHeight / 2, text: priceText((maxPrice + minPrice) / 2) },
@@ -436,9 +550,12 @@ function klineChartSvg(stock, options = {}) {
         <line x1="${left}" y1="${top}" x2="${width - right}" y2="${top}"></line>
         <line x1="${left}" y1="${top + chartHeight / 2}" x2="${width - right}" y2="${top + chartHeight / 2}"></line>
         <line x1="${left}" y1="${top + chartHeight}" x2="${width - right}" y2="${top + chartHeight}"></line>
+        <line x1="${left}" y1="${volumeTop + volumeHeight}" x2="${width - right}" y2="${volumeTop + volumeHeight}"></line>
       </g>
       <g class="axis">${labels}</g>
       <g>${candles}</g>
+      <g>${maPath(5)}${maPath(10)}${maPath(20)}${maPath(60)}</g>
+      <g>${volumeBars}</g>
       <text x="${left}" y="${height - 12}" class="date-label">${shortDate(first.date)}</text>
       <text x="${width - right - 38}" y="${height - 12}" class="date-label">${shortDate(last.date)}</text>
     </svg>
@@ -456,49 +573,50 @@ function renderMiniChart(stock) {
     `;
     return;
   }
-  const base = stock.entry_price || stock.price || 100;
-  const change = stock.current_change_pct || stock.change_pct || 0;
+  const rows = (stock.kline || []).filter((row) => Number(row.close) > 0);
+  const close = rows.length ? Number(rows[rows.length - 1].close) : null;
+  const base = stock.current_price || stock.realtime_price || (stock.realtime && stock.realtime.price) || close || stock.entry_price || stock.price || 100;
+  const change = stockChange(stock);
+  const closes = rows.map((row) => Number(row.close));
+  const maValue = (period) => {
+    const value = movingAverage(closes, Math.min(period, closes.length)).at(-1);
+    return typeof value === "number" ? priceText(value) : "--";
+  };
+  const latestVolume = rows.length ? Number(rows[rows.length - 1].volume || rows[rows.length - 1].vol || 0) : null;
   els.miniChart.innerHTML = `
     <div class="chart-head">
       <div>
-        <strong>${escapeHtml(stock.name)} ${escapeHtml(stock.code)}</strong>
-        <span>实时价 ${priceText(base)} · 真实日K</span>
+        <strong>实时K线（日线）</strong>
+        <span class="ma-legend"><i class="ma5">MA5: ${maValue(5)}</i><i class="ma10">MA10: ${maValue(10)}</i><i class="ma20">MA20: ${maValue(20)}</i><i class="ma60">MA60: ${maValue(60)}</i></span>
       </div>
-      <b class="${pctClass(change)}">${signed(change)}</b>
+      <div class="chart-price"><span>实时价</span><strong>${priceText(base)}</strong><b class="${pctClass(change)}">${signed(change)}</b></div>
     </div>
     ${klineChartSvg(stock)}
+    <div class="volume-caption">成交量 ${formatVolume(latestVolume)}</div>
   `;
 }
 
 function renderFactorStrip(primary) {
   clearList(els.factorStrip);
   if (!primary) return;
-  const serenityAlpha = primary.serenity && primary.serenity.alpha_profile;
-  const maxScores = {
-    UZI评审: 60,
-    UZI风控: 30,
-    CZSC: 35,
-    缠论: 60,
-    Serenity: 120,
-  };
+  const confidence = stockScore(primary);
   const factors = [
-    ["UZI评审", primary.uzi_panel_score],
-    ["UZI风控", primary.uzi_score],
-    ["CZSC", primary.czsc_score],
-    ["缠论", primary.chan_score],
-    ["Serenity", primary.serenity_score || (primary.serenity && primary.serenity.score)],
+    ["UZI 评分", primary.uzi_panel_score, 60],
+    ["CZSC 评分", primary.czsc_score, 35],
+    ["Serenity 评分", primary.serenity_score ?? (primary.serenity && primary.serenity.score), 120],
+    ["综合评分", confidence, 100],
   ];
-  factors.forEach(([label, value]) => {
+  factors.forEach(([label, value, max]) => {
+    const score = scoreDisplay(value, max);
     const chip = document.createElement("span");
-    const max = maxScores[label];
-    chip.innerHTML = `<b>${escapeHtml(label)}</b>${typeof value === "number" ? `${value.toFixed(1)}/${max}` : `--/${max}`}`;
+    chip.className = "factor-card";
+    chip.innerHTML = `
+      <b>${escapeHtml(label)} <em title="满分100，系统会把原始模型分数折算到同一尺度">i</em></b>
+      <strong>${score} / 100</strong>
+      <i class="score-bar"><i style="width:${score === "--" ? 0 : score}%"></i></i>
+    `;
     els.factorStrip.append(chip);
   });
-  if (serenityAlpha && serenityAlpha.rating && typeof serenityAlpha.score === "number") {
-    const chip = document.createElement("span");
-    chip.innerHTML = `<b>Serenity评级</b>${escapeHtml(serenityAlpha.rating)} / ${serenityAlpha.score}/100`;
-    els.factorStrip.append(chip);
-  }
 }
 
 function renderReasons(data) {
@@ -544,7 +662,7 @@ function renderCandidateRows(data) {
   if (els.candidateDetail) els.candidateDetail.replaceChildren();
   if (!rows.length) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td colspan="7" class="empty-cell">该市场暂无可展示候选。</td>`;
+    tr.innerHTML = `<td colspan="6" class="empty-cell">该市场暂无可展示候选。</td>`;
     els.candidateRows.append(tr);
     if (els.candidateDetail) {
       els.candidateDetail.innerHTML = `<div class="candidate-empty">当前市场没有候选详情。</div>`;
@@ -555,21 +673,20 @@ function renderCandidateRows(data) {
     selectedCandidateKey = candidateKey(rows[0]);
   }
   rows.forEach((row, index) => {
+    row.__rank = index + 1;
     const range = row.estimated_2w_range || row.estimated_2d_range || {};
-    const confidence = row.recommendation_degree || row.confidence || 0;
+    const confidence = stockScore(row);
     const reasons = (row.reasons || []).slice(0, 2).map((item) => escapeHtml(readableReason(item))).join("<br>");
-    const risks = (row.risk_flags || []).slice(0, 2).map((item) => escapeHtml(readableRisk(item))).join("<br>") || "无硬风险";
     const tr = document.createElement("tr");
     tr.className = candidateKey(row) === selectedCandidateKey ? "selected-row" : "";
     tr.tabIndex = 0;
     tr.innerHTML = `
       <td>${index + 1}</td>
       <td><strong>${escapeHtml(row.name)}</strong><span class="muted">${escapeHtml(row.code)}</span></td>
-      <td><span class="mini-action ${actionClass(confidence, true)}">${recommendationLabel(confidence, true)}</span><strong class="${confidenceTone(confidence)}">${confidence}%</strong></td>
+      <td><strong class="${confidenceTone(confidence)}">${confidence}</strong></td>
       <td>${priceText(row.entry_price || row.price)}<br><span class="muted">止损 ${priceText(row.stop_loss)}</span></td>
       <td><span class="${pctClass((range.high_pct || 0))}">${escapeHtml(range.text || "--")}</span></td>
       <td><div class="table-note positive-note">${reasons || "暂无理由"}</div></td>
-      <td><div class="table-note risk-note">${risks}</div></td>
     `;
     tr.addEventListener("click", () => {
       selectedCandidateKey = candidateKey(row);
@@ -590,45 +707,33 @@ function renderCandidateRows(data) {
 
 function renderCandidateDetail(row, section) {
   if (!els.candidateDetail || !row) return;
-  const confidence = row.recommendation_degree || row.confidence || 0;
-  const range = row.estimated_2w_range || row.estimated_2d_range || {};
-  const reasons = (row.reasons || []).slice(0, 3).map((item) => `<li>${escapeHtml(readableReason(item))}</li>`).join("");
-  const risks = (row.risk_flags || []).slice(0, 3).map((item) => `<li>${escapeHtml(readableRisk(item))}</li>`).join("") || "<li>未触发硬风险，但仍需要按止损执行。</li>";
-  const scoreItems = [
-    ["UZI评审", row.uzi_panel_score, 60],
-    ["UZI风控", row.uzi_score, 30],
-    ["CZSC", row.czsc_score, 35],
-    ["缠论", row.chan_score, 60],
-    ["Serenity", row.serenity_score || (row.serenity && row.serenity.score), 120],
-  ]
-    .map(([label, value, max]) => `<span><b>${escapeHtml(label)}</b>${typeof value === "number" ? value.toFixed(1) : "--"}/${max}</span>`)
-    .join("");
+  const confidence = stockScore(row);
+  const latest = ((row.kline || []).filter((item) => Number(item.close) > 0).at(-1) || {});
+  const currentPrice = row.current_price || row.realtime_price || (row.realtime && row.realtime.price) || Number(latest.close) || row.entry_price || row.price;
+  const change = stockChange(row);
   els.candidateDetail.innerHTML = `
-    <div class="candidate-detail-head">
-      <div>
-        <span class="label">${escapeHtml((section && section.label) || MARKET_LABELS[activeCandidateMarket] || "")} 候选详情</span>
-        <h3>${escapeHtml(row.name)} ${escapeHtml(row.code)}</h3>
+    <div class="candidate-detail-row">
+      <span class="candidate-rank">${row.__rank || 1}</span>
+      <div class="candidate-name-block">
+        <strong>${escapeHtml(row.name)} <em>${escapeHtml(row.code)}</em></strong>
+        <span>${escapeHtml(industryText(row))}</span>
       </div>
-      <span class="status ${actionClass(confidence, true)}">${recommendationLabel(confidence, true)} · ${confidence}%</span>
+      <div class="candidate-metric"><span>实时价</span><strong class="${pctClass(change)}">${priceText(currentPrice)}</strong><em class="${pctClass(change)}">${signed(change)}</em></div>
+      <div class="candidate-metric"><span>建议买入价</span><strong>${priceText(row.entry_price || row.price)}</strong></div>
+      <div class="candidate-metric"><span>止盈价</span><strong class="red">${priceText(row.take_profit_reference)}</strong></div>
+      <div class="candidate-metric"><span>止损价</span><strong class="green">${priceText(row.stop_loss)}</strong></div>
+      <div class="candidate-metric score"><span>综合评分</span><strong>${confidence}分</strong>${starRating(confidence)}</div>
+      <button class="detail-jump" type="button">查看单股说明</button>
     </div>
-    <div class="candidate-trade-box compact">
-      <div><span>建议买入</span><strong>${priceText(row.entry_price || row.price)}</strong></div>
-      <div><span>止盈</span><strong class="red">${priceText(row.take_profit_reference)}</strong></div>
-      <div><span>止损</span><strong class="green">${priceText(row.stop_loss)}</strong></div>
-      <div><span>两周预估</span><strong>${escapeHtml(range.text || "--")}</strong></div>
-    </div>
-    <div class="candidate-explain-grid">
-      <section class="candidate-explain positive-note">
-        <h4>为什么可能涨</h4>
-        <ul>${reasons || "<li>暂无足够清晰的推荐理由。</li>"}</ul>
-      </section>
-      <section class="candidate-explain risk-note">
-        <h4>哪里可能亏</h4>
-        <ul>${risks}</ul>
-      </section>
-    </div>
-    <div class="factor-strip candidate-score-strip">${scoreItems}</div>
   `;
+  const jump = els.candidateDetail.querySelector(".detail-jump");
+  if (jump) {
+    jump.addEventListener("click", () => {
+      activeMarket = activeCandidateMarket;
+      render(currentData);
+      document.getElementById("decisionPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
 }
 
 function marketSummaryForHistory(item, key) {
