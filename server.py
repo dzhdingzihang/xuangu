@@ -1604,6 +1604,58 @@ def compact_kline(kline: list[dict], limit: int = 32) -> list[dict]:
     return rows
 
 
+def live_stock_payload(market_key: str, code: str) -> dict:
+    if not code:
+        raise ValueError("缺少股票代码")
+    if market_key == "a_share":
+        quote = (tencent_quote([code]) or {}).get(code) or {}
+        kline = stock_kline(code, 70)
+        if not quote and not kline:
+            raise ValueError("实时行情源暂不可用")
+        latest = kline[-1] if kline else {}
+        price = safe_float(quote.get("price")) or safe_float(latest.get("close"))
+        change_pct = safe_float(quote.get("change_pct")) or safe_float(latest.get("change_pct"))
+        return {
+            "ok": True,
+            "market": market_key,
+            "code": code,
+            "name": quote.get("name", ""),
+            "price": price,
+            "current_price": price,
+            "realtime_price": price,
+            "change_pct": change_pct,
+            "current_change_pct": change_pct,
+            "volume": safe_float(quote.get("volume")) or safe_float(latest.get("volume")),
+            "session_label": (quote.get("realtime") or {}).get("session_label", "实时/延时"),
+            "source": (quote.get("realtime") or {}).get("source", "Tencent realtime quote"),
+            "updated_at": now_cn().isoformat(timespec="seconds"),
+            "kline": compact_kline(kline, 70),
+        }
+    kline = yahoo_chart_kline(code, 90)
+    realtime = yahoo_realtime_quote(code)
+    if not realtime and not kline:
+        raise ValueError("实时行情源暂不可用")
+    latest = kline[-1] if kline else {}
+    price = safe_float(realtime.get("price")) or safe_float(latest.get("close"))
+    change_pct = safe_float(realtime.get("change_pct")) or safe_float(latest.get("change_pct"))
+    return {
+        "ok": True,
+        "market": market_key,
+        "code": code,
+        "name": realtime.get("name", ""),
+        "price": price,
+        "current_price": price,
+        "realtime_price": price,
+        "change_pct": change_pct,
+        "current_change_pct": change_pct,
+        "volume": safe_float(realtime.get("volume")) or safe_float(latest.get("volume")),
+        "session_label": realtime.get("session_label", "实时/延时"),
+        "source": realtime.get("source", "Yahoo chart quote"),
+        "updated_at": now_cn().isoformat(timespec="seconds"),
+        "kline": compact_kline(kline, 70),
+    }
+
+
 def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
     policy = SERENITY_MARKET_POLICY.get(market_key, SERENITY_MARKET_POLICY["hk"])
     realtime_map = yahoo_realtime_quotes([item["symbol"] for item in candidates]) if market_key in ("hk", "us") else {}
@@ -2132,6 +2184,15 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             limit = int(query.get("limit", ["30"])[0])
             self.send_json(history_payload(limit=max(1, min(limit, 240))))
+            return
+        if parsed.path == "/api/live":
+            query = urllib.parse.parse_qs(parsed.query)
+            market_key = query.get("market", ["a_share"])[0]
+            code = query.get("code", [""])[0]
+            try:
+                self.send_json(live_stock_payload(market_key, code))
+            except Exception as exc:
+                self.send_json({"error": "实时行情暂不可用", "detail": str(exc)}, 502)
             return
         if parsed.path == "/api/latest-summary":
             latest = PICKS / "latest.json"

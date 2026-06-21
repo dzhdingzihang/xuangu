@@ -30,6 +30,8 @@ let activeCandidateMarket = "a_share";
 let currentData = null;
 let selectedCandidateKey = "";
 let selectedHistoryKey = "";
+let primaryLiveToken = 0;
+let candidateLiveToken = 0;
 
 function todayText() {
   const d = new Date();
@@ -101,6 +103,44 @@ function industryText(stock) {
 function stockChange(stock) {
   if (!stock) return 0;
   return stock.current_change_pct || stock.change_pct || stock.intraday_change_pct || 0;
+}
+
+function liveCode(stock) {
+  return stock && (stock.code || stock.symbol || stock.ticker || stock.name);
+}
+
+function liveMerge(stock, live) {
+  if (!stock || !live || !live.ok) return stock;
+  const price = typeof live.price === "number" ? live.price : live.current_price;
+  return {
+    ...stock,
+    current_price: price || stock.current_price,
+    realtime_price: price || stock.realtime_price,
+    current_change_pct: typeof live.current_change_pct === "number" ? live.current_change_pct : stock.current_change_pct,
+    change_pct: typeof live.change_pct === "number" ? live.change_pct : stock.change_pct,
+    realtime: {
+      ...(stock.realtime || {}),
+      price: price || (stock.realtime && stock.realtime.price),
+      change_pct: typeof live.current_change_pct === "number" ? live.current_change_pct : live.change_pct,
+      session_label: live.session_label || (stock.realtime && stock.realtime.session_label),
+      source: live.source || (stock.realtime && stock.realtime.source),
+      updated_at: live.updated_at,
+    },
+    kline: Array.isArray(live.kline) && live.kline.length ? live.kline : stock.kline,
+    __liveUpdatedAt: live.updated_at,
+    __liveSource: live.source,
+  };
+}
+
+async function fetchLiveStock(stock, market) {
+  const code = liveCode(stock);
+  if (!code) throw new Error("缺少股票代码");
+  const response = await fetch(`/api/live?market=${encodeURIComponent(market)}&code=${encodeURIComponent(code)}`, {
+    cache: "no-store",
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "实时行情暂不可用");
+  return payload;
 }
 
 function sparklineSvg(stock, tone = "green") {
@@ -450,6 +490,7 @@ function renderPrimary(data) {
   `;
   renderFactorStrip(shown);
   renderMiniChart(shown);
+  refreshPrimaryLive(shown, activeMarket);
 }
 
 function klineChartSvg(stock, options = {}) {
@@ -563,6 +604,16 @@ function klineChartSvg(stock, options = {}) {
   `;
 }
 
+function liveStatusText(stock) {
+  if (!stock) return "";
+  if (stock.__liveLoading) return "正在刷新实时行情...";
+  if (stock.__liveError) return `实时刷新失败：${stock.__liveError}`;
+  if (stock.__liveUpdatedAt) return `实时行情已刷新：${stock.__liveUpdatedAt.replace("T", " ").replace("+08:00", "")} · ${stock.__liveSource || "行情源"}`;
+  const updated = stock.realtime && stock.realtime.updated_at;
+  if (updated) return `快照行情：${String(updated).replace("T", " ").replace("+08:00", "")} · ${(stock.realtime && stock.realtime.source) || "行情源"}`;
+  return "使用当前快照行情";
+}
+
 function renderMiniChart(stock) {
   if (!els.miniChart) return;
   if (!stock) {
@@ -588,6 +639,7 @@ function renderMiniChart(stock) {
     <div class="chart-head">
       <div>
         <strong>实时K线（日线）</strong>
+        <span class="live-status ${stock.__liveError ? "error" : ""}">${escapeHtml(liveStatusText(stock))}</span>
         <span class="ma-legend"><i class="ma5">MA5: ${maValue(5)}</i><i class="ma10">MA10: ${maValue(10)}</i><i class="ma20">MA20: ${maValue(20)}</i><i class="ma60">MA60: ${maValue(60)}</i></span>
       </div>
       <div class="chart-price"><span>实时价</span><strong>${priceText(base)}</strong><b class="${pctClass(change)}">${signed(change)}</b></div>
@@ -595,6 +647,19 @@ function renderMiniChart(stock) {
     ${klineChartSvg(stock)}
     <div class="volume-caption">成交量 ${formatVolume(latestVolume)}</div>
   `;
+}
+
+async function refreshPrimaryLive(stock, market) {
+  const token = ++primaryLiveToken;
+  renderMiniChart({ ...stock, __liveLoading: true });
+  try {
+    const live = await fetchLiveStock(stock, market);
+    if (token !== primaryLiveToken) return;
+    renderMiniChart(liveMerge(stock, live));
+  } catch (error) {
+    if (token !== primaryLiveToken) return;
+    renderMiniChart({ ...stock, __liveError: error.message || "实时行情暂不可用" });
+  }
 }
 
 function renderFactorStrip(primary) {
@@ -706,7 +771,7 @@ function renderCandidateRows(data) {
   renderCandidateDetail(selected, section);
 }
 
-function renderCandidateDetail(row, section) {
+function renderCandidateDetail(row, section, options = {}) {
   if (!els.candidateDetail || !row) return;
   const confidence = stockScore(row);
   const latest = ((row.kline || []).filter((item) => Number(item.close) > 0).at(-1) || {});
@@ -714,6 +779,7 @@ function renderCandidateDetail(row, section) {
   const change = stockChange(row);
   const reasons = (row.reasons || []).slice(0, 5).map((item) => `<li>${escapeHtml(readableReason(item))}</li>`).join("");
   const risks = (row.risk_flags || []).slice(0, 5).map((item) => `<li>${escapeHtml(readableRisk(item))}</li>`).join("");
+  const liveStatus = liveStatusText(row);
   els.candidateDetail.innerHTML = `
     <div class="candidate-detail-row">
       <span class="candidate-rank">${row.__rank || 1}</span>
@@ -728,6 +794,7 @@ function renderCandidateDetail(row, section) {
       <div class="candidate-metric score"><span>综合评分</span><strong>${confidence}分</strong>${starRating(confidence)}</div>
       <button class="detail-jump" type="button">查看单股说明</button>
     </div>
+    <div class="candidate-live-status ${row.__liveError ? "error" : ""}">${escapeHtml(liveStatus)}</div>
     <div class="candidate-detail-explain">
       <section class="candidate-detail-note positive-note">
         <h4>推荐理由</h4>
@@ -746,6 +813,19 @@ function renderCandidateDetail(row, section) {
       render(currentData);
       document.getElementById("decisionPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
+  }
+  if (!options.skipLive) refreshCandidateLive(row, section);
+}
+
+async function refreshCandidateLive(row, section) {
+  const token = ++candidateLiveToken;
+  try {
+    const live = await fetchLiveStock(row, activeCandidateMarket);
+    if (token !== candidateLiveToken) return;
+    renderCandidateDetail(liveMerge(row, live), section, { skipLive: true });
+  } catch (error) {
+    if (token !== candidateLiveToken) return;
+    renderCandidateDetail({ ...row, __liveError: error.message || "实时行情暂不可用" }, section, { skipLive: true });
   }
 }
 

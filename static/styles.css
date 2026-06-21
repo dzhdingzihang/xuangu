@@ -957,6 +957,18 @@ main {
   font-size: 12px;
 }
 
+.chart-head .live-status {
+  margin: 0 0 6px;
+  color: #7a8598;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.chart-head .live-status.error,
+.candidate-live-status.error {
+  color: var(--amber);
+}
+
 .chart-head b {
   font-size: 18px;
 }
@@ -1410,6 +1422,13 @@ tbody tr.selected-row {
   gap: 10px;
   margin-top: 12px;
   min-width: 760px;
+}
+
+.candidate-live-status {
+  margin: 8px 0 -2px;
+  color: #7a8598;
+  font-size: 11.5px;
+  font-weight: 800;
 }
 
 .candidate-detail-note {
