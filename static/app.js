@@ -590,6 +590,8 @@ function renderMarketTabs(data) {
     const label = recommendationLabel(confidence, Boolean(primary));
     const level = actionClass(confidence, Boolean(primary));
     const tone = level === "level-caution" ? "amber" : level === "level-no" ? "red" : "green";
+    const stats = section.stats || {};
+    const poolText = `候选池 ${stats.universe_size || stats.raw_pool_size || "--"} / 深度评分 ${stats.scored_size || "--"}`;
     const button = document.createElement("button");
     button.type = "button";
     button.className = `market-card ${key === activeMarket ? "active" : ""} ${level}`;
@@ -612,6 +614,7 @@ function renderMarketTabs(data) {
             <span class="market-range"><small>预估收益区间</small>${escapeHtml((range && range.text) || "--")}</span>
           </div>
           ${sparklineSvg(primary, tone)}
+          <div class="pool-meta">${escapeHtml(poolText)}</div>
         </div>
       `;
     } else {
@@ -623,6 +626,7 @@ function renderMarketTabs(data) {
         <div class="no-trade-copy">
           <b>不买 / 无推荐</b>
           <span>${escapeHtml(decision.message || "当前市场环境下未发现符合策略的优质标的，请继续观察，等待更佳机会")}</span>
+          <small>${escapeHtml(poolText)}</small>
           ${sparklineSvg(candidate, "red")}
         </div>
       `;

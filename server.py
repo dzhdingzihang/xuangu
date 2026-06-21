@@ -34,7 +34,7 @@ CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-06-04.3-serenity-skill"
+MODEL_VERSION = "smart-selector-2026-06-21.1-broad-universe"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 SERENITY_SKILL_DIR = pathlib.Path.home() / ".agents" / "skills" / "serenity-skill"
@@ -195,6 +195,183 @@ SERENITY_MARKET_POLICY = {
         "change_limit": 14.0,
     },
 }
+
+HK_BROAD_UNIVERSE = [
+    {"symbol": "0005.HK", "name": "汇丰控股", "role": "金融/高流动性权重", "themes": ["金融", "高股息"]},
+    {"symbol": "0011.HK", "name": "恒生银行", "role": "金融/本地银行", "themes": ["金融", "高股息"]},
+    {"symbol": "0388.HK", "name": "香港交易所", "role": "交易所/市场活跃度", "themes": ["金融科技", "港股活跃度"]},
+    {"symbol": "0939.HK", "name": "建设银行", "role": "银行/高股息", "themes": ["金融", "高股息"]},
+    {"symbol": "1398.HK", "name": "工商银行", "role": "银行/高股息", "themes": ["金融", "高股息"]},
+    {"symbol": "2318.HK", "name": "中国平安", "role": "保险/金融权重", "themes": ["保险", "金融"]},
+    {"symbol": "1299.HK", "name": "友邦保险", "role": "保险/消费金融", "themes": ["保险", "金融"]},
+    {"symbol": "0941.HK", "name": "中国移动", "role": "运营商/算力基础设施", "themes": ["云计算", "算力", "高股息"]},
+    {"symbol": "0992.HK", "name": "联想集团", "role": "AI PC/服务器", "themes": ["AI终端", "服务器"]},
+    {"symbol": "1810.HK", "name": "小米集团-W", "role": "AI终端/智能汽车", "themes": ["AI终端", "汽车电子"]},
+    {"symbol": "3690.HK", "name": "美团-W", "role": "本地生活/AI应用", "themes": ["互联网", "AI应用"]},
+    {"symbol": "9618.HK", "name": "京东集团-SW", "role": "电商/物流科技", "themes": ["互联网", "物流科技"]},
+    {"symbol": "9988.HK", "name": "阿里巴巴-W", "role": "云/AI应用/电商", "themes": ["云计算", "AI应用"]},
+    {"symbol": "9999.HK", "name": "网易-S", "role": "游戏/AI内容", "themes": ["AI应用", "游戏"]},
+    {"symbol": "9888.HK", "name": "百度集团-SW", "role": "AI模型/自动驾驶", "themes": ["AI应用", "自动驾驶"]},
+    {"symbol": "6618.HK", "name": "京东健康", "role": "互联网医疗", "themes": ["AI医疗", "互联网"]},
+    {"symbol": "9626.HK", "name": "哔哩哔哩-W", "role": "内容平台/AI应用", "themes": ["AI应用", "互联网"]},
+    {"symbol": "9992.HK", "name": "泡泡玛特", "role": "消费/出海", "themes": ["消费", "出海"]},
+    {"symbol": "1211.HK", "name": "比亚迪股份", "role": "新能源车/电池", "themes": ["新能源车", "电池"]},
+    {"symbol": "9866.HK", "name": "蔚来-SW", "role": "新能源车", "themes": ["新能源车", "智能驾驶"]},
+    {"symbol": "2015.HK", "name": "理想汽车-W", "role": "新能源车/智能驾驶", "themes": ["新能源车", "智能驾驶"]},
+    {"symbol": "9868.HK", "name": "小鹏汽车-W", "role": "新能源车/智能驾驶", "themes": ["新能源车", "智能驾驶"]},
+    {"symbol": "2333.HK", "name": "长城汽车", "role": "汽车/出海", "themes": ["汽车", "出海"]},
+    {"symbol": "0175.HK", "name": "吉利汽车", "role": "汽车/智能化", "themes": ["汽车", "智能驾驶"]},
+    {"symbol": "0883.HK", "name": "中国海洋石油", "role": "能源/高股息", "themes": ["能源", "高股息"]},
+    {"symbol": "0857.HK", "name": "中国石油股份", "role": "能源/高股息", "themes": ["能源", "高股息"]},
+    {"symbol": "1088.HK", "name": "中国神华", "role": "煤炭/电力", "themes": ["电力", "高股息"]},
+    {"symbol": "2899.HK", "name": "紫金矿业", "role": "铜金矿/资源", "themes": ["资源", "铜"]},
+    {"symbol": "1919.HK", "name": "中远海控", "role": "航运/周期", "themes": ["航运", "周期"]},
+    {"symbol": "2319.HK", "name": "蒙牛乳业", "role": "消费", "themes": ["消费"]},
+    {"symbol": "2020.HK", "name": "安踏体育", "role": "消费/服饰", "themes": ["消费", "出海"]},
+    {"symbol": "2331.HK", "name": "李宁", "role": "消费/服饰", "themes": ["消费"]},
+    {"symbol": "2269.HK", "name": "药明生物", "role": "创新药/CXO", "themes": ["创新药", "医疗"]},
+    {"symbol": "1177.HK", "name": "中国生物制药", "role": "创新药", "themes": ["创新药", "医疗"]},
+    {"symbol": "1093.HK", "name": "石药集团", "role": "创新药", "themes": ["创新药", "医疗"]},
+    {"symbol": "2359.HK", "name": "药明康德", "role": "CXO", "themes": ["创新药", "医疗"]},
+    {"symbol": "3759.HK", "name": "康龙化成", "role": "CXO", "themes": ["创新药", "医疗"]},
+    {"symbol": "0268.HK", "name": "金蝶国际", "role": "企业软件/AI应用", "themes": ["AI应用", "软件"]},
+    {"symbol": "0020.HK", "name": "商汤-W", "role": "AI模型/视觉", "themes": ["AI应用", "机器视觉"]},
+    {"symbol": "1347.HK", "name": "华虹半导体", "role": "特色工艺/功率半导体", "themes": ["半导体", "功率器件"]},
+]
+
+US_BROAD_UNIVERSE = [
+    {"symbol": "NVDA", "name": "NVIDIA", "role": "GPU/AI算力核心", "themes": ["AI芯片", "GPU", "AI datacenter"]},
+    {"symbol": "AMD", "name": "AMD", "role": "GPU/CPU/AI服务器", "themes": ["AI芯片", "GPU"]},
+    {"symbol": "AVGO", "name": "Broadcom", "role": "ASIC/网络/AI连接", "themes": ["ASIC", "AI网络", "半导体"]},
+    {"symbol": "MRVL", "name": "Marvell", "role": "数据中心网络/ASIC", "themes": ["AI网络", "ASIC"]},
+    {"symbol": "TSM", "name": "TSMC", "role": "先进制程代工", "themes": ["半导体", "AI芯片"]},
+    {"symbol": "ASML", "name": "ASML", "role": "EUV设备", "themes": ["半导体设备", "上游瓶颈"]},
+    {"symbol": "AMAT", "name": "Applied Materials", "role": "半导体设备", "themes": ["半导体设备"]},
+    {"symbol": "LRCX", "name": "Lam Research", "role": "半导体设备", "themes": ["半导体设备"]},
+    {"symbol": "KLAC", "name": "KLA", "role": "检测设备", "themes": ["半导体设备"]},
+    {"symbol": "ARM", "name": "Arm", "role": "CPU IP/AI终端", "themes": ["AI芯片", "IP"]},
+    {"symbol": "SMCI", "name": "Super Micro Computer", "role": "AI服务器", "themes": ["AI服务器", "AI datacenter"]},
+    {"symbol": "DELL", "name": "Dell", "role": "AI服务器", "themes": ["AI服务器"]},
+    {"symbol": "HPE", "name": "HPE", "role": "服务器/网络", "themes": ["AI服务器", "网络"]},
+    {"symbol": "ANET", "name": "Arista Networks", "role": "AI数据中心交换机", "themes": ["AI网络", "数据中心"]},
+    {"symbol": "CSCO", "name": "Cisco", "role": "网络设备", "themes": ["AI网络"]},
+    {"symbol": "ORCL", "name": "Oracle", "role": "云/数据库/AI基建", "themes": ["云计算", "AI datacenter"]},
+    {"symbol": "MSFT", "name": "Microsoft", "role": "云/AI应用", "themes": ["云计算", "AI应用"]},
+    {"symbol": "GOOGL", "name": "Alphabet", "role": "云/TPU/AI应用", "themes": ["云计算", "AI芯片"]},
+    {"symbol": "META", "name": "Meta", "role": "AI capex/广告", "themes": ["AI应用", "AI datacenter"]},
+    {"symbol": "AMZN", "name": "Amazon", "role": "AWS/AI云", "themes": ["云计算", "AI datacenter"]},
+    {"symbol": "AAPL", "name": "Apple", "role": "AI终端", "themes": ["AI终端", "消费电子"]},
+    {"symbol": "TSLA", "name": "Tesla", "role": "自动驾驶/机器人", "themes": ["自动驾驶", "机器人"]},
+    {"symbol": "PLTR", "name": "Palantir", "role": "AI软件/政府企业", "themes": ["AI应用", "软件"]},
+    {"symbol": "SNOW", "name": "Snowflake", "role": "数据云", "themes": ["AI应用", "数据"]},
+    {"symbol": "DDOG", "name": "Datadog", "role": "云监控/AI运维", "themes": ["软件", "AI应用"]},
+    {"symbol": "NET", "name": "Cloudflare", "role": "边缘云/AI网络", "themes": ["云计算", "AI网络"]},
+    {"symbol": "CRWD", "name": "CrowdStrike", "role": "AI安全", "themes": ["网络安全", "AI应用"]},
+    {"symbol": "PANW", "name": "Palo Alto Networks", "role": "网络安全", "themes": ["网络安全", "AI应用"]},
+    {"symbol": "NOW", "name": "ServiceNow", "role": "企业AI流程", "themes": ["AI应用", "软件"]},
+    {"symbol": "ADBE", "name": "Adobe", "role": "生成式AI软件", "themes": ["AI应用", "软件"]},
+    {"symbol": "CRM", "name": "Salesforce", "role": "企业AI软件", "themes": ["AI应用", "软件"]},
+    {"symbol": "MDB", "name": "MongoDB", "role": "AI应用数据层", "themes": ["数据", "软件"]},
+    {"symbol": "RBLX", "name": "Roblox", "role": "AI内容/平台", "themes": ["AI应用", "内容"]},
+    {"symbol": "APP", "name": "AppLovin", "role": "AI广告", "themes": ["AI应用", "广告"]},
+    {"symbol": "TTD", "name": "The Trade Desk", "role": "广告科技", "themes": ["AI应用", "广告"]},
+    {"symbol": "QCOM", "name": "Qualcomm", "role": "AI终端芯片", "themes": ["AI终端", "半导体"]},
+    {"symbol": "TXN", "name": "Texas Instruments", "role": "模拟芯片", "themes": ["半导体", "工业"]},
+    {"symbol": "ADI", "name": "Analog Devices", "role": "模拟芯片", "themes": ["半导体", "工业"]},
+    {"symbol": "ON", "name": "ON Semiconductor", "role": "功率半导体/汽车", "themes": ["功率器件", "汽车电子"]},
+    {"symbol": "MPWR", "name": "Monolithic Power", "role": "AI服务器电源芯片", "themes": ["电源", "AI服务器"]},
+    {"symbol": "ALAB", "name": "Astera Labs", "role": "AI连接/CXL", "themes": ["AI网络", "半导体"]},
+    {"symbol": "GFS", "name": "GlobalFoundries", "role": "特色工艺代工", "themes": ["半导体"]},
+    {"symbol": "INTC", "name": "Intel", "role": "CPU/晶圆代工", "themes": ["半导体", "AI芯片"]},
+    {"symbol": "WDC", "name": "Western Digital", "role": "存储/NAND", "themes": ["存储", "AI datacenter"]},
+    {"symbol": "STX", "name": "Seagate", "role": "HDD/数据中心存储", "themes": ["存储", "AI datacenter"]},
+    {"symbol": "CLS", "name": "Celestica", "role": "AI服务器/电子制造", "themes": ["AI服务器", "制造"]},
+    {"symbol": "FLEX", "name": "Flex", "role": "电子制造/AI硬件", "themes": ["AI服务器", "制造"]},
+    {"symbol": "JBL", "name": "Jabil", "role": "电子制造", "themes": ["AI服务器", "制造"]},
+    {"symbol": "ETN", "name": "Eaton", "role": "数据中心电力", "themes": ["电力", "AI datacenter"]},
+    {"symbol": "PWR", "name": "Quanta Services", "role": "电网建设", "themes": ["电力", "AI datacenter"]},
+    {"symbol": "GEV", "name": "GE Vernova", "role": "电力设备", "themes": ["电力", "AI datacenter"]},
+    {"symbol": "NRG", "name": "NRG Energy", "role": "电力", "themes": ["电力", "AI datacenter"]},
+    {"symbol": "TLN", "name": "Talen Energy", "role": "AI电力/核电", "themes": ["电力", "核电"]},
+    {"symbol": "OKLO", "name": "Oklo", "role": "核能/小堆", "themes": ["核电", "电力"]},
+    {"symbol": "SMR", "name": "NuScale Power", "role": "小型核反应堆", "themes": ["核电", "电力"]},
+    {"symbol": "CCJ", "name": "Cameco", "role": "铀/核燃料", "themes": ["核电", "资源"]},
+    {"symbol": "APLD", "name": "Applied Digital", "role": "AI数据中心", "themes": ["neocloud", "AI datacenter"]},
+    {"symbol": "CORZ", "name": "Core Scientific", "role": "AI数据中心/矿企转型", "themes": ["neocloud", "AI datacenter"]},
+    {"symbol": "CIFR", "name": "Cipher Mining", "role": "AI数据中心/矿企转型", "themes": ["neocloud", "AI datacenter"]},
+    {"symbol": "HUT", "name": "Hut 8", "role": "AI数据中心/矿企转型", "themes": ["neocloud", "AI datacenter"]},
+    {"symbol": "RIOT", "name": "Riot Platforms", "role": "电力/矿企转型", "themes": ["neocloud", "电力"]},
+    {"symbol": "IONQ", "name": "IonQ", "role": "量子计算", "themes": ["量子计算", "AI应用"]},
+    {"symbol": "QBTS", "name": "D-Wave Quantum", "role": "量子计算", "themes": ["量子计算"]},
+    {"symbol": "RGTI", "name": "Rigetti Computing", "role": "量子计算", "themes": ["量子计算"]},
+    {"symbol": "RKLB", "name": "Rocket Lab", "role": "商业航天", "themes": ["商业航天"]},
+    {"symbol": "ASTS", "name": "AST SpaceMobile", "role": "卫星通信", "themes": ["商业航天", "通信"]},
+    {"symbol": "ACHR", "name": "Archer Aviation", "role": "eVTOL", "themes": ["低空经济", "航空"]},
+    {"symbol": "JOBY", "name": "Joby Aviation", "role": "eVTOL", "themes": ["低空经济", "航空"]},
+    {"symbol": "ISRG", "name": "Intuitive Surgical", "role": "手术机器人", "themes": ["机器人", "医疗"]},
+    {"symbol": "TER", "name": "Teradyne", "role": "测试设备/机器人", "themes": ["机器人", "半导体设备"]},
+    {"symbol": "ROK", "name": "Rockwell Automation", "role": "工业自动化", "themes": ["机器人", "工业"]},
+]
+
+
+def inferred_lens(item: dict, market_key: str) -> dict:
+    themes = " ".join(item.get("themes") or [])
+    role = item.get("role", "")
+    text = f"{themes} {role}".lower()
+    lens = {
+        "bottleneck": 3,
+        "upstream": 2,
+        "capex": 4,
+        "customer": 4,
+        "smallcap": 1 if market_key in ("hk", "us") else 3,
+        "financing": 6,
+        "catalyst": 2,
+    }
+    if any(key.lower() in text for key in ["cpo", "photonics", "光模块", "光子", "inp", "激光", "ai网络"]):
+        lens.update({"bottleneck": 7, "upstream": 7, "capex": 8, "catalyst": 5})
+    if any(key.lower() in text for key in ["hbm", "memory", "存储", "nand", "dram"]):
+        lens.update({"bottleneck": 6, "upstream": 5, "capex": 8, "catalyst": 4})
+    if any(key.lower() in text for key in ["ai芯片", "gpu", "asic", "半导体", "euv", "设备"]):
+        lens.update({"bottleneck": max(lens["bottleneck"], 6), "upstream": max(lens["upstream"], 5), "capex": max(lens["capex"], 8), "catalyst": max(lens["catalyst"], 4)})
+    if any(key.lower() in text for key in ["ai服务器", "datacenter", "数据中心", "云计算", "neocloud"]):
+        lens.update({"capex": max(lens["capex"], 8), "customer": max(lens["customer"], 6), "catalyst": max(lens["catalyst"], 5)})
+    if any(key.lower() in text for key in ["电力", "power", "grid", "核电", "nuclear"]):
+        lens.update({"bottleneck": max(lens["bottleneck"], 6), "upstream": max(lens["upstream"], 5), "capex": max(lens["capex"], 7), "catalyst": max(lens["catalyst"], 4)})
+    if any(key.lower() in text for key in ["ai应用", "software", "软件", "广告", "内容"]):
+        lens.update({"customer": max(lens["customer"], 6), "catalyst": max(lens["catalyst"], 3)})
+    if any(key.lower() in text for key in ["小堆", "量子", "evtol", "商业航天", "矿企转型"]):
+        lens.update({"smallcap": max(lens["smallcap"], 6), "catalyst": max(lens["catalyst"], 5), "financing": min(lens["financing"], 4)})
+    if item.get("symbol") in {"SIVE.ST", "AXTI", "OKLO", "SMR", "QBTS", "RGTI", "ACHR", "JOBY"}:
+        lens["smallcap"] = max(lens["smallcap"], 7)
+    return lens
+
+
+def normalize_universe_item(item: dict, market_key: str) -> dict:
+    normalized = dict(item)
+    normalized["symbol"] = str(normalized.get("symbol") or "").upper()
+    normalized.setdefault("name", normalized["symbol"])
+    normalized.setdefault("role", "")
+    normalized.setdefault("themes", [])
+    if not normalized.get("lens"):
+        normalized["lens"] = inferred_lens(normalized, market_key)
+    return normalized
+
+
+def market_universe(market_key: str) -> list[dict]:
+    extras = {"hk": HK_BROAD_UNIVERSE, "us": US_BROAD_UNIVERSE}.get(market_key, [])
+    merged: dict[str, dict] = {}
+    for item in SERENITY_UNIVERSES.get(market_key, []) + extras:
+        normalized = normalize_universe_item(item, market_key)
+        symbol = normalized.get("symbol")
+        if not symbol:
+            continue
+        if symbol in merged:
+            themes = list(dict.fromkeys((merged[symbol].get("themes") or []) + (normalized.get("themes") or [])))
+            merged[symbol].update({key: value for key, value in normalized.items() if value not in ("", None, [])})
+            merged[symbol]["themes"] = themes
+        else:
+            merged[symbol] = normalized
+    return list(merged.values())
 
 
 def now_cn() -> dt.datetime:
@@ -495,7 +672,7 @@ def find_hot_pool(signal_day: dt.date) -> tuple[str, list[dict]]:
     return signal_day.isoformat(), []
 
 
-def load_broad_market_pool(limit: int = 260) -> list[dict]:
+def load_broad_market_pool(limit: int = 300, relaxed: bool = False) -> list[dict]:
     rows: list[dict] = []
     page_size = 80
     pages = max(1, min(5, math.ceil(limit / page_size)))
@@ -529,18 +706,25 @@ def load_broad_market_pool(limit: int = 260) -> list[dict]:
             turnover_pct = safe_float(item.get("f8"))
             price = safe_float(item.get("f2"))
             pb = safe_float(item.get("f23"))
-            if price <= 0 or amount_yi < 5:
+            min_amount = 3 if relaxed else 5
+            if price <= 0 or amount_yi < min_amount:
                 continue
-            if change_pct < 0.8 or change_pct >= 8.8:
-                continue
-            if turnover_pct < 1.2 or turnover_pct > 18:
-                continue
+            if relaxed:
+                if change_pct < -4.5 or change_pct >= 8.8:
+                    continue
+                if turnover_pct < 0.5 or turnover_pct > 22:
+                    continue
+            else:
+                if change_pct < 0.8 or change_pct >= 8.8:
+                    continue
+                if turnover_pct < 1.2 or turnover_pct > 18:
+                    continue
             if pb > 18:
                 continue
             rows.append(
                 {
                     "code": code,
-                    "reason": "全市场稳健候选",
+                    "reason": "全市场流动性候选" if relaxed else "全市场稳健候选",
                     "source": "eastmoney_broad",
                     "broad_amount_yi": round(amount_yi, 2),
                     "broad_change_pct": change_pct,
@@ -567,6 +751,36 @@ def merge_candidate_pools(event_rows: list[dict], broad_rows: list[dict]) -> lis
         if current_reason and current_reason not in previous_reason:
             merged[code]["reason"] = "、".join([part for part in [previous_reason, current_reason] if part])
         merged[code].update({key: value for key, value in row.items() if value not in ("", None)})
+    return list(merged.values())
+
+
+def cached_a_share_pool(limit: int = 300) -> list[dict]:
+    merged: dict[str, dict] = {}
+    paths = sorted(PICKS.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in paths[:220]:
+        try:
+            pick = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        section = ((pick.get("markets") or {}).get("a_share") or {})
+        decision = section.get("decision") or pick.get("decision") or {}
+        rows = [decision.get("primary"), decision.get("blocked_candidate"), *((decision.get("watchlist") or []))]
+        for row in rows:
+            if not row:
+                continue
+            code = str(row.get("code") or "")
+            if not code or code.startswith(("8", "4", "9")):
+                continue
+            merged.setdefault(
+                code,
+                {
+                    "code": code,
+                    "reason": row.get("reason_tags") or "历史候选池复扫",
+                    "source": "cached_history_pool",
+                },
+            )
+            if len(merged) >= limit:
+                return list(merged.values())
     return list(merged.values())
 
 
@@ -876,6 +1090,28 @@ def stock_kline(code: str, limit: int = 70) -> list[dict]:
     return tencent_stock_kline(code, limit)
 
 
+def cached_market_kline(market_key: str, symbol: str) -> list[dict]:
+    symbol = str(symbol or "").upper()
+    if not symbol:
+        return []
+    paths = sorted(PICKS.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in paths[:180]:
+        try:
+            pick = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        section = ((pick.get("markets") or {}).get(market_key) or {})
+        decision = section.get("decision") or {}
+        rows = [decision.get("primary"), decision.get("blocked_candidate"), *((decision.get("watchlist") or []))]
+        for row in rows:
+            if not row:
+                continue
+            code = str(row.get("code") or row.get("symbol") or "").upper()
+            if code == symbol and row.get("kline"):
+                return row["kline"]
+    return []
+
+
 def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}"
     params = {"range": "6mo", "interval": "1d", "includePrePost": "false"}
@@ -884,7 +1120,7 @@ def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
             url + "?" + urllib.parse.urlencode(params),
             headers={"User-Agent": UA, "Accept": "application/json"},
         )
-        raw = urllib.request.urlopen(req, timeout=16).read().decode("utf-8", "ignore")
+        raw = urllib.request.urlopen(req, timeout=6).read().decode("utf-8", "ignore")
         data = json.loads(raw)
         result = ((data.get("chart") or {}).get("result") or [None])[0]
         if not result:
@@ -926,6 +1162,25 @@ def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
             }
         )
     return rows[-limit:]
+
+
+def yahoo_kline_map(symbols: list[str], limit: int = 90) -> dict[str, list[dict]]:
+    result: dict[str, list[dict]] = {}
+    unique = list(dict.fromkeys(symbols))
+    if not unique:
+        return result
+    workers = min(12, max(1, len(unique)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(yahoo_chart_kline, symbol, limit): symbol for symbol in unique}
+        for future in concurrent.futures.as_completed(futures):
+            symbol = futures[future]
+            try:
+                rows = future.result()
+            except Exception:
+                rows = []
+            if rows:
+                result[symbol] = rows
+    return result
 
 
 def yahoo_realtime_quote(symbol: str, timeout: int = 6) -> dict:
@@ -1659,13 +1914,14 @@ def live_stock_payload(market_key: str, code: str) -> dict:
 def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
     policy = SERENITY_MARKET_POLICY.get(market_key, SERENITY_MARKET_POLICY["hk"])
     realtime_map = yahoo_realtime_quotes([item["symbol"] for item in candidates]) if market_key in ("hk", "us") else {}
+    kline_map = yahoo_kline_map([item["symbol"] for item in candidates]) if market_key in ("hk", "us") else {}
     final = []
     for candidate in candidates:
         symbol = candidate["symbol"]
         if market_key == "a_share":
             kline = stock_kline(symbol)
         else:
-            kline = yahoo_chart_kline(symbol)
+            kline = kline_map.get(symbol) or cached_market_kline(market_key, symbol)
         if len(kline) < 32:
             continue
         quote = quote_from_kline(kline)
@@ -2048,13 +2304,20 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
 
     hot_date, event_rows = find_hot_pool(signal_day)
     broad_rows = load_broad_market_pool()
-    hot_rows = merge_candidate_pools(event_rows, broad_rows)
+    broad_mode = "momentum"
+    if not broad_rows:
+        broad_rows = load_broad_market_pool(relaxed=True)
+        broad_mode = "liquidity_fallback"
+    cached_rows = cached_a_share_pool()
+    hot_rows = merge_candidate_pools(event_rows, broad_rows + cached_rows)
     market = index_quotes()
     industries = industry_heat()
     scored = score_candidates(hot_date, hot_rows, market)
     decision = make_decision(scored["candidates"], market)
-    hk_scored = score_serenity_candidates("hk", SERENITY_UNIVERSES["hk"])
-    us_scored = score_serenity_candidates("us", SERENITY_UNIVERSES["us"])
+    hk_universe = market_universe("hk")
+    us_universe = market_universe("us")
+    hk_scored = score_serenity_candidates("hk", hk_universe)
+    us_scored = score_serenity_candidates("us", us_universe)
     hk_decision = make_serenity_decision(hk_scored["candidates"], "hk")
     us_decision = make_serenity_decision(us_scored["candidates"], "us")
     forecast_end = add_trade_weekdays(target_day, FORECAST_TRADE_DAYS)
@@ -2066,8 +2329,11 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "decision": decision,
             "stats": {
                 "raw_pool_size": scored["raw_pool_size"],
+                "universe_size": scored["raw_pool_size"],
                 "event_pool_size": len(event_rows),
                 "broad_pool_size": len(broad_rows),
+                "cached_pool_size": len(cached_rows),
+                "broad_pool_mode": broad_mode,
                 "scored_size": scored["scored_size"],
                 "dragon_count": scored["dragon_count"],
             },
@@ -2079,6 +2345,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "decision": hk_decision,
             "stats": {
                 "raw_pool_size": hk_scored["raw_pool_size"],
+                "universe_size": len(hk_universe),
                 "event_pool_size": 0,
                 "broad_pool_size": 0,
                 "scored_size": hk_scored["scored_size"],
@@ -2092,6 +2359,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "decision": us_decision,
             "stats": {
                 "raw_pool_size": us_scored["raw_pool_size"],
+                "universe_size": len(us_universe),
                 "event_pool_size": 0,
                 "broad_pool_size": 0,
                 "scored_size": us_scored["scored_size"],
@@ -2118,6 +2386,8 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "hot_pool_size": scored["raw_pool_size"],
             "event_pool_size": len(event_rows),
             "broad_pool_size": len(broad_rows),
+            "cached_pool_size": len(cached_rows),
+            "broad_pool_mode": broad_mode,
             "scored_size": scored["scored_size"],
             "dragon_count": scored["dragon_count"],
         },
