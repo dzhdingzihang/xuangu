@@ -173,16 +173,83 @@ async function aShareKline(code, limit = 70) {
   return rows.filter((row) => row.date && row.close > 0);
 }
 
+function marketPrefix(code) {
+  const clean = String(code || "").replace(/\D/g, "");
+  return clean.startsWith("6") ? "sh" : "sz";
+}
+
+async function tencentAQuote(code) {
+  const symbol = `${marketPrefix(code)}${String(code || "").replace(/\D/g, "")}`;
+  const response = await fetch(`https://qt.gtimg.cn/q=${symbol}`, {
+    headers: { "user-agent": "Mozilla/5.0", referer: "https://gu.qq.com/" },
+  });
+  if (!response.ok) throw new Error(`Tencent quote ${response.status}`);
+  const buffer = await response.arrayBuffer();
+  const text = new TextDecoder("gbk").decode(buffer);
+  const body = (text.split('"')[1] || "").split("~");
+  if (body.length < 53) throw new Error("Tencent quote empty");
+  return {
+    code: String(code || ""),
+    name: body[1] || "",
+    price: num(body[3]),
+    previous_close: num(body[4]),
+    change_pct: num(body[32]),
+    high: num(body[33]),
+    low: num(body[34]),
+    volume: num(body[36]),
+    amount: num(body[37]),
+    source: "Tencent realtime quote",
+  };
+}
+
+async function tencentAKline(code, limit = 70) {
+  const symbol = `${marketPrefix(code)}${String(code || "").replace(/\D/g, "")}`;
+  const target = new URL("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get");
+  target.searchParams.set("param", `${symbol},day,,,${limit},qfq`);
+  const response = await fetch(target, {
+    headers: { "user-agent": "Mozilla/5.0", referer: "https://gu.qq.com/" },
+  });
+  if (!response.ok) throw new Error(`Tencent kline ${response.status}`);
+  const payload = await response.json();
+  const data = ((payload.data || {})[symbol] || {});
+  const rows = (data.qfqday || data.day || []).map((parts) => ({
+    date: parts[0],
+    open: num(parts[1]),
+    close: num(parts[2]),
+    high: num(parts[3]),
+    low: num(parts[4]),
+    volume: num(parts[5]),
+  }));
+  return rows.filter((row) => row.date && row.close > 0);
+}
+
 async function aShareLive(code) {
-  const [quotePayload, kline] = await Promise.all([
-    eastmoneyJson("https://push2.eastmoney.com/api/qt/stock/get", {
-      secid: eastmoneySecid(code),
-      fields: "f43,f44,f45,f46,f47,f48,f57,f58,f60,f168,f170",
-      fltt: "2",
-    }),
-    aShareKline(code),
-  ]);
-  const data = quotePayload.data || {};
+  let data = {};
+  let kline = [];
+  let source = "Eastmoney realtime quote";
+  try {
+    const [quotePayload, rows] = await Promise.all([
+      eastmoneyJson("https://push2.eastmoney.com/api/qt/stock/get", {
+        secid: eastmoneySecid(code),
+        fields: "f43,f44,f45,f46,f47,f48,f57,f58,f60,f168,f170",
+        fltt: "2",
+      }),
+      aShareKline(code),
+    ]);
+    data = quotePayload.data || {};
+    kline = rows;
+  } catch {
+    const [quote, rows] = await Promise.all([tencentAQuote(code), tencentAKline(code)]);
+    data = {
+      f43: quote.price,
+      f47: quote.volume,
+      f57: quote.code,
+      f58: quote.name,
+      f170: quote.change_pct,
+    };
+    kline = rows;
+    source = quote.source;
+  }
   const latest = kline[kline.length - 1] || {};
   const price = num(data.f43) || num(latest.close);
   return {
@@ -197,7 +264,7 @@ async function aShareLive(code) {
     current_change_pct: num(data.f170) || num(latest.change_pct),
     volume: num(data.f47) || num(latest.volume),
     session_label: "实时/延时",
-    source: "Eastmoney realtime quote",
+    source,
     updated_at: nowCN(),
     kline,
   };
@@ -223,7 +290,7 @@ async function yahooLive(symbol, market) {
     }))
     .filter((row) => row.close > 0 && row.high > 0 && row.low > 0);
   const price = num(meta.regularMarketPrice) || num((rows.at(-1) || {}).close);
-  const previous = num(meta.chartPreviousClose) || num((rows.at(-2) || {}).close);
+  const previous = num(meta.previousClose) || num(meta.regularMarketPreviousClose) || num((rows.at(-2) || {}).close) || num(meta.chartPreviousClose);
   const changePct = previous ? ((price - previous) / previous) * 100 : 0;
   return {
     ok: true,
