@@ -105,6 +105,201 @@ function stockChange(stock) {
   return stock.current_change_pct || stock.change_pct || stock.intraday_change_pct || 0;
 }
 
+function currentTradePrice(stock) {
+  if (!stock) return null;
+  const latest = ((stock.kline || []).filter((item) => Number(item.close) > 0).at(-1) || {});
+  const value =
+    stock.current_price ||
+    stock.realtime_price ||
+    (stock.realtime && stock.realtime.price) ||
+    Number(latest.close) ||
+    stock.entry_price ||
+    stock.price;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function tradeState(stock, hasPrimary = true) {
+  const entry = Number(stock && (stock.entry_price || stock.price || 0));
+  const current = currentTradePrice(stock) || entry;
+  const deviation = entry ? ((current - entry) / entry) * 100 : null;
+  if (!stock || !hasPrimary) {
+    return {
+      level: "level-no",
+      label: "不买",
+      text: "系统没有给出可执行标的，今天先不下单。",
+      deviation,
+    };
+  }
+  const stop = Number(stock.stop_loss || 0);
+  const take = Number(stock.take_profit_reference || 0);
+  if (stop && current <= stop) {
+    return {
+      level: "level-no",
+      label: "取消买入",
+      text: "实时价已经碰到或跌破止损区，说明走势没有按预期走，先保护本金。",
+      deviation,
+    };
+  }
+  if (take && current >= take * 0.98) {
+    return {
+      level: "level-no",
+      label: "不追高",
+      text: "实时价已经接近止盈位，继续追买的赔率不划算。",
+      deviation,
+    };
+  }
+  if (entry && current > entry * 1.03) {
+    return {
+      level: "level-caution",
+      label: "等回落",
+      text: "实时价比建议价高出较多，买进去后更容易先承受回撤。",
+      deviation,
+    };
+  }
+  if (entry && current >= entry * 0.985 && current <= entry * 1.01) {
+    return {
+      level: "level-buy",
+      label: "可按计划买",
+      text: "实时价仍在建议买入价附近，止损距离和上涨空间比较清楚。",
+      deviation,
+    };
+  }
+  return {
+    level: "level-caution",
+    label: "谨慎买入",
+    text: "实时价偏离建议价，适合小仓位或等待回到买入区。",
+    deviation,
+  };
+}
+
+function updateLiveTradeState(stock, hasPrimary = true) {
+  const state = tradeState(stock, hasPrimary);
+  const label = document.getElementById("liveDecisionLabel");
+  const text = document.getElementById("liveDecisionText");
+  const deviation = document.getElementById("liveDeviationText");
+  const box = document.getElementById("liveExecutionState");
+  if (box) box.className = `execution-state ${state.level}`;
+  if (label) label.textContent = state.label;
+  if (text) text.textContent = state.text;
+  if (deviation) deviation.textContent = state.deviation === null ? "实时偏离 --" : `实时偏离 ${signed(state.deviation)}`;
+}
+
+function waitConditions(stock, section) {
+  const marketNote = section && section.market_note;
+  const items = [
+    stock ? `价格回到建议买入价 ${priceText(stock.entry_price || stock.price)} 附近，最好不要高出 1%。` : "出现推荐度 62 分以上、止损距离清楚的候选股。",
+    "风险标签减少，尤其是追高、跌破 MA10、放量过猛这类短线风险。",
+    "K 线重新站稳 MA10。简单说，就是股价回到最近 10 天平均成本上方。",
+    marketNote || "市场环境没有系统性风险拦截，再考虑执行。",
+  ];
+  return items;
+}
+
+function twoWeekPlan(stock, hasPrimary = true) {
+  if (!stock || !hasPrimary) {
+    return [
+      ["今天", "不买，先保留现金。"],
+      ["触发条件", "等价格、趋势和风险同时变好。"],
+      ["未来2周", "只记录观察，不把没有胜率的机会硬做成交易。"],
+    ];
+  }
+  return [
+    ["买入区", `尽量在 ${priceText(stock.entry_price || stock.price)} 附近执行，偏离超过 3% 就等回落。`],
+    ["止损线", `跌破 ${priceText(stock.stop_loss)} 退出。简单说：先承认判断错了，保护本金。`],
+    ["止盈区", `接近 ${priceText(stock.take_profit_reference)} 分批止盈，避免利润坐过山车。`],
+    ["持有纪律", "最多按两周观察，若跌破 MA10 或推荐度明显下降，提前复核。"],
+  ];
+}
+
+function factorConclusion(label, score) {
+  if (score === "--") return "缺少数据";
+  const value = Number(score);
+  if (label.includes("UZI")) {
+    if (value >= 75) return "买点纪律和风控较好";
+    if (value >= 55) return "可以观察，仓位要轻";
+    return "风控不足，不宜重仓";
+  }
+  if (label.includes("CZSC")) {
+    if (value >= 70) return "结构偏多，趋势较顺";
+    if (value >= 50) return "结构未坏，但不够强";
+    return "结构偏弱，先等信号";
+  }
+  if (label.includes("Serenity")) {
+    if (value >= 70) return "产业链弹性较强";
+    if (value >= 45) return "题材一般，需看资金";
+    return "题材支撑不足";
+  }
+  if (value >= 72) return "达到可执行推荐";
+  if (value >= 62) return "可谨慎参与";
+  return "不满足买入阈值";
+}
+
+function candidateCompare(row) {
+  const leader = row && row.__leader;
+  if (!row) return "暂无排序对比。";
+  if (!leader && row.__rank === 1) {
+    return "当前排名第一：综合推荐度最高，说明趋势、买点、题材和风险过滤同时更占优。";
+  }
+  if (!leader) return "暂无排序对比。";
+  const gap = stockScore(leader) - stockScore(row);
+  if (gap <= 0) {
+    return "当前排名第一：综合推荐度最高，说明趋势、买点、题材和风险过滤同时更占优。";
+  }
+  return `比第一名低 ${gap} 分。简单说：它也有亮点，但趋势强度、买点舒服程度或风险控制不如第一名。`;
+}
+
+function historyStats(history) {
+  const total = history.length;
+  const marketKeys = ["a_share", "hk", "us"];
+  let buyCount = 0;
+  let noCount = 0;
+  let scoreTotal = 0;
+  let scoreCount = 0;
+  history.forEach((item) => {
+    marketKeys.forEach((key) => {
+      const summary = marketSummaryForHistory(item, key);
+      if (summary.has_primary) {
+        buyCount += 1;
+        const score = summary.recommendation_degree || summary.confidence;
+        if (typeof score === "number") {
+          scoreTotal += score;
+          scoreCount += 1;
+        }
+      } else {
+        noCount += 1;
+      }
+    });
+  });
+  const avg = scoreCount ? Math.round(scoreTotal / scoreCount) : 0;
+  return { total, buyCount, noCount, avg };
+}
+
+function marketWind(data) {
+  const items = (data.market && data.market.items) || [];
+  const risk = data.market && data.market.risk;
+  const up = items.filter((item) => Number(item.change_pct) > 0).length;
+  const down = items.filter((item) => Number(item.change_pct) < 0).length;
+  if (risk && risk !== "normal") {
+    return {
+      tone: "risk",
+      title: "市场风向偏弱",
+      text: "市场风险拦截开启，系统会降低追高股票权重，宁愿错过也先避免大回撤。",
+    };
+  }
+  if (up >= down) {
+    return {
+      tone: "good",
+      title: "市场风向可交易",
+      text: "指数环境没有触发系统性风险，强势题材和趋势股更容易被资金继续关注。",
+    };
+  }
+  return {
+    tone: "watch",
+    title: "市场风向分歧",
+    text: "下跌指数更多，推荐会更看重止损距离和当前价是否舒服，不适合盲目追高。",
+  };
+}
+
 function liveCode(stock) {
   return stock && (stock.code || stock.symbol || stock.ticker || stock.name);
 }
@@ -453,6 +648,8 @@ function renderPrimary(data) {
 
   if (!shown) {
     els.signalDate.textContent = `${section.label || "A股"} · 不买 / 无推荐 · 更新时间：${data.generated_label || data.generated_at || "--"}`;
+    const waits = waitConditions(null, section).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+    const plan = twoWeekPlan(null, false).map(([title, text]) => `<span><b>${escapeHtml(title)}</b>${escapeHtml(text)}</span>`).join("");
     els.primaryBlock.innerHTML = `
       <div class="primary-stock">
         <div class="stock-title">
@@ -460,6 +657,16 @@ function renderPrimary(data) {
           <span>没有可执行标的</span>
         </div>
         <p class="decision-copy">${escapeHtml(decision.message || "等待更强买点")}</p>
+        <div id="liveExecutionState" class="execution-state level-no">
+          <strong id="liveDecisionLabel">不买</strong>
+          <span id="liveDecisionText">没有达到两周上涨胜率要求，现金也是仓位。</span>
+          <em id="liveDeviationText">实时偏离 --</em>
+        </div>
+        <div class="wait-box">
+          <b>等待条件</b>
+          <ul>${waits}</ul>
+        </div>
+        <div class="trade-plan">${plan}</div>
       </div>
     `;
     renderFactorStrip(null);
@@ -470,6 +677,9 @@ function renderPrimary(data) {
   const confidence = stockScore(shown);
   const label = primary ? recommendationLabel(confidence, true) : "不买";
   const range = shown.estimated_2w_range || shown.estimated_2d_range || {};
+  const state = tradeState(shown, Boolean(primary));
+  const waits = waitConditions(shown, section).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const plan = twoWeekPlan(shown, Boolean(primary)).map(([title, text]) => `<span><b>${escapeHtml(title)}</b>${escapeHtml(text)}</span>`).join("");
   els.signalDate.textContent = `${section.label || "A股"} · ${shown.name} ${shown.code} · ${label} · 所属行业：${industryText(shown)} · 更新时间：${data.generated_label || data.generated_at || "--"}`;
   els.primaryBlock.innerHTML = `
     <div class="primary-stock">
@@ -485,12 +695,19 @@ function renderPrimary(data) {
         <strong>${label}</strong>
         <span>${actionSubtitle(label)}</span>
       </div>
+      <div id="liveExecutionState" class="execution-state ${state.level}">
+        <strong id="liveDecisionLabel">${escapeHtml(state.label)}</strong>
+        <span id="liveDecisionText">${escapeHtml(state.text)}</span>
+        <em id="liveDeviationText">${state.deviation === null ? "实时偏离 --" : `实时偏离 ${signed(state.deviation)}`}</em>
+      </div>
+      ${primary ? "" : `<div class="wait-box"><b>重新考虑买入，需要满足</b><ul>${waits}</ul></div>`}
+      <div class="trade-plan">${plan}</div>
       <p class="decision-copy">${escapeHtml(decision.message || "按建议价附近执行，跌破止损价必须退出。")}</p>
     </div>
   `;
   renderFactorStrip(shown);
   renderMiniChart(shown);
-  refreshPrimaryLive(shown, activeMarket);
+  refreshPrimaryLive(shown, activeMarket, Boolean(primary));
 }
 
 function klineChartSvg(stock, options = {}) {
@@ -649,13 +866,15 @@ function renderMiniChart(stock) {
   `;
 }
 
-async function refreshPrimaryLive(stock, market) {
+async function refreshPrimaryLive(stock, market, hasPrimary = true) {
   const token = ++primaryLiveToken;
   renderMiniChart({ ...stock, __liveLoading: true });
   try {
     const live = await fetchLiveStock(stock, market);
     if (token !== primaryLiveToken) return;
-    renderMiniChart(liveMerge(stock, live));
+    const merged = liveMerge(stock, live);
+    renderMiniChart(merged);
+    updateLiveTradeState(merged, hasPrimary);
   } catch (error) {
     if (token !== primaryLiveToken) return;
     renderMiniChart({ ...stock, __liveError: error.message || "实时行情暂不可用" });
@@ -680,6 +899,7 @@ function renderFactorStrip(primary) {
       <b>${escapeHtml(label)} <em title="满分100，系统会把原始模型分数折算到同一尺度">i</em></b>
       <strong>${score} / 100</strong>
       <i class="score-bar"><i style="width:${score === "--" ? 0 : score}%"></i></i>
+      <small>${escapeHtml(factorConclusion(label, score))}</small>
     `;
     els.factorStrip.append(chip);
   });
@@ -738,8 +958,14 @@ function renderCandidateRows(data) {
   if (!rows.some((row) => candidateKey(row) === selectedCandidateKey)) {
     selectedCandidateKey = candidateKey(rows[0]);
   }
+  const leader = rows[0];
   rows.forEach((row, index) => {
     row.__rank = index + 1;
+    Object.defineProperty(row, "__leader", {
+      value: leader,
+      enumerable: false,
+      configurable: true,
+    });
     const range = row.estimated_2w_range || row.estimated_2d_range || {};
     const confidence = stockScore(row);
     const reasons = (row.reasons || []).slice(0, 2).map((item) => escapeHtml(readableReason(item))).join("<br>");
@@ -774,6 +1000,8 @@ function renderCandidateRows(data) {
 function renderCandidateDetail(row, section, options = {}) {
   if (!els.candidateDetail || !row) return;
   const confidence = stockScore(row);
+  const candidateHasBuyCase = confidence >= 62;
+  const state = tradeState(row, candidateHasBuyCase);
   const latest = ((row.kline || []).filter((item) => Number(item.close) > 0).at(-1) || {});
   const currentPrice = row.current_price || row.realtime_price || (row.realtime && row.realtime.price) || Number(latest.close) || row.entry_price || row.price;
   const change = stockChange(row);
@@ -795,6 +1023,16 @@ function renderCandidateDetail(row, section, options = {}) {
       <button class="detail-jump" type="button">查看单股说明</button>
     </div>
     <div class="candidate-live-status ${row.__liveError ? "error" : ""}">${escapeHtml(liveStatus)}</div>
+    <div class="candidate-insight-grid">
+      <section class="candidate-insight">
+        <b>排序解释</b>
+        <span>${escapeHtml(candidateCompare(row))}</span>
+      </section>
+      <section class="candidate-insight ${state.level}">
+        <b>当前能不能买</b>
+        <span><strong>${escapeHtml(state.label)}</strong>：${escapeHtml(state.text)} ${state.deviation === null ? "" : `实时价相对建议价 ${signed(state.deviation)}。`}</span>
+      </section>
+    </div>
     <div class="candidate-detail-explain">
       <section class="candidate-detail-note positive-note">
         <h4>推荐理由</h4>
@@ -854,7 +1092,8 @@ function renderHistory(history, currentTarget) {
     els.historyStatus.textContent = "0 条";
     return;
   }
-  els.historyStatus.textContent = `${history.length} 条`;
+  const stats = historyStats(history);
+  els.historyStatus.textContent = `${stats.total} 条 · 推荐 ${stats.buyCount} · 不买 ${stats.noCount} · 均分 ${stats.avg || "--"}`;
   const grouped = new Map();
   history.forEach((item) => {
     const key = item.target_date || "未知日期";
@@ -897,6 +1136,11 @@ function renderHistory(history, currentTarget) {
 
 function renderMarket(data) {
   clearList(els.marketBlock);
+  const wind = marketWind(data);
+  const windCard = document.createElement("div");
+  windCard.className = `market-wind ${wind.tone}`;
+  windCard.innerHTML = `<strong>${escapeHtml(wind.title)}</strong><span>${escapeHtml(wind.text)}</span>`;
+  els.marketBlock.append(windCard);
   const note = document.createElement("p");
   note.textContent = data.market.risk_note || "指数环境未知";
   els.marketBlock.append(note);
