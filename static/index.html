@@ -5,27 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>智能选股</title>
     <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%231f5eff"/><path d="M16 42h7V29h8v8h8V22h9" fill="none" stroke="white" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>' />
-    <link rel="stylesheet" href="/static/styles.css?v=20260621-first8" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260624-market-tabs" />
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <div class="brand-mini">
-          <span class="brand-mark">↗</span>
+          <span class="brand-mark">▰</span>
           <strong>智能选股</strong>
         </div>
         <nav class="nav-tabs" aria-label="主导航">
-          <a class="active" href="#">决策看板</a>
-          <a href="#candidateRows">候选排行</a>
-          <a href="#historyList">历史记录</a>
-          <a href="#decisionPanel">组合跟踪</a>
-          <a href="#marketBlock">市场行情</a>
+          <a class="active" href="#">决策</a>
+          <a href="#candidateRows">候选</a>
+          <a href="#historyList">历史</a>
           <a href="#decisionPanel">策略说明</a>
-          <a href="#marketTabs">设置</a>
         </nav>
         <div class="update-meta">
           <span id="topUpdateTime">数据更新：读取中</span>
-          <span>AI Quant Stock Selector</span>
+          <span>下次刷新：按固定 8 个时间点</span>
         </div>
         <div class="toolbar">
           <label>
@@ -40,41 +37,41 @@
       <main>
         <section class="hero-panel">
           <div class="hero-copy">
-            <span class="hero-kicker">AI + UZI + CZSC + Serenity</span>
-            <h1>智能选股</h1>
-            <p id="subtitle">正在读取本次决策时间和观察窗口</p>
+            <span class="hero-kicker">AI STOCK DECISION WORKSPACE</span>
+            <h1>未来 2 周，哪只更值得买？</h1>
+            <p id="subtitle">正在读取实时价格、近 2 周走势、市场风向与策略评分</p>
           </div>
           <div class="hero-badges">
-            <span>未来2周</span>
-            <span>实时价</span>
-            <span>风控优先</span>
+            <span><b id="scanMetric">--</b>扫描</span>
+            <span><b id="pickMetric">--</b>推荐</span>
+            <span><b>风控</b>优先</span>
           </div>
         </section>
 
         <section class="market-decision-panel">
           <div class="section-title">
             <div>
-              <span class="label">市场选择</span>
-              <h2>今天是否值得买</h2>
+              <span class="label">市场切换</span>
+              <h2>选择市场，查看独立决策</h2>
             </div>
-            <span class="muted">目标是在指定价格买入后，未来2周获得正收益</span>
+            <span class="muted">A股 / 美股 / 港股 独立扫描，推荐变化会保留历史快照</span>
           </div>
-          <div id="marketTabs" class="market-tabs market-decision-cards">
-            <div class="market-card placeholder"><strong>A股</strong><span>读取中</span></div>
-            <div class="market-card placeholder"><strong>港股</strong><span>读取中</span></div>
-            <div class="market-card placeholder"><strong>美股</strong><span>读取中</span></div>
+          <div id="marketTabs" class="market-tabs market-switcher">
+            <button class="market-tab placeholder" type="button"><strong>A股</strong><span>读取中</span></button>
+            <button class="market-tab placeholder" type="button"><strong>美股</strong><span>读取中</span></button>
+            <button class="market-tab placeholder" type="button"><strong>港股</strong><span>读取中</span></button>
           </div>
         </section>
 
         <section class="stock-brief-panel" id="decisionPanel">
           <div class="panel-head">
-            <span class="label">单股说明</span>
+            <span class="label">当前市场工作台</span>
             <span id="signalDate" class="muted"></span>
           </div>
           <div class="stock-brief-grid">
             <article class="decision-panel">
               <div class="panel-head compact-head">
-                <span class="label">操作建议</span>
+                <span class="label">今日首选</span>
                 <span class="status" id="actionBadge">加载中</span>
               </div>
               <div id="primaryBlock" class="primary-block">
@@ -112,8 +109,8 @@
           <article class="history-panel">
             <div class="section-title">
               <div>
-                <span class="label">历史推荐记录</span>
-                <h2>按推荐时间追溯每次快照</h2>
+                <span class="label">历史推荐</span>
+                <h2>按时间追溯每次快照</h2>
               </div>
               <span id="historyStatus" class="muted">读取缓存中</span>
             </div>
@@ -123,8 +120,8 @@
           <article class="table-panel">
             <div class="section-title">
               <div>
-                <span class="label">候选排序</span>
-                <h2>当日 Top5</h2>
+                <span class="label">候选 Top5</span>
+                <h2>当前市场候选排序</h2>
               </div>
               <div id="candidateTabs" class="candidate-tabs"></div>
             </div>
@@ -163,6 +160,6 @@
         </section>
       </main>
     </div>
-    <script src="/static/app.js?v=20260621-first8"></script>
+    <script src="/static/app.js?v=20260624-market-tabs"></script>
   </body>
 </html>

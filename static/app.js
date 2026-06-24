@@ -20,10 +20,12 @@ const els = {
   industryPanel: document.getElementById("industryPanel"),
   industryBlock: document.getElementById("industryBlock"),
   marketTabs: document.getElementById("marketTabs"),
+  scanMetric: document.getElementById("scanMetric"),
+  pickMetric: document.getElementById("pickMetric"),
 };
 
 const LOCAL_HISTORY_KEY = "smart-stock-history-v2";
-const MARKET_ORDER = ["a_share", "hk", "us"];
+const MARKET_ORDER = ["a_share", "us", "hk"];
 const MARKET_LABELS = { a_share: "A股", hk: "港股", us: "美股" };
 let activeMarket = "a_share";
 let activeCandidateMarket = "a_share";
@@ -573,8 +575,14 @@ function candidateMarket(data) {
 }
 
 function renderHero(data) {
+  const markets = data.markets || {};
+  const stats = Object.values(markets).map((section) => (section && section.stats) || {});
+  const scanned = stats.reduce((sum, item) => sum + Number(item.universe_size || item.raw_pool_size || 0), 0);
+  const picked = Object.values(markets).filter((section) => section && section.decision && section.decision.primary).length;
   els.subtitle.textContent = `本次决策生成于 ${data.generated_label || data.generated_at || "--"}，观察窗口至 ${data.forecast_end_date || data.next_trade_date || "--"}`;
   els.topUpdateTime.textContent = `数据更新：${data.generated_label || data.generated_at || "--"}`;
+  if (els.scanMetric) els.scanMetric.textContent = scanned ? `${scanned} 支` : "--";
+  if (els.pickMetric) els.pickMetric.textContent = `${picked} 支`;
 }
 
 function renderMarketTabs(data) {
@@ -586,49 +594,54 @@ function renderMarketTabs(data) {
     const primary = decision.primary || null;
     const candidate = primary || decision.blocked_candidate || null;
     const confidence = candidate ? stockScore(candidate) : 0;
-    const range = candidate && (candidate.estimated_2w_range || candidate.estimated_2d_range);
     const label = recommendationLabel(confidence, Boolean(primary));
     const level = actionClass(confidence, Boolean(primary));
-    const tone = level === "level-caution" ? "amber" : level === "level-no" ? "red" : "green";
     const stats = section.stats || {};
-    const poolText = `候选池 ${stats.universe_size || stats.raw_pool_size || "--"} / 深度评分 ${stats.scored_size || "--"}`;
+    const poolText = `扫描 ${stats.universe_size || stats.raw_pool_size || "--"} · 评分 ${stats.scored_size || "--"}`;
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `market-card ${key === activeMarket ? "active" : ""} ${level}`;
+    button.className = `market-tab ${key === activeMarket ? "active" : ""} ${level}`;
+    const title = section.label || MARKET_LABELS[key];
     if (primary) {
       button.innerHTML = `
-        <div class="market-card-head">
-          <div class="market-name"><span class="market-icon">${escapeHtml((section.label || MARKET_LABELS[key]).slice(0, 1))}</span><strong>${escapeHtml(section.label || MARKET_LABELS[key])}</strong></div>
+        <div class="market-tab-main">
+          <span class="market-icon">${escapeHtml(title.slice(0, 1))}</span>
+          <strong>${escapeHtml(title)}</strong>
           <span class="pill ${level}">${label}</span>
         </div>
-        <div class="market-card-body">
-          <div class="market-main">
-            <div class="market-stock-name"><b>${escapeHtml(primary.name)}</b><em>${escapeHtml(primary.code)}</em></div>
-            <div class="market-score ${confidenceTone(confidence)}"><strong>${confidence}</strong><span>分</span></div>
-            ${starRating(confidence)}
-          </div>
-          <div class="market-metrics">
-            <span><small>建议买入价</small>${priceText(primary.entry_price || primary.price)}</span>
-            <span><small>止盈价</small>${priceText(primary.take_profit_reference)}</span>
-            <span><small>止损价</small>${priceText(primary.stop_loss)}</span>
-            <span class="market-range"><small>预估收益区间</small>${escapeHtml((range && range.text) || "--")}</span>
-          </div>
-          ${sparklineSvg(primary, tone)}
-          <div class="pool-meta">${escapeHtml(poolText)}</div>
+        <div class="market-tab-sub">
+          <span>${escapeHtml(primary.name)} ${escapeHtml(primary.code)}</span>
+          <b>${confidence}分</b>
         </div>
+        <small>${escapeHtml(poolText)}</small>
+        ${sparklineSvg(primary, level === "level-caution" ? "amber" : "green")}
+      `;
+    } else if (candidate) {
+      button.innerHTML = `
+        <div class="market-tab-main">
+          <span class="market-icon">${escapeHtml(title.slice(0, 1))}</span>
+          <strong>${escapeHtml(title)}</strong>
+          <span class="pill level-no">不买</span>
+        </div>
+        <div class="market-tab-sub">
+          <span>候选未通过：${escapeHtml(candidate.name || "暂无标的")}</span>
+          <b>${confidence || "--"}分</b>
+        </div>
+        <small>${escapeHtml(poolText)}</small>
+        ${sparklineSvg(candidate, "red")}
       `;
     } else {
       button.innerHTML = `
-        <div class="market-card-head">
-          <div class="market-name"><span class="market-icon">${escapeHtml((section.label || MARKET_LABELS[key]).slice(0, 1))}</span><strong>${escapeHtml(section.label || MARKET_LABELS[key])}</strong></div>
-          <span class="pill level-no">不买 / 无推荐</span>
+        <div class="market-tab-main">
+          <span class="market-icon">${escapeHtml(title.slice(0, 1))}</span>
+          <strong>${escapeHtml(title)}</strong>
+          <span class="pill level-no">无推荐</span>
         </div>
-        <div class="no-trade-copy">
-          <b>不买 / 无推荐</b>
-          <span>${escapeHtml(decision.message || "当前市场环境下未发现符合策略的优质标的，请继续观察，等待更佳机会")}</span>
-          <small>${escapeHtml(poolText)}</small>
-          ${sparklineSvg(candidate, "red")}
+        <div class="market-tab-sub">
+          <span>${escapeHtml(decision.message || "等待更好买点")}</span>
+          <b>--</b>
         </div>
+        <small>${escapeHtml(poolText)}</small>
       `;
     }
     button.addEventListener("click", () => {
@@ -643,6 +656,8 @@ function renderMarketTabs(data) {
 function renderPrimary(data) {
   const section = selectedMarket(data);
   const { decision } = section;
+  const currentWorkbenchLabel = document.querySelector("#decisionPanel .compact-head .label");
+  if (currentWorkbenchLabel) currentWorkbenchLabel.textContent = `${section.label || "A股"}今日首选`;
   const primary = decision.primary;
   const blocked = decision.blocked_candidate;
   const shown = primary || blocked;
@@ -652,23 +667,18 @@ function renderPrimary(data) {
 
   if (!shown) {
     els.signalDate.textContent = `${section.label || "A股"} · 不买 / 无推荐 · 更新时间：${data.generated_label || data.generated_at || "--"}`;
-    const waits = waitConditions(null, section).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
     const plan = twoWeekPlan(null, false).map(([title, text]) => `<span><b>${escapeHtml(title)}</b>${escapeHtml(text)}</span>`).join("");
     els.primaryBlock.innerHTML = `
-      <div class="primary-stock">
+      <div class="primary-stock empty-primary">
         <div class="stock-title">
-          <strong>不买</strong>
-          <span>没有可执行标的</span>
+          <span class="market-mini">${escapeHtml(section.label || "A股")}</span>
+          <strong>不买 / 无推荐</strong>
         </div>
         <p class="decision-copy">${escapeHtml(decision.message || "等待更强买点")}</p>
         <div id="liveExecutionState" class="execution-state level-no">
           <strong id="liveDecisionLabel">不买</strong>
           <span id="liveDecisionText">没有达到两周上涨胜率要求，现金也是仓位。</span>
           <em id="liveDeviationText">实时偏离 --</em>
-        </div>
-        <div class="wait-box">
-          <b>等待条件</b>
-          <ul>${waits}</ul>
         </div>
         <div class="trade-plan">${plan}</div>
       </div>
@@ -679,32 +689,54 @@ function renderPrimary(data) {
   }
 
   const confidence = stockScore(shown);
+  const hasPrimary = Boolean(primary);
   const label = primary ? recommendationLabel(confidence, true) : "不买";
   const range = shown.estimated_2w_range || shown.estimated_2d_range || {};
-  const state = tradeState(shown, Boolean(primary));
+  const state = tradeState(shown, hasPrimary);
   const waits = waitConditions(shown, section).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
-  const plan = twoWeekPlan(shown, Boolean(primary)).map(([title, text]) => `<span><b>${escapeHtml(title)}</b>${escapeHtml(text)}</span>`).join("");
+  const plan = twoWeekPlan(shown, hasPrimary).map(([title, text]) => `<span><b>${escapeHtml(title)}</b>${escapeHtml(text)}</span>`).join("");
+  const verdictMain = hasPrimary
+    ? `${priceText(shown.entry_price || shown.price)} 附近分批买入`
+    : "当前不买，等待更舒服买点";
+  const verdictSub = hasPrimary
+    ? `跌破 ${priceText(shown.stop_loss)} 先退出`
+    : `候选 ${shown.name} 未通过买入纪律，不为了交易而交易`;
+  const primaryActionText = hasPrimary ? "查看买入计划" : "查看风险原因";
+  const priceLabel = hasPrimary ? "建议买入" : "参考价";
   els.signalDate.textContent = `${section.label || "A股"} · ${shown.name} ${shown.code} · ${label} · 所属行业：${industryText(shown)} · 更新时间：${data.generated_label || data.generated_at || "--"}`;
   els.primaryBlock.innerHTML = `
     <div class="primary-stock">
-      <div class="operation-title"><span class="operation-icon">+</span><strong>操作建议</strong></div>
-      <div class="operation-lines">
-        <div><span>建议买入价</span><strong>${priceText(shown.entry_price || shown.price)}</strong></div>
-        <div><span>止盈价</span><strong class="red">${priceText(shown.take_profit_reference)}</strong></div>
-        <div><span>止损价</span><strong class="green">${priceText(shown.stop_loss)}</strong></div>
-        <div><span>预计收益区间</span><strong>${escapeHtml(range.text || "--")}</strong></div>
-        <div><span>持有周期</span><strong>2周以内</strong></div>
+      <div class="stock-title">
+        <span class="market-mini">${escapeHtml(section.label || "A股")}</span>
+        <strong>${escapeHtml(shown.name)}</strong>
+        <em>${escapeHtml(shown.code)}</em>
       </div>
-      <div class="operation-cta ${actionClass(confidence, Boolean(primary))}">
-        <strong>${label}</strong>
-        <span>${actionSubtitle(label)}</span>
+      <div class="hero-verdict">
+        <b>${escapeHtml(verdictMain)}</b>
+        <span>${escapeHtml(verdictSub)}</span>
+      </div>
+      <div class="score-lockup ${confidenceTone(confidence)}">
+        <strong>${confidence}</strong><span>/ 100</span>${starRating(confidence)}
+      </div>
+      <div class="price-rail">
+        <span><small>${priceLabel}</small><strong>${priceText(shown.entry_price || shown.price)}</strong></span>
+        <span><small>止盈价</small><strong class="red">${priceText(shown.take_profit_reference)}</strong></span>
+        <span><small>止损价</small><strong class="green">${priceText(shown.stop_loss)}</strong></span>
+        <span><small>2周预估</small><strong>${escapeHtml(range.text || "--")}</strong></span>
+      </div>
+      <div class="discipline-strip">
+        ${hasPrimary ? "<span>不追高</span><span>分批执行</span><span>跌破止损</span>" : "<span>现金等待</span><span>不追弱信号</span><span>等风险解除</span>"}
+      </div>
+      <div class="primary-actions">
+        <button type="button" class="${actionClass(confidence, hasPrimary)}">${primaryActionText}</button>
+        <span>${escapeHtml(actionSubtitle(label))}</span>
       </div>
       <div id="liveExecutionState" class="execution-state ${state.level}">
         <strong id="liveDecisionLabel">${escapeHtml(state.label)}</strong>
         <span id="liveDecisionText">${escapeHtml(state.text)}</span>
         <em id="liveDeviationText">${state.deviation === null ? "实时偏离 --" : `实时偏离 ${signed(state.deviation)}`}</em>
       </div>
-      ${primary ? "" : `<div class="wait-box"><b>重新考虑买入，需要满足</b><ul>${waits}</ul></div>`}
+      ${hasPrimary ? "" : `<div class="wait-box"><b>重新考虑买入，需要满足</b><ul>${waits}</ul></div>`}
       <div class="trade-plan">${plan}</div>
       <p class="decision-copy">${escapeHtml(decision.message || "按建议价附近执行，跌破止损价必须退出。")}</p>
     </div>
@@ -934,9 +966,13 @@ function renderCandidateTabs(data) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = key === activeCandidateMarket ? "active" : "";
-    button.textContent = `${MARKET_LABELS[key] || key} Top5`;
+    const section = markets[key];
+    const primary = section && section.decision && section.decision.primary;
+    button.textContent = `${MARKET_LABELS[key] || key}${primary ? " 有推荐" : " 无推荐"}`;
     button.addEventListener("click", () => {
       activeCandidateMarket = key;
+      activeMarket = key;
+      render(data);
       renderCandidateRows(data);
       renderCandidateTabs(data);
     });
@@ -1175,7 +1211,7 @@ function renderIndustry(data) {
 function render(data) {
   currentData = data;
   if (!data.markets || !data.markets[activeMarket]) activeMarket = "a_share";
-  if (!data.markets || !data.markets[activeCandidateMarket]) activeCandidateMarket = activeMarket;
+  activeCandidateMarket = activeMarket;
   const section = selectedMarket(data);
   renderHero(data);
   els.signalDate.textContent = `${section.label || "A股"} · ${data.generated_label || data.generated_at || ""}`;
