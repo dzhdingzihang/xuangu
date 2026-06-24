@@ -31,12 +31,17 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      - name: Check scheduled time slot
+        id: schedule_gate
+        if: github.event_name == 'schedule'
+        run: python scripts/schedule_gate.py
+
       - name: Install Serenity skill
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true')
         run: python scripts/install_serenity_skill.py
 
       - name: Generate smart pick snapshot
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true')
         run: python server.py --once --force
 
       - name: Install Node dependencies
@@ -46,13 +51,14 @@ jobs:
         run: npm run build
 
       - name: Commit generated snapshot
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true')
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update daily pick snapshot"
           file_pattern: data/picks/*.json
 
       - name: Deploy Worker
+        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
