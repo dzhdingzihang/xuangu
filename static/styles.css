@@ -2645,11 +2645,11 @@ main,
 }
 
 .hero-panel {
-  min-height: 162px;
+  min-height: 138px;
   margin-top: 0;
   border-radius: 0;
   box-shadow: none;
-  padding: 25px 28px;
+  padding: 18px 28px;
   background:
     linear-gradient(90deg, rgba(247, 250, 255, 0.96), rgba(247, 250, 255, 0.74) 54%, rgba(247, 250, 255, 0.9)),
     url("/static/assets/ai-finance-hero-light.png") center / cover;
@@ -2672,7 +2672,7 @@ main,
 
 .hero-copy h1 {
   color: #111827;
-  font-size: 47px;
+  font-size: 44px;
   letter-spacing: 0;
 }
 
@@ -2694,7 +2694,7 @@ main,
 }
 
 .hero-badges span {
-  min-height: 74px;
+  min-height: 62px;
   border-left: 1px solid rgba(17, 24, 39, 0.12);
   color: #394458;
   place-items: center;
@@ -2726,13 +2726,13 @@ main,
 }
 
 .market-tab {
-  min-height: 68px;
+  min-height: 58px;
   border-width: 0 1px 0 0;
   border-color: rgba(17, 24, 39, 0.1);
   border-radius: 0;
   background: rgba(255, 255, 255, 0.58);
   box-shadow: none;
-  padding: 12px 20px;
+  padding: 9px 20px;
 }
 
 .market-tab:first-child {
@@ -2768,7 +2768,7 @@ main,
 }
 
 .market-tab-main strong {
-  font-size: 23px;
+  font-size: 22px;
 }
 
 .market-tab-sub {
@@ -2785,7 +2785,7 @@ main,
 }
 
 .stock-brief-panel {
-  margin-top: 12px;
+  margin-top: 8px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -2815,8 +2815,8 @@ main,
 
 .decision-panel,
 .chart-panel {
-  min-height: 300px;
-  padding: 18px 20px;
+  min-height: 284px;
+  padding: 16px 20px;
 }
 
 .decision-panel {
@@ -2865,12 +2865,12 @@ main,
 
 .hero-verdict b {
   color: var(--green);
-  font-size: 30px;
+  font-size: 28px;
 }
 
 .hero-verdict span {
   color: #111827;
-  font-size: 20px;
+  font-size: 18px;
 }
 
 .score-lockup {
@@ -2899,7 +2899,7 @@ main,
 }
 
 .price-rail span {
-  padding: 12px 14px;
+  padding: 10px 14px;
   text-align: center;
 }
 
@@ -2918,10 +2918,7 @@ main,
   margin-top: -54px;
 }
 
-.execution-state {
-  margin-top: 10px;
-}
-
+.execution-state,
 .trade-plan,
 .decision-copy {
   display: none;
@@ -2940,7 +2937,9 @@ main,
 }
 
 .mini-chart svg {
-  min-height: 220px;
+  height: 230px;
+  min-height: 0;
+  max-height: 230px;
 }
 
 .volume-caption {
@@ -3088,4 +3087,72 @@ td {
 
 .market-context-grid {
   display: none;
+}
+
+/* Final fidelity pass against selected visual target */
+.decision-panel,
+.chart-panel {
+  height: 332px;
+  min-height: 332px;
+  padding: 14px 20px;
+  overflow: hidden;
+}
+
+.decision-panel .compact-head {
+  margin-bottom: 6px;
+}
+
+.stock-title strong {
+  font-size: 33px;
+}
+
+.hero-verdict {
+  padding: 6px 0;
+}
+
+.hero-verdict b {
+  font-size: 26px;
+}
+
+.price-rail {
+  margin-top: 4px;
+}
+
+.price-rail span {
+  padding: 8px 14px;
+}
+
+.primary-actions {
+  margin-top: 6px;
+}
+
+.primary-actions button {
+  height: 38px;
+}
+
+.primary-actions span {
+  display: inline-flex;
+  align-items: center;
+  height: 38px;
+  border: 1px solid rgba(17, 24, 39, 0.14);
+  border-radius: 8px;
+  color: #111827;
+  padding: 0 18px;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.chart-panel {
+  padding: 14px 20px 10px;
+}
+
+.mini-chart svg {
+  height: 218px;
+  min-height: 0;
+  max-height: 218px;
+}
+
+.discipline-strip span {
+  height: 26px;
+  padding: 0 10px;
 }
