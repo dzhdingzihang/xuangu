@@ -22,6 +22,8 @@ const els = {
   marketTabs: document.getElementById("marketTabs"),
   scanMetric: document.getElementById("scanMetric"),
   pickMetric: document.getElementById("pickMetric"),
+  stockDetailPanel: document.getElementById("stockDetailPanel"),
+  stockDetailContent: document.getElementById("stockDetailContent"),
 };
 
 const LOCAL_HISTORY_KEY = "smart-stock-history-v2";
@@ -959,6 +961,67 @@ function renderReasons(data) {
   }
 }
 
+function renderStockDetail(row, section) {
+  if (!els.stockDetailContent || !row) return;
+  const confidence = stockScore(row);
+  const range = row.estimated_2w_range || row.estimated_2d_range || {};
+  const reasons = (row.reasons || []).map((item) => `<li>${escapeHtml(readableReason(item))}</li>`).join("");
+  const risks = (row.risk_flags || []).map((item) => `<li>${escapeHtml(readableRisk(item))}</li>`).join("");
+  const plan = twoWeekPlan(row, confidence >= 62)
+    .map(([title, text]) => `<div><b>${escapeHtml(title)}</b><span>${escapeHtml(text)}</span></div>`)
+    .join("");
+  const factorItems = [
+    ["UZI 评分", row.uzi_panel_score, 60],
+    ["CZSC 评分", row.czsc_score, 35],
+    ["Serenity 评分", row.serenity_score ?? (row.serenity && row.serenity.score), 120],
+    ["综合评分", confidence, 100],
+  ]
+    .map(([label, value, max]) => {
+      const score = scoreDisplay(value, max);
+      return `
+        <div class="detail-score-card">
+          <span>${escapeHtml(label)}</span>
+          <strong>${score} / 100</strong>
+          <i class="score-bar"><i style="width:${score === "--" ? 0 : score}%"></i></i>
+          <em>${escapeHtml(factorConclusion(label, score))}</em>
+        </div>
+      `;
+    })
+    .join("");
+  els.stockDetailContent.innerHTML = `
+    <div class="detail-hero">
+      <div>
+        <span class="label">完整单股说明</span>
+        <h2>${escapeHtml(row.name)} <em>${escapeHtml(row.code)}</em></h2>
+        <p>${escapeHtml(section.label || MARKET_LABELS[activeCandidateMarket] || "当前市场")} · ${escapeHtml(industryText(row))} · ${escapeHtml(candidateCompare(row))}</p>
+      </div>
+      <div class="detail-quote">
+        <span>综合评分</span>
+        <strong>${confidence}分</strong>
+        ${starRating(confidence)}
+      </div>
+    </div>
+    <div class="detail-price-grid">
+      <span><small>建议/参考价</small><strong>${priceText(row.entry_price || row.price)}</strong></span>
+      <span><small>止盈价</small><strong class="red">${priceText(row.take_profit_reference)}</strong></span>
+      <span><small>止损价</small><strong class="green">${priceText(row.stop_loss)}</strong></span>
+      <span><small>2周预估</small><strong>${escapeHtml(range.text || "--")}</strong></span>
+    </div>
+    <div class="detail-plan-grid">${plan}</div>
+    <div class="detail-explain-grid">
+      <section class="detail-note positive-note">
+        <h3>完整推荐理由</h3>
+        <ul>${reasons || "<li>暂无足够清晰的推荐理由。</li>"}</ul>
+      </section>
+      <section class="detail-note risk-note">
+        <h3>完整风险说明</h3>
+        <ul>${risks || "<li>未触发硬风险，但仍需要按止损价执行。</li>"}</ul>
+      </section>
+    </div>
+    <div class="detail-score-grid">${factorItems}</div>
+  `;
+}
+
 function renderCandidateTabs(data) {
   clearList(els.candidateTabs);
   const markets = data.markets || { a_share: selectedMarket(data) };
@@ -1035,6 +1098,7 @@ function renderCandidateRows(data) {
   });
   const selected = rows.find((row) => candidateKey(row) === selectedCandidateKey) || rows[0];
   renderCandidateDetail(selected, section);
+  renderStockDetail(selected, section);
 }
 
 function renderCandidateDetail(row, section, options = {}) {
@@ -1087,9 +1151,8 @@ function renderCandidateDetail(row, section, options = {}) {
   const jump = els.candidateDetail.querySelector(".detail-jump");
   if (jump) {
     jump.addEventListener("click", () => {
-      activeMarket = activeCandidateMarket;
-      render(currentData);
-      document.getElementById("decisionPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      renderStockDetail(row, section);
+      document.getElementById("stockDetailPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   }
   if (!options.skipLive) refreshCandidateLive(row, section);
