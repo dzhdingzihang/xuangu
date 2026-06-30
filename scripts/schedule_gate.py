@@ -19,17 +19,20 @@ SLOTS = [
     (23, 58),
 ]
 EARLY_GRACE_SECONDS = 5 * 60
-LATE_GRACE_SECONDS = 12 * 60
+# GitHub scheduled workflows are not precise timers. They can be delayed by
+# tens of minutes, and occasionally longer when GitHub Actions is busy. Treat a
+# delayed start as belonging to the latest intended checkpoint instead of
+# silently skipping the trading snapshot.
+MAX_DELAY_SECONDS = 4 * 60 * 60
 
 
 def write_output(**values: str) -> None:
     output_path = os.environ.get("GITHUB_OUTPUT")
     lines = [f"{key}={value}" for key, value in values.items()]
+    print("\n".join(lines))
     if output_path:
         with open(output_path, "a", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
-    else:
-        print("\n".join(lines))
 
 
 def main() -> int:
@@ -43,21 +46,34 @@ def main() -> int:
         write_output(should_run="false", reason=f"not_trade_weekday:{now:%Y-%m-%d_%H:%M}")
         return 0
 
-    candidates = [
+    today_slots = [
         now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         for hour, minute in SLOTS
     ]
-    nearest = min(candidates, key=lambda slot: abs((now - slot).total_seconds()))
+    future_slots = [slot for slot in today_slots if slot > now]
+    if future_slots:
+        next_slot = min(future_slots)
+        early_delta = (next_slot - now).total_seconds()
+        if early_delta <= EARLY_GRACE_SECONDS:
+            wait_seconds = int(early_delta)
+            print(
+                f"Scheduled run arrived early at {now:%Y-%m-%d %H:%M:%S}; "
+                f"waiting {wait_seconds}s for slot {next_slot:%H:%M}."
+            )
+            time.sleep(wait_seconds)
+            now = dt.datetime.now(CN_TZ)
+
+    candidate_days = [now.date(), (now - dt.timedelta(days=1)).date()]
+    candidates = sorted(
+        dt.datetime.combine(day, dt.time(hour, minute), tzinfo=CN_TZ)
+        for day in candidate_days
+        for hour, minute in SLOTS
+    )
+    past_slots = [slot for slot in candidates if slot <= now]
+    nearest = past_slots[-1]
     delta = (now - nearest).total_seconds()
 
-    if -EARLY_GRACE_SECONDS <= delta < 0:
-        wait_seconds = int(abs(delta))
-        print(f"Scheduled run arrived early at {now:%Y-%m-%d %H:%M:%S}; waiting {wait_seconds}s for slot {nearest:%H:%M}.")
-        time.sleep(wait_seconds)
-        now = dt.datetime.now(CN_TZ)
-        delta = (now - nearest).total_seconds()
-
-    if 0 <= delta <= LATE_GRACE_SECONDS:
+    if 0 <= delta <= MAX_DELAY_SECONDS:
         write_output(
             should_run="true",
             reason=f"slot_ok:{nearest:%Y-%m-%d_%H:%M}:delta_seconds={int(delta)}",
