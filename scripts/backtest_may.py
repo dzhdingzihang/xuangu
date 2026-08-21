@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
+"""Small research-only parameter check; not production probability calibration.
+
+Limitations: this script uses weekday calendars, a single May 2026 window,
+signal-close fills, and no transaction costs or point-in-time universe. Its
+output must not be presented as an out-of-sample win rate.
+"""
 from __future__ import annotations
 
 import datetime as dt
-import itertools
 import json
 import pathlib
 import statistics
@@ -61,7 +66,7 @@ def score_row(candidate: dict, market_key: str, rows: list[dict], weights: dict)
     signal_rows = slice_until(rows, weights["signal_day"])
     if len(signal_rows) < 32:
         return None
-    lens_score, lens_reasons, lens_risks = server.serenity_lens_score(candidate)
+    lens_score, lens_reasons, lens_risks, alpha_profile = server.serenity_lens_score(candidate)
     chan = server.chan_signal(signal_rows)
     quote = server.quote_from_kline(signal_rows)
     metrics = chan.get("metrics") or {}
@@ -100,6 +105,7 @@ def score_row(candidate: dict, market_key: str, rows: list[dict], weights: dict)
         "exit_date": outcome["exit_date"] if outcome else None,
         "would_buy": confidence >= weights["threshold"] and hard < 2 and len(risks) < 4,
         "reasons": lens_reasons[:3] + chan["signals"][:3],
+        "alpha_profile": alpha_profile,
     }
 
 
@@ -192,7 +198,19 @@ def optimize(market_key: str) -> tuple[dict, list[dict], dict]:
 
 
 def main() -> None:
-    result = {}
+    result = {
+        "_meta": {
+            "research_only": True,
+            "calibrated_probability": False,
+            "limitations": [
+                "仅使用2026年5月单窗口",
+                "按工作日而非交易所官方日历",
+                "使用信号日收盘成交假设",
+                "未计交易费、价差、滑点和不可成交",
+                "不是样本外概率校准",
+            ],
+        }
+    }
     for market in ["a_share", "hk", "us"]:
         weights, rows, summary = optimize(market)
         result[market] = {"weights": weights, "summary": summary, "rows": rows}

@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "build": "python3 scripts/build_worker_assets.py",
-    "dev": "npm run build && wrangler dev",
+    "dev": "npm run build && wrangler dev --var LOCAL_DEV:1",
     "deploy": "npm run build && wrangler deploy",
     "check": "npm run build && wrangler deploy --dry-run"
   },
   "devDependencies": {
-    "wrangler": "^4.19.1"
+    "wrangler": "^4.124.0"
   }
 }

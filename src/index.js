@@ -3,7 +3,34 @@ const JSON_HEADERS = {
   "cache-control": "no-store",
 };
 
-const MODEL_VERSION = "smart-selector-2026-06-04.3-serenity-skill";
+const SECURITY_HEADERS = {
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+};
+
+function withSecurityHeaders(response) {
+  const headers = new Headers(response.headers);
+  Object.entries(SECURITY_HEADERS).forEach(([key, value]) => headers.set(key, value));
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function httpsRedirect(request, env) {
+  if (env && env.LOCAL_DEV === "1") return null;
+  const url = new URL(request.url);
+  const localHost = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+  const forwardedProto = request.headers.get("x-forwarded-proto");
+  if (!localHost && (url.protocol === "http:" || forwardedProto === "http")) {
+    url.protocol = "https:";
+    return Response.redirect(url.toString(), 308);
+  }
+  return null;
+}
 
 function json(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -24,6 +51,21 @@ function nowCN() {
     hour12: false,
   }).format(new Date());
   return `${parts.replace(" ", "T")}+08:00`;
+}
+
+function isoFromEpoch(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  const millis = parsed > 1_000_000_000_000 ? parsed : parsed * 1000;
+  const date = new Date(millis);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function isoFromCnTimestamp(value) {
+  const match = String(value || "").match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second] = match;
+  return `${year}-${month}-${day}T${hour}:${minute}:${second}+08:00`;
 }
 
 async function readAssetJson(env, path) {
@@ -198,6 +240,7 @@ async function tencentAQuote(code) {
     low: num(body[34]),
     volume: num(body[36]),
     amount: num(body[37]),
+    source_as_of: isoFromCnTimestamp(body[30]),
     source: "Tencent realtime quote",
   };
 }
@@ -227,17 +270,19 @@ async function aShareLive(code) {
   let data = {};
   let kline = [];
   let source = "Eastmoney realtime quote";
+  let sourceAsOf = null;
   try {
     const [quotePayload, rows] = await Promise.all([
       eastmoneyJson("https://push2.eastmoney.com/api/qt/stock/get", {
         secid: eastmoneySecid(code),
-        fields: "f43,f44,f45,f46,f47,f48,f57,f58,f60,f168,f170",
+        fields: "f43,f44,f45,f46,f47,f48,f57,f58,f60,f86,f168,f170",
         fltt: "2",
       }),
       aShareKline(code),
     ]);
     data = quotePayload.data || {};
     kline = rows;
+    sourceAsOf = isoFromEpoch(data.f86);
   } catch {
     const [quote, rows] = await Promise.all([tencentAQuote(code), tencentAKline(code)]);
     data = {
@@ -249,9 +294,11 @@ async function aShareLive(code) {
     };
     kline = rows;
     source = quote.source;
+    sourceAsOf = quote.source_as_of;
   }
   const latest = kline[kline.length - 1] || {};
   const price = num(data.f43) || num(latest.close);
+  const fetchedAt = nowCN();
   return {
     ok: true,
     market: "a_share",
@@ -263,9 +310,12 @@ async function aShareLive(code) {
     change_pct: num(data.f170) || num(latest.change_pct),
     current_change_pct: num(data.f170) || num(latest.change_pct),
     volume: num(data.f47) || num(latest.volume),
+    volume_unit: "lot",
     session_label: "实时/延时",
     source,
-    updated_at: nowCN(),
+    source_as_of: sourceAsOf,
+    fetched_at: fetchedAt,
+    updated_at: fetchedAt,
     kline,
   };
 }
@@ -292,6 +342,8 @@ async function yahooLive(symbol, market) {
   const price = num(meta.regularMarketPrice) || num((rows.at(-1) || {}).close);
   const previous = num(meta.previousClose) || num(meta.regularMarketPreviousClose) || num((rows.at(-2) || {}).close) || num(meta.chartPreviousClose);
   const changePct = previous ? ((price - previous) / previous) * 100 : 0;
+  const sourceAsOf = isoFromEpoch(meta.regularMarketTime) || isoFromEpoch(timestamps.at(-1));
+  const fetchedAt = nowCN();
   return {
     ok: true,
     market,
@@ -303,9 +355,12 @@ async function yahooLive(symbol, market) {
     change_pct: changePct,
     current_change_pct: changePct,
     volume: num(meta.regularMarketVolume) || num((rows.at(-1) || {}).volume),
+    volume_unit: "share",
     session_label: meta.marketState || "实时/延时",
     source: "Yahoo chart quote",
-    updated_at: nowCN(),
+    source_as_of: sourceAsOf,
+    fetched_at: fetchedAt,
+    updated_at: fetchedAt,
     kline: rows,
   };
 }
@@ -324,8 +379,16 @@ async function handleApi(request, env) {
       ok: true,
       time: nowCN(),
       platform: "cloudflare-workers",
+      snapshot_generation: "github-actions",
+      recompute_supported: false,
       has_latest: Boolean(latest),
       latest_path: latest ? "/data/picks/latest.json" : null,
+      schema_version: latest ? latest.schema_version || null : null,
+      selector_mode: latest ? latest.selector_mode || null : null,
+      model_version: latest ? latest.model_version || null : null,
+      weights_version: latest ? latest.weights_version || null : null,
+      universe_version: latest ? latest.universe_version || null : null,
+      generated_at: latest ? latest.generated_at || null : null,
     });
   }
 
@@ -362,6 +425,18 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === "/api/pick") {
+    if (url.searchParams.get("force") === "1") {
+      return json(
+        {
+          error: "RECOMPUTE_NOT_SUPPORTED",
+          message: "Cloudflare Worker 只提供不可变选股快照，不会在请求内重算模型。请运行 GitHub Actions 的 Deploy Cloudflare Worker workflow 生成新快照。",
+          recompute_supported: false,
+          snapshot_generation: "github-actions",
+          workflow: ".github/workflows/deploy-worker.yml",
+        },
+        409,
+      );
+    }
     const snapshotKey = url.searchParams.get("snapshot");
     if (snapshotKey) {
       const snapshot = await loadPickBySnapshot(env, snapshotKey);
@@ -394,10 +469,16 @@ async function handleApi(request, env) {
 
 export default {
   async fetch(request, env) {
+    const redirect = httpsRedirect(request, env);
+    if (redirect) return withSecurityHeaders(redirect);
+
     const url = new URL(request.url);
+    let response;
     if (url.pathname.startsWith("/api/")) {
-      return handleApi(request, env);
+      response = await handleApi(request, env);
+    } else {
+      response = await env.ASSETS.fetch(request);
     }
-    return env.ASSETS.fetch(request);
+    return withSecurityHeaders(response);
   },
 };

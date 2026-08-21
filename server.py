@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime as dt
+import hashlib
 import http.server
 import json
 import math
@@ -34,10 +35,52 @@ CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-06-21.3-large-ai-universe"
+MODEL_VERSION = "smart-selector-2026-08-19.1-v2-shadow"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 SERENITY_SKILL_DIR = pathlib.Path.home() / ".agents" / "skills" / "serenity-skill"
+SCHEMA_VERSION = "selector-snapshot-v2"
+SELECTOR_MODE = "legacy_active_v2_shadow"
+V2_WEIGHTS_VERSION = "v2-rule-prior-1"
+UNIVERSE_VERSION = "recall-v2-1"
+
+V2_REGIME_WEIGHTS = {
+    "trend_risk_on": {
+        "event": 0.20,
+        "technical": 0.30,
+        "industry": 0.20,
+        "liquidity_flow": 0.20,
+        "quality": 0.10,
+    },
+    "range": {
+        "event": 0.25,
+        "technical": 0.20,
+        "industry": 0.15,
+        "liquidity_flow": 0.20,
+        "quality": 0.20,
+    },
+    "risk_off": {
+        "event": 0.15,
+        "technical": 0.15,
+        "industry": 0.10,
+        "liquidity_flow": 0.30,
+        "quality": 0.30,
+    },
+    "high_vol": {
+        "event": 0.30,
+        "technical": 0.15,
+        "industry": 0.10,
+        "liquidity_flow": 0.30,
+        "quality": 0.15,
+    },
+    "unknown": {
+        "event": 0.20,
+        "technical": 0.25,
+        "industry": 0.15,
+        "liquidity_flow": 0.25,
+        "quality": 0.15,
+    },
+}
 
 for path in (CACHE, PICKS):
     path.mkdir(parents=True, exist_ok=True)
@@ -653,6 +696,7 @@ def normalize_universe_item(item: dict, market_key: str) -> dict:
     normalized.setdefault("themes", [])
     if not normalized.get("lens"):
         normalized["lens"] = inferred_lens(normalized, market_key)
+    ensure_candidate_lineage(normalized, market_key)
     return normalized
 
 
@@ -890,6 +934,710 @@ def safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def parse_cn_quote_timestamp(value) -> str | None:
+    match = re.match(r"^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})", str(value or ""))
+    if not match:
+        return None
+    try:
+        moment = dt.datetime(*(int(part) for part in match.groups()), tzinfo=CN_TZ)
+    except ValueError:
+        return None
+    return moment.isoformat(timespec="seconds")
+
+
+def broad_recall_routes(row: dict) -> list[str]:
+    """Classify an admitted broad-market row without using valuation as a gate."""
+    routes = ["liquidity"]
+    change_pct = safe_float(row.get("broad_change_pct", row.get("change_pct")))
+    routes.append("momentum" if change_pct >= 0.8 else "pullback")
+    return routes
+
+
+def _route_priority(route: str) -> int:
+    return {
+        "event": 0,
+        "momentum": 1,
+        "liquidity": 2,
+        "pullback": 3,
+        "history": 4,
+        "curated": 5,
+        "legacy": 6,
+    }.get(route, 99)
+
+
+def _recall_routes_from_row(row: dict, market_key: str = "a_share") -> list[dict]:
+    existing = ((row.get("candidate_lineage") or {}).get("recall_routes") or [])
+    if existing:
+        return [dict(item) for item in existing]
+
+    explicit = row.get("recall_route")
+    explicit_many = row.get("recall_routes") or []
+    source = str(row.get("source") or "")
+    if explicit:
+        route_names = [str(explicit)]
+    elif explicit_many:
+        route_names = [str(item) for item in explicit_many]
+    elif source in {"ths", "ths_event", "announcement", "official_announcement"}:
+        route_names = ["event"]
+    elif source == "eastmoney_broad":
+        route_names = broad_recall_routes(row)
+    elif source == "cached_history_pool":
+        route_names = ["history"]
+    elif market_key in ("hk", "us"):
+        route_names = ["curated"]
+        source = source or "repository_universe"
+    else:
+        route_names = ["legacy"]
+        source = source or "legacy_candidate"
+
+    observed_at = row.get("observed_at") or row.get("updated_at")
+    published_at = row.get("published_at")
+    url = row.get("url") or row.get("source_url")
+    evidence_status = "verified" if published_at and url else "partial"
+    records = []
+    for route in route_names:
+        record = {
+            "route": route,
+            "source": source or None,
+            "reason": row.get("reason") or row.get("reason_tags") or None,
+            "published_at": published_at,
+            "observed_at": observed_at,
+            "url": url,
+            "evidence_status": evidence_status,
+        }
+        if row.get("recall_metrics"):
+            record["metrics"] = dict(row["recall_metrics"])
+        if route == "history":
+            record.update(
+                {
+                    "history_signal_date": row.get("history_signal_date"),
+                    "age_trade_weekdays": row.get("history_age_trade_weekdays"),
+                    "decay_weight": row.get("history_decay_weight"),
+                }
+            )
+        records.append(record)
+    return records
+
+
+def _dedupe_recall_routes(routes: list[dict]) -> list[dict]:
+    unique: dict[tuple, dict] = {}
+    for item in routes:
+        key = (
+            item.get("route"),
+            item.get("source"),
+            item.get("reason"),
+            item.get("published_at"),
+            item.get("url"),
+        )
+        unique.setdefault(key, dict(item))
+    return sorted(unique.values(), key=lambda item: (_route_priority(str(item.get("route") or "")), str(item.get("source") or "")))
+
+
+def ensure_candidate_lineage(candidate: dict, market_key: str) -> dict:
+    code = str(candidate.get("code") or candidate.get("symbol") or "")
+    lineage = dict(candidate.get("candidate_lineage") or {})
+    routes = _dedupe_recall_routes(
+        [
+            *_recall_routes_from_row(candidate, market_key),
+            *((lineage.get("recall_routes") or [])),
+        ]
+    )
+    route_names = list(dict.fromkeys(str(item.get("route") or "legacy") for item in routes))
+    observed = sorted(str(item.get("observed_at")) for item in routes if item.get("observed_at"))
+    origin = lineage.get("universe_origin")
+    if not origin:
+        origin = "curated_static" if market_key in ("hk", "us") else "dynamic_snapshot"
+    lineage.update(
+        {
+            "candidate_id": lineage.get("candidate_id") or f"{market_key}:{code}",
+            "universe_origin": origin,
+            "recall_routes": routes,
+            "route_count": len(route_names),
+            "primary_route": min(route_names, key=_route_priority) if route_names else "legacy",
+            "first_seen_at": lineage.get("first_seen_at") or (observed[0] if observed else None),
+            "last_seen_at": lineage.get("last_seen_at") or (observed[-1] if observed else None),
+        }
+    )
+    candidate["candidate_lineage"] = lineage
+    return lineage
+
+
+def trade_weekday_age(signal_date: str, as_of: dt.date) -> int | None:
+    try:
+        observed = dt.date.fromisoformat(str(signal_date))
+    except (TypeError, ValueError):
+        return None
+    if observed > as_of:
+        return None
+    age = 0
+    cursor = observed
+    while cursor < as_of:
+        cursor += dt.timedelta(days=1)
+        if cursor.weekday() < 5:
+            age += 1
+    return age
+
+
+def is_history_candidate_fresh(signal_date: str, as_of: dt.date, max_age_trade_weekdays: int = 5) -> bool:
+    age = trade_weekday_age(signal_date, as_of)
+    if age is None:
+        return False
+    return age < max_age_trade_weekdays
+
+
+def classify_market_regime(market_key: str, market: dict, candidates: list[dict]) -> dict:
+    """Return an explainable prior; it is deliberately not a trained probability."""
+    state = "unknown"
+    warnings: list[str] = []
+    evidence: list[str] = []
+    rule_strength = 0.0
+
+    explicit = market.get("regime") or market.get("state")
+    if explicit in V2_REGIME_WEIGHTS:
+        state = str(explicit)
+        rule_strength = 1.0
+        evidence.append("使用市场上下文提供的显式状态")
+    elif market_key == "a_share":
+        risk = market.get("risk")
+        index_items = market.get("items") or []
+        changes = [safe_float(item.get("change_pct")) for item in index_items if item.get("change_pct") is not None]
+        average_change = mean(changes) if changes else 0.0
+        if risk == "high":
+            state = "risk_off"
+            rule_strength = 0.9
+            evidence.append("A股主要指数触发高风险规则")
+        elif changes and max(abs(item) for item in changes) >= 2.5:
+            state = "high_vol"
+            rule_strength = 0.75
+            evidence.append("主要指数单日波动达到高波动阈值")
+        elif risk == "normal" and changes and average_change >= 0.6:
+            state = "trend_risk_on"
+            rule_strength = 0.7
+            evidence.append("主要指数多数偏强")
+        elif risk in {"normal", "medium"} and changes:
+            state = "range"
+            rule_strength = 0.6
+            evidence.append("现有指数规则未触发趋势或高风险状态")
+        else:
+            warnings.append("A股市场基准数据不足")
+    else:
+        warnings.append(f"{market_key} 市场基准数据不足，使用未知状态先验")
+
+    if state == "unknown" and not warnings:
+        warnings.append("市场基准数据不足")
+    return {
+        "state": state,
+        "rule_strength": round(rule_strength, 2),
+        "effective_weights": dict(V2_REGIME_WEIGHTS[state]),
+        "weights_version": V2_WEIGHTS_VERSION,
+        "evidence": evidence,
+        "warnings": warnings,
+    }
+
+
+def _feature(feature_id: str, value, score: float, evidence: str, used: bool = True) -> dict:
+    return {
+        "feature_id": feature_id,
+        "value": value,
+        "score": round(clamp(score, 0, 100), 2),
+        "used_in_score": bool(used),
+        "availability": "available" if used else "missing",
+        "evidence": evidence,
+    }
+
+
+def _feature_group(features: list[dict], weight: float) -> dict:
+    used = [item for item in features if item.get("used_in_score")]
+    score = mean([safe_float(item.get("score")) for item in used]) if used else 0.0
+    return {
+        "score": round(score, 2),
+        "weight": round(weight, 4),
+        "contribution": round(score * weight, 2),
+        "availability": "available" if used else "missing",
+        "features": features,
+    }
+
+
+def build_factor_groups(candidate: dict, weights: dict) -> dict:
+    lineage = candidate.get("candidate_lineage") or {}
+    recall_routes = lineage.get("recall_routes") or []
+    event_routes = [item for item in recall_routes if item.get("route") == "event"]
+    event_score = 82 if event_routes else 0
+    event_features = [
+        _feature(
+            "event.recall_evidence",
+            len(event_routes) if event_routes else None,
+            event_score,
+            "事件来源链存在" if event_routes else "没有结构化事件来源；旧题材文本不参与V2事件计分",
+            used=bool(event_routes),
+        )
+    ]
+
+    chan_metrics = ((candidate.get("chan") or {}).get("metrics") or {})
+    setup_flags = chan_metrics.get("setup_flags") or candidate.get("setup_flags") or []
+    technical_features = [
+        _feature(
+            "technical.setup_confirmation",
+            list(setup_flags),
+            88 if setup_flags else 32,
+            "二买/三买或回踩确认" if setup_flags else "没有明确买点确认",
+        )
+    ]
+    if "distance_ma20_pct" in chan_metrics or "distance_ma10_pct" in chan_metrics:
+        distance_ma20 = safe_float(chan_metrics.get("distance_ma20_pct"))
+        distance_ma10 = safe_float(chan_metrics.get("distance_ma10_pct"))
+        if distance_ma20 >= 0 and -2 <= distance_ma10 <= 6:
+            trend_score = 82
+        elif distance_ma20 >= -3 and distance_ma10 <= 10:
+            trend_score = 62
+        else:
+            trend_score = 28
+        technical_features.append(
+            _feature(
+                "technical.ma_structure",
+                {"distance_ma10_pct": distance_ma10, "distance_ma20_pct": distance_ma20},
+                trend_score,
+                "均线距离只在技术组计分一次",
+            )
+        )
+    else:
+        technical_features.append(_feature("technical.ma_structure", None, 50, "缺少均线结构", used=False))
+
+    if "pct_5d" in chan_metrics:
+        pct_5d = safe_float(chan_metrics.get("pct_5d"))
+        momentum_score = 78 if -3 <= pct_5d <= 12 else 48 if pct_5d <= 18 else 22
+        technical_features.append(
+            _feature("technical.return_5d_health", pct_5d, momentum_score, "5日涨幅只在技术组计分一次")
+        )
+    else:
+        technical_features.append(_feature("technical.return_5d_health", None, 50, "缺少5日涨幅", used=False))
+
+    themes = candidate.get("theme_tags") or []
+    role = ((candidate.get("serenity") or {}).get("role") or candidate.get("role") or "")
+    industry_features = [
+        _feature(
+            "industry.theme_relevance",
+            list(themes),
+            35 + min(len(themes), 5) * 10,
+            "保留旧题材标签，但不重复叠加旧方法论总分",
+            used=bool(themes),
+        ),
+        _feature(
+            "industry.role_specificity",
+            role or None,
+            68 if role else 50,
+            "Serenity产业链角色" if role else "缺少产业链角色",
+            used=bool(role),
+        ),
+    ]
+
+    amount_yi = safe_float(candidate.get("amount_yi"))
+    turnover_pct = safe_float(candidate.get("turnover_pct"))
+    vol_ratio = safe_float(candidate.get("vol_ratio"))
+    dragon_net = safe_float(candidate.get("dragon_net_wan"))
+    liquidity_features = [
+        _feature(
+            "liquidity.amount",
+            amount_yi if amount_yi else None,
+            82 if amount_yi >= 10 else 68 if amount_yi >= 3 else 35,
+            "成交额只在流动性组计分一次",
+            used=amount_yi > 0,
+        ),
+        _feature(
+            "liquidity.turnover",
+            turnover_pct if turnover_pct else None,
+            78 if 1 <= turnover_pct <= 18 else 42,
+            "换手率只在流动性组计分一次",
+            used=turnover_pct > 0,
+        ),
+        _feature(
+            "liquidity.volume_ratio",
+            vol_ratio if vol_ratio else None,
+            80 if 0.75 <= vol_ratio <= 2.8 else 35 if vol_ratio > 3.5 else 55,
+            "量比只在流动性组计分一次",
+            used=vol_ratio > 0,
+        ),
+        _feature(
+            "flow.dragon_tiger_net",
+            dragon_net if dragon_net else None,
+            80 if dragon_net > 0 else 35,
+            "龙虎榜净流入" if dragon_net > 0 else "无龙虎榜资金证据",
+            used=dragon_net != 0,
+        ),
+    ]
+
+    dimensions = ((((candidate.get("serenity") or {}).get("alpha_profile") or {}).get("dimensions")) or {})
+    dimension_values = [safe_float(value) for value in dimensions.values() if value is not None]
+    quality_features = [
+        _feature(
+            "quality.serenity_alpha_prior",
+            dict(dimensions) if dimensions else None,
+            mean(dimension_values) * 20 if dimension_values else 50,
+            "Serenity五维作为研究先验，不解释为财务实测值",
+            used=bool(dimension_values),
+        )
+    ]
+    financing_warnings = [item for item in (candidate.get("risk_flags") or []) if "稀释" in item or "融资" in item]
+    quality_features.append(
+        _feature(
+            "quality.financing_warning",
+            financing_warnings or None,
+            25 if financing_warnings else 60,
+            "融资/稀释风险文本" if financing_warnings else "没有结构化融资数据",
+            used=bool(financing_warnings),
+        )
+    )
+
+    raw_groups = {
+        "event": event_features,
+        "technical": technical_features,
+        "industry": industry_features,
+        "liquidity_flow": liquidity_features,
+        "quality": quality_features,
+    }
+    return {name: _feature_group(features, safe_float(weights.get(name))) for name, features in raw_groups.items()}
+
+
+def legacy_score_contract(candidate: dict) -> dict:
+    recommendation_degree = candidate.get("recommendation_degree")
+    if recommendation_degree is None:
+        recommendation_degree = candidate.get("confidence")
+    return {
+        "active": True,
+        "score": candidate.get("score"),
+        "recommendation_degree": recommendation_degree,
+        "components": {
+            "preliminary": safe_float(candidate.get("pre_score")),
+            "chan": safe_float(candidate.get("chan_score")),
+            "czsc": safe_float(candidate.get("czsc_score")),
+            "serenity": safe_float(candidate.get("serenity_score")),
+            "uzi": safe_float(candidate.get("uzi_score")),
+            "uzi_panel": safe_float(candidate.get("uzi_panel_score")),
+        },
+    }
+
+
+def build_v2_shadow(candidate: dict, market_key: str, market: dict) -> dict:
+    ensure_candidate_lineage(candidate, market_key)
+    regime = classify_market_regime(market_key, market, [candidate])
+    groups = build_factor_groups(candidate, regime["effective_weights"])
+    score = round(sum(safe_float(group.get("contribution")) for group in groups.values()), 2)
+    positive = sorted(groups.items(), key=lambda item: item[1]["contribution"], reverse=True)[:3]
+    return {
+        "mode": "shadow",
+        "rule_score": score,
+        "factor_groups": groups,
+        "market_regime": regime["state"],
+        "regime": regime,
+        "weights_version": V2_WEIGHTS_VERSION,
+        "explanation": {
+            "why_recalled": [item.get("reason") for item in candidate["candidate_lineage"]["recall_routes"] if item.get("reason")],
+            "leading_groups": [{"group": name, "contribution": value["contribution"]} for name, value in positive],
+            "note": "V2为影子排序，不替代当前Legacy推荐决策。",
+        },
+    }
+
+
+def assess_data_quality(candidate: dict, market_key: str, market: dict) -> dict:
+    realtime = candidate.get("realtime") or {}
+    price = safe_float(candidate.get("entry_price") or candidate.get("price"))
+    kline_count = len(candidate.get("kline") or [])
+    lineage_ok = bool(((candidate.get("candidate_lineage") or {}).get("recall_routes") or []))
+    market_ok = (
+        bool(market.get("risk") in {"normal", "medium", "high"} and market.get("items"))
+        if market_key == "a_share"
+        else bool(market.get("benchmarks"))
+    )
+    quote_state = (
+        "stale"
+        if realtime.get("stale")
+        else "fresh"
+        if price > 0 and realtime.get("source_as_of")
+        else "available"
+        if price > 0
+        else "missing"
+    )
+    inputs = [
+        {
+            "id": "quote",
+            "state": quote_state,
+            "required": True,
+            "source": realtime.get("source"),
+            "source_as_of": realtime.get("source_as_of"),
+            "fetched_at": realtime.get("fetched_at") or realtime.get("updated_at"),
+        },
+        {"id": "kline", "state": "fresh" if kline_count >= 32 else "missing", "required": True, "samples": kline_count},
+        {"id": "market", "state": "fresh" if market_ok else "missing", "required": False},
+        {"id": "lineage", "state": "fresh" if lineage_ok else "missing", "required": False},
+    ]
+    weights = {"quote": 0.40, "kline": 0.35, "market": 0.15, "lineage": 0.10}
+    state_value = {"fresh": 1.0, "available": 0.7, "stale": 0.0, "missing": 0.0}
+    score = round(sum(weights[item["id"]] * state_value[item["state"]] for item in inputs) * 100)
+    complete_ratio = round(sum(1 for item in inputs if item["state"] == "fresh") / len(inputs), 2)
+    missing = [item["id"] for item in inputs if item["state"] == "missing"]
+    partial = [item["id"] for item in inputs if item["state"] == "available"]
+    stale = [item["id"] for item in inputs if item["state"] == "stale"]
+    warnings = []
+    if price > 0 and not realtime.get("source_as_of"):
+        warnings.append("行情仅记录抓取时间，缺少数据源真实时间，不能证明秒级新鲜度")
+    if not market_ok:
+        warnings.append("市场基准数据不足，V2使用保守先验")
+    status = "complete" if score == 100 else "partial" if score >= 50 else "degraded"
+    return {
+        "score": score,
+        "status": status,
+        "complete_ratio": complete_ratio,
+        "source_as_of": realtime.get("source_as_of"),
+        "fetched_at": realtime.get("fetched_at") or realtime.get("updated_at"),
+        "inputs": inputs,
+        "missing": missing,
+        "partial": partial,
+        "stale": stale,
+        "warnings": warnings,
+    }
+
+
+def _dedupe_risk_items(items: list[dict]) -> list[dict]:
+    unique: dict[str, dict] = {}
+    for item in items:
+        code = str(item.get("code") or "UNKNOWN_RISK")
+        if code not in unique or item.get("severity") == "hard":
+            unique[code] = item
+    return list(unique.values())
+
+
+def build_risk_items(candidate: dict, quality: dict) -> list[dict]:
+    items: list[dict] = []
+    price = safe_float(candidate.get("entry_price") or candidate.get("price"))
+    if price <= 0:
+        items.append({"code": "INVALID_PRICE", "severity": "hard", "evidence": "entry_price <= 0"})
+    if len(candidate.get("kline") or []) < 32:
+        items.append({"code": "KLINE_INCOMPLETE", "severity": "hard", "evidence": "kline samples < 32"})
+    name = str(candidate.get("name") or "").upper()
+    trade_status = str(candidate.get("trade_status") or "").lower()
+    if candidate.get("suspended") or trade_status in {"suspended", "halted"}:
+        items.append({"code": "SUSPENDED", "severity": "hard", "evidence": trade_status or "suspended=true"})
+    if "退市" in name or candidate.get("delisting"):
+        items.append({"code": "DELISTING", "severity": "hard", "evidence": candidate.get("name")})
+    realtime = candidate.get("realtime") or {}
+    if "quote" in quality.get("stale", []) and realtime.get("session") == "regular":
+        items.append({"code": "STALE_QUOTE", "severity": "hard", "evidence": quality.get("source_as_of")})
+
+    metrics = ((candidate.get("chan") or {}).get("metrics") or {})
+    if not (metrics.get("setup_flags") or candidate.get("setup_flags")):
+        items.append({"code": "SETUP_MISSING", "severity": "warning", "evidence": "no second_buy/third_buy"})
+    distance_ma10 = safe_float(metrics.get("distance_ma10_pct"))
+    if distance_ma10 > 10:
+        items.append({"code": "MA10_DISTANCE", "severity": "warning", "metric": distance_ma10, "threshold": 10})
+    pct_5d = safe_float(metrics.get("pct_5d"))
+    if pct_5d > 18:
+        items.append({"code": "MOMENTUM_OVERHEAT_5D", "severity": "warning", "metric": pct_5d, "threshold": 18})
+    vol_ratio = safe_float(candidate.get("vol_ratio"))
+    if vol_ratio > 3.5:
+        items.append({"code": "ABNORMAL_VOLUME", "severity": "warning", "metric": vol_ratio, "threshold": 3.5})
+    if safe_float(candidate.get("amount_yi")) and safe_float(candidate.get("amount_yi")) < 2.5:
+        items.append({"code": "LOW_LIQUIDITY", "severity": "warning", "metric": candidate.get("amount_yi"), "threshold": 2.5})
+    return _dedupe_risk_items(items)
+
+
+def evaluate_decision_gates(candidate: dict, quality: dict, risk_items: list[dict] | None = None) -> list[dict]:
+    risk_items = risk_items or build_risk_items(candidate, quality)
+    hard_codes = {item["code"] for item in risk_items if item.get("severity") == "hard"}
+    price = safe_float(candidate.get("entry_price") or candidate.get("price"))
+    kline_count = len(candidate.get("kline") or [])
+    return [
+        {
+            "id": "quote_valid",
+            "status": "PASS" if price > 0 else "BLOCK",
+            "measured": price,
+            "reason": "有效买入参考价" if price > 0 else "缺少有效买入参考价",
+        },
+        {
+            "id": "kline_complete",
+            "status": "PASS" if kline_count >= 32 else "BLOCK",
+            "measured": kline_count,
+            "threshold": 32,
+            "reason": "结构评分样本充足" if kline_count >= 32 else "结构评分K线不足",
+        },
+        {
+            "id": "tradability",
+            "status": "BLOCK" if hard_codes & {"SUSPENDED", "DELISTING"} else "PASS",
+            "reason": "存在停牌/退市硬风险" if hard_codes & {"SUSPENDED", "DELISTING"} else "未发现明确停牌/退市状态",
+        },
+        {
+            "id": "quote_freshness",
+            "status": "BLOCK" if "STALE_QUOTE" in hard_codes else "WARN" if not quality.get("source_as_of") else "PASS",
+            "reason": "交易时段行情已知过期" if "STALE_QUOTE" in hard_codes else "缺少数据源真实时间" if not quality.get("source_as_of") else "数据源时间可验证",
+        },
+        {
+            "id": "data_coverage",
+            "status": "PASS" if quality.get("status") == "complete" else "WARN",
+            "measured": quality.get("score"),
+            "threshold": 100,
+            "reason": "V2证据完整" if quality.get("status") == "complete" else "V2部分证据缺失；Legacy决策仍保持生效",
+        },
+    ]
+
+
+def attach_candidate_v2(candidate: dict, market_key: str, market: dict) -> dict:
+    previous_rank = {
+        key: (candidate.get("v2") or {}).get(key)
+        for key in ("rank", "rank_percentile", "rank_score", "rank_scope", "rank_universe_size")
+        if (candidate.get("v2") or {}).get(key) is not None
+    }
+    candidate["market_key"] = candidate.get("market_key") or market_key
+    ensure_candidate_lineage(candidate, market_key)
+    candidate["legacy"] = legacy_score_contract(candidate)
+    candidate["v2"] = build_v2_shadow(candidate, market_key, market)
+    candidate["v2"].update(previous_rank)
+    quality = assess_data_quality(candidate, market_key, market)
+    risk_items = build_risk_items(candidate, quality)
+    candidate["data_quality"] = quality
+    candidate["risk_items"] = risk_items
+    candidate["decision_gates"] = evaluate_decision_gates(candidate, quality, risk_items)
+    candidate["execution_state"] = "BLOCKED" if any(item["status"] == "BLOCK" for item in candidate["decision_gates"]) else "CANDIDATE"
+    return candidate
+
+
+def enrich_market_candidates(candidates: list[dict], market_key: str, market: dict) -> list[dict]:
+    already_ranked = bool(candidates) and all(
+        (candidate.get("v2") or {}).get("rank") is not None
+        and (candidate.get("v2") or {}).get("rank_universe_size") is not None
+        for candidate in candidates
+    )
+    for candidate in candidates:
+        attach_candidate_v2(candidate, market_key, market)
+    if already_ranked:
+        return candidates
+    ranked = sorted(
+        enumerate(candidates),
+        key=lambda item: (-safe_float((item[1].get("v2") or {}).get("rule_score")), item[0], str(item[1].get("code") or "")),
+    )
+    count = len(ranked)
+    for rank, (_, candidate) in enumerate(ranked, 1):
+        percentile = 1.0 if count == 1 else (count - rank) / (count - 1)
+        candidate["v2"].update(
+            {
+                "rank": rank,
+                "rank_percentile": round(percentile, 4),
+                "rank_score": round(percentile * 100, 2),
+                "rank_scope": market_key,
+                "rank_universe_size": count,
+            }
+        )
+    return candidates
+
+
+def _decision_candidates(decision: dict) -> list[dict]:
+    rows = [decision.get("primary"), decision.get("blocked_candidate"), *((decision.get("watchlist") or []))]
+    result = []
+    seen: set[int] = set()
+    for row in rows:
+        if not isinstance(row, dict) or id(row) in seen:
+            continue
+        seen.add(id(row))
+        result.append(row)
+    return result
+
+
+def _event_id(parts: list) -> str:
+    raw = "|".join(str(part or "") for part in parts)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def build_event_feed(snapshot: dict) -> dict:
+    generated_at = snapshot.get("generated_at")
+    items: list[dict] = []
+    seen: set[str] = set()
+    for market_key, section in (snapshot.get("markets") or {}).items():
+        decision = (section or {}).get("decision") or {}
+        rows = _decision_candidates(decision)
+        for candidate in rows:
+            code = candidate.get("code") or candidate.get("symbol")
+            lineage = candidate.get("candidate_lineage") or {}
+            for route in lineage.get("recall_routes") or []:
+                if route.get("route") != "event":
+                    continue
+                event_id = _event_id([market_key, code, route.get("source"), route.get("reason"), route.get("published_at")])
+                if event_id in seen:
+                    continue
+                seen.add(event_id)
+                items.append(
+                    {
+                        "event_id": event_id,
+                        "event_type": "announcement_or_news",
+                        "market": market_key,
+                        "symbol": code,
+                        "company": candidate.get("name"),
+                        "title": route.get("reason") or candidate.get("reason_tags") or "候选池事件",
+                        "source": route.get("source"),
+                        "published_at": route.get("published_at"),
+                        "ingested_at": route.get("observed_at") or generated_at,
+                        "direction": "unknown",
+                        "impact_score": round(safe_float(((candidate.get("v2") or {}).get("factor_groups") or {}).get("event", {}).get("contribution")), 2),
+                        "url": route.get("url"),
+                        "evidence_status": route.get("evidence_status") or "partial",
+                    }
+                )
+        decision_candidate = decision.get("primary") or decision.get("blocked_candidate")
+        if isinstance(decision_candidate, dict):
+            code = decision_candidate.get("code") or decision_candidate.get("symbol")
+            event_id = _event_id([market_key, code, snapshot.get("snapshot_key"), "model_signal"])
+            if event_id not in seen:
+                seen.add(event_id)
+                items.append(
+                    {
+                        "event_id": event_id,
+                        "event_type": "model_signal",
+                        "market": market_key,
+                        "symbol": code,
+                        "company": decision_candidate.get("name"),
+                        "title": f"{decision_candidate.get('name') or code} 进入本轮{section.get('label') or market_key}决策",
+                        "source": "selector_v2_shadow",
+                        "published_at": generated_at,
+                        "ingested_at": generated_at,
+                        "direction": "positive" if decision.get("primary") else "neutral",
+                        "impact_score": safe_float((decision_candidate.get("v2") or {}).get("rule_score")),
+                        "url": None,
+                        "evidence_status": "model",
+                    }
+                )
+    items.sort(key=lambda item: str(item.get("ingested_at") or ""), reverse=True)
+    return {
+        "generated_at": generated_at,
+        "items": items,
+        "stats": {
+            "total": len(items),
+            "partial_evidence": sum(1 for item in items if item.get("evidence_status") == "partial"),
+            "model_signals": sum(1 for item in items if item.get("event_type") == "model_signal"),
+        },
+    }
+
+
+def enrich_snapshot_v2(snapshot: dict) -> dict:
+    snapshot["schema_version"] = SCHEMA_VERSION
+    snapshot["selector_mode"] = SELECTOR_MODE
+    snapshot["weights_version"] = V2_WEIGHTS_VERSION
+    snapshot["universe_version"] = UNIVERSE_VERSION
+    global_market = snapshot.get("market") or {}
+    markets = snapshot.get("markets") or {}
+    for market_key, section in markets.items():
+        decision = (section or {}).get("decision") or {}
+        market_context = global_market if market_key == "a_share" else (section.get("market_context") or {})
+        candidates = _decision_candidates(decision)
+        enrich_market_candidates(candidates, market_key, market_context)
+        section["market_regime"] = classify_market_regime(market_key, market_context, candidates)
+        if market_key in ("hk", "us"):
+            (section.setdefault("stats", {}))["universe_origin"] = "curated_static"
+        else:
+            (section.setdefault("stats", {}))["universe_origin"] = "dynamic_snapshot"
+    if not markets and isinstance(snapshot.get("decision"), dict):
+        candidates = _decision_candidates(snapshot["decision"])
+        enrich_market_candidates(candidates, "a_share", global_market)
+    snapshot["events"] = build_event_feed(snapshot)
+    return snapshot
+
+
 def market_prefix(code: str) -> str:
     if code.startswith(("6", "9")):
         return "sh"
@@ -956,7 +1704,17 @@ def load_ths_hot(date_text: str) -> list[dict]:
     data = response.json()
     if data.get("errocode", 0) != 0:
         return []
-    return data.get("data") or []
+    observed_at = now_cn().isoformat(timespec="seconds")
+    rows = []
+    for item in data.get("data") or []:
+        row = dict(item)
+        row.setdefault("source", "ths")
+        row.setdefault("recall_route", "event")
+        row.setdefault("observed_at", observed_at)
+        row.setdefault("published_at", None)
+        row.setdefault("url", None)
+        rows.append(row)
+    return rows
 
 
 def find_hot_pool(signal_day: dt.date) -> tuple[str, list[dict]]:
@@ -1011,26 +1769,29 @@ def load_broad_market_pool(limit: int = 300, relaxed: bool = False) -> list[dict
             min_amount = 3 if relaxed else 5
             if price <= 0 or amount_yi < min_amount:
                 continue
-            if relaxed:
-                if change_pct < -4.5 or change_pct >= 8.8:
-                    continue
-                if turnover_pct < 0.5 or turnover_pct > 22:
-                    continue
-            else:
-                if change_pct < 0.8 or change_pct >= 8.8:
-                    continue
-                if turnover_pct < 1.2 or turnover_pct > 18:
-                    continue
-            if pb > 18:
+            if change_pct < -4.5 or change_pct >= 8.8:
                 continue
+            if turnover_pct < 0.5 or turnover_pct > 22:
+                continue
+            recall_routes = broad_recall_routes({"broad_change_pct": change_pct})
             rows.append(
                 {
                     "code": code,
-                    "reason": "全市场流动性候选" if relaxed else "全市场稳健候选",
+                    "name": name,
+                    "reason": "全市场高流动性候选" + ("/动量" if "momentum" in recall_routes else "/回调"),
                     "source": "eastmoney_broad",
+                    "recall_routes": recall_routes,
+                    "observed_at": now_cn().isoformat(timespec="seconds"),
+                    "recall_metrics": {
+                        "amount_yi": round(amount_yi, 2),
+                        "change_pct": change_pct,
+                        "turnover_pct": turnover_pct,
+                        "pb": pb,
+                    },
                     "broad_amount_yi": round(amount_yi, 2),
                     "broad_change_pct": change_pct,
                     "broad_turnover_pct": turnover_pct,
+                    "pb": pb,
                 }
             )
             if len(rows) >= limit:
@@ -1047,19 +1808,36 @@ def merge_candidate_pools(event_rows: list[dict], broad_rows: list[dict]) -> lis
             continue
         if code not in merged:
             merged[code] = dict(row)
+            ensure_candidate_lineage(merged[code], "a_share")
             continue
+        existing_routes = ((merged[code].get("candidate_lineage") or {}).get("recall_routes") or [])
+        incoming_routes = _recall_routes_from_row(row, "a_share")
         previous_reason = merged[code].get("reason") or ""
         current_reason = row.get("reason") or ""
         if current_reason and current_reason not in previous_reason:
             merged[code]["reason"] = "、".join([part for part in [previous_reason, current_reason] if part])
         merged[code].update({key: value for key, value in row.items() if value not in ("", None)})
+        merged[code]["candidate_lineage"] = {
+            **(merged[code].get("candidate_lineage") or {}),
+            "recall_routes": _dedupe_recall_routes([*existing_routes, *incoming_routes]),
+        }
+        ensure_candidate_lineage(merged[code], "a_share")
     return list(merged.values())
 
 
-def cached_a_share_pool(limit: int = 300) -> list[dict]:
+def cached_a_share_pool(
+    limit: int = 40,
+    max_age_trade_weekdays: int = 5,
+    as_of: dt.date | None = None,
+) -> list[dict]:
     merged: dict[str, dict] = {}
+    as_of = as_of or now_cn().date()
     paths = sorted(PICKS.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
     for path in paths[:220]:
+        parsed = parse_cache_name(path)
+        if not parsed or not is_history_candidate_fresh(parsed[1], as_of, max_age_trade_weekdays):
+            continue
+        history_age = trade_weekday_age(parsed[1], as_of)
         try:
             pick = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -1079,6 +1857,11 @@ def cached_a_share_pool(limit: int = 300) -> list[dict]:
                     "code": code,
                     "reason": row.get("reason_tags") or "历史候选池复扫",
                     "source": "cached_history_pool",
+                    "recall_route": "history",
+                    "observed_at": pick.get("generated_at"),
+                    "history_signal_date": parsed[1],
+                    "history_age_trade_weekdays": history_age,
+                    "history_decay_weight": round(0.75 ** safe_float(history_age), 4),
                 },
             )
             if len(merged) >= limit:
@@ -1103,6 +1886,8 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
             if len(vals) < 53:
                 continue
             code = key[2:]
+            fetched_at = now_cn().isoformat(timespec="seconds")
+            source_as_of = parse_cn_quote_timestamp(vals[30])
             result[code] = {
                 "code": code,
                 "name": vals[1],
@@ -1115,6 +1900,8 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
                 "current_change_pct": safe_float(vals[32]),
                 "high": safe_float(vals[33]),
                 "low": safe_float(vals[34]),
+                "volume": safe_float(vals[36]),
+                "volume_unit": "lot",
                 "amount_wan": safe_float(vals[37]),
                 "turnover_pct": safe_float(vals[38]),
                 "pe_ttm": safe_float(vals[39]),
@@ -1132,7 +1919,10 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
                     "session": session["session"],
                     "session_label": session["label"],
                     "source": "Tencent realtime quote",
-                    "updated_at": now_cn().isoformat(timespec="seconds"),
+                    "source_as_of": source_as_of,
+                    "fetched_at": fetched_at,
+                    "updated_at": source_as_of or fetched_at,
+                    "volume_unit": "lot",
                 },
             }
         time.sleep(0.12)
@@ -1501,27 +2291,31 @@ def yahoo_realtime_quote(symbol: str, timeout: int = 6) -> dict:
         meta = result.get("meta") or {}
         quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
         closes = quote.get("close") or []
+        volumes = quote.get("volume") or []
         timestamps = result.get("timestamp") or []
     except Exception:
         return {}
 
     last_price = 0.0
     last_ts = 0
+    last_volume = 0.0
     for idx in range(len(closes) - 1, -1, -1):
         close = closes[idx]
         if close not in (None, 0):
             last_price = safe_float(close)
             last_ts = int(timestamps[idx]) if idx < len(timestamps) else 0
+            last_volume = safe_float(volumes[idx]) if idx < len(volumes) else 0.0
             break
     regular_price = safe_float(meta.get("regularMarketPrice"))
     price = last_price or regular_price
     previous_close = safe_float(meta.get("chartPreviousClose") or meta.get("previousClose"))
     change_pct = pct_change(price, previous_close) if price and previous_close else 0.0
     session = yahoo_session_from_meta(meta)
-    updated_at = (
+    fetched_at = now_cn().isoformat(timespec="seconds")
+    source_as_of = (
         dt.datetime.fromtimestamp(last_ts, CN_TZ).isoformat(timespec="seconds")
         if last_ts
-        else now_cn().isoformat(timespec="seconds")
+        else None
     )
     if not price:
         return {}
@@ -1530,10 +2324,14 @@ def yahoo_realtime_quote(symbol: str, timeout: int = 6) -> dict:
         "change_pct": round(change_pct, 2),
         "previous_close": previous_close,
         "currency": meta.get("currency") or "",
+        "volume": last_volume or safe_float(meta.get("regularMarketVolume")),
+        "volume_unit": "share",
         "session": session["session"],
         "session_label": session["label"],
         "source": "Yahoo 1m includePrePost",
-        "updated_at": updated_at,
+        "source_as_of": source_as_of,
+        "fetched_at": fetched_at,
+        "updated_at": source_as_of or fetched_at,
     }
 
 
@@ -1600,8 +2398,8 @@ def serenity_skill_status() -> dict:
         reference_files = sorted(path.name for path in references.iterdir() if path.is_file())[:8]
     return {
         "installed": skill_file.exists(),
-        "mode": "skill-weighted" if skill_file.exists() else "built-in-lens",
-        "path": str(SERENITY_SKILL_DIR),
+        "mode": "built-in-lens",
+        "skill_metadata_detected": skill_file.exists(),
         "references": reference_files,
     }
 
@@ -2172,6 +2970,8 @@ def live_stock_payload(market_key: str, code: str) -> dict:
         latest = kline[-1] if kline else {}
         price = safe_float(quote.get("price")) or safe_float(latest.get("close"))
         change_pct = safe_float(quote.get("change_pct")) or safe_float(latest.get("change_pct"))
+        realtime = quote.get("realtime") or {}
+        fetched_at = realtime.get("fetched_at") or now_cn().isoformat(timespec="seconds")
         return {
             "ok": True,
             "market": market_key,
@@ -2183,9 +2983,12 @@ def live_stock_payload(market_key: str, code: str) -> dict:
             "change_pct": change_pct,
             "current_change_pct": change_pct,
             "volume": safe_float(quote.get("volume")) or safe_float(latest.get("volume")),
-            "session_label": (quote.get("realtime") or {}).get("session_label", "实时/延时"),
-            "source": (quote.get("realtime") or {}).get("source", "Tencent realtime quote"),
-            "updated_at": now_cn().isoformat(timespec="seconds"),
+            "volume_unit": quote.get("volume_unit") or realtime.get("volume_unit") or "lot",
+            "session_label": realtime.get("session_label", "实时/延时"),
+            "source": realtime.get("source", "Tencent realtime quote"),
+            "source_as_of": realtime.get("source_as_of"),
+            "fetched_at": fetched_at,
+            "updated_at": realtime.get("source_as_of") or fetched_at,
             "kline": compact_kline(kline, 70),
         }
     kline = yahoo_chart_kline(code, 90)
@@ -2195,6 +2998,7 @@ def live_stock_payload(market_key: str, code: str) -> dict:
     latest = kline[-1] if kline else {}
     price = safe_float(realtime.get("price")) or safe_float(latest.get("close"))
     change_pct = safe_float(realtime.get("change_pct")) or safe_float(latest.get("change_pct"))
+    fetched_at = realtime.get("fetched_at") or now_cn().isoformat(timespec="seconds")
     return {
         "ok": True,
         "market": market_key,
@@ -2206,9 +3010,12 @@ def live_stock_payload(market_key: str, code: str) -> dict:
         "change_pct": change_pct,
         "current_change_pct": change_pct,
         "volume": safe_float(realtime.get("volume")) or safe_float(latest.get("volume")),
+        "volume_unit": realtime.get("volume_unit") or "share",
         "session_label": realtime.get("session_label", "实时/延时"),
         "source": realtime.get("source", "Yahoo chart quote"),
-        "updated_at": now_cn().isoformat(timespec="seconds"),
+        "source_as_of": realtime.get("source_as_of"),
+        "fetched_at": fetched_at,
+        "updated_at": realtime.get("source_as_of") or fetched_at,
         "kline": compact_kline(kline, 70),
     }
 
@@ -2246,7 +3053,10 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                 "session": market_session(market_key)["session"],
                 "session_label": market_session(market_key)["label"],
                 "source": "Daily kline fallback",
+                "source_as_of": None,
+                "fetched_at": now_cn().isoformat(timespec="seconds"),
                 "updated_at": now_cn().isoformat(timespec="seconds"),
+                "volume_unit": "share",
             },
         }
         chan = chan_signal(kline)
@@ -2316,6 +3126,7 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                 "float_mcap_yi": 0,
                 "reason_tags": "、".join(candidate.get("themes") or []),
                 "theme_tags": candidate.get("themes") or [],
+                "candidate_lineage": candidate.get("candidate_lineage"),
                 "score": round(total, 2),
                 "pre_score": lens_score,
                 "chan_score": chan["score"],
@@ -2496,6 +3307,7 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
                 "float_mcap_yi": quote["float_mcap_yi"],
                 "reason_tags": item["hot"].get("reason", ""),
                 "theme_tags": item["theme_tags"],
+                "candidate_lineage": item["hot"].get("candidate_lineage"),
                 "score": round(total, 2),
                 "pre_score": item["pre_score"],
                 "chan_score": chan["score"],
@@ -2606,20 +3418,23 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
 
     hot_date, event_rows = find_hot_pool(signal_day)
     broad_rows = load_broad_market_pool()
-    broad_mode = "momentum"
+    broad_mode = "multi_route"
     if not broad_rows:
         broad_rows = load_broad_market_pool(relaxed=True)
-        broad_mode = "liquidity_fallback"
-    cached_rows = cached_a_share_pool()
+        broad_mode = "multi_route_relaxed"
+    cached_rows = cached_a_share_pool(as_of=signal_day)
     hot_rows = merge_candidate_pools(event_rows, broad_rows + cached_rows)
     market = index_quotes()
     industries = industry_heat()
     scored = score_candidates(hot_date, hot_rows, market)
+    enrich_market_candidates(scored["candidates"], "a_share", market)
     decision = make_decision(scored["candidates"], market)
     hk_universe = market_universe("hk")
     us_universe = market_universe("us")
     hk_scored = score_serenity_candidates("hk", hk_universe)
     us_scored = score_serenity_candidates("us", us_universe)
+    enrich_market_candidates(hk_scored["candidates"], "hk", {})
+    enrich_market_candidates(us_scored["candidates"], "us", {})
     hk_decision = make_serenity_decision(hk_scored["candidates"], "hk")
     us_decision = make_serenity_decision(us_scored["candidates"], "us")
     forecast_end = add_trade_weekdays(target_day, FORECAST_TRADE_DAYS)
@@ -2710,6 +3525,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         ),
         "disclaimer": "本工具是量化决策辅助，不构成投资建议，不保证盈利。",
     }
+    result = enrich_snapshot_v2(result)
     cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     (PICKS / "latest.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
