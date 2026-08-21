@@ -39,6 +39,7 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_copy_does_not_claim_uncalibrated_performance(self) -> None:
         self.assertIn("推荐度不是收益概率", self.js)
+        self.assertIn("研究优先级，不是上涨概率", self.js)
         self.assertIn("不展示“命中率”", self.js)
         prohibited = ("保证收益", "稳赚", "预测准确率 90", "胜率 90")
         for phrase in prohibited:
@@ -53,6 +54,17 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("@media (max-width: 760px)", self.css)
         self.assertIn("grid-template-columns: 190px", self.css)
         self.assertIsNone(re.search(r"(?:linear|radial|conic)-gradient\(", self.css))
+
+    def test_three_score_lenses_and_dual_low_evidence_are_rendered(self) -> None:
+        for helper in ("dualLowAnalysis", "dualLowLabel", "scoreLensCards", "dualLowPanel"):
+            self.assertRegex(self.js, rf"function {helper}\(")
+        self.assertIn("实际决策", self.js)
+        self.assertIn("影子排序", self.js)
+        self.assertIn("价值筛选", self.js)
+        self.assertIn("独立分析项目 · 双低七因子", self.js)
+        self.assertIn("A股双低独立榜单", self.js)
+        self.assertIn("analysis_projects?.dual_low", self.js)
+        self.assertIn("评分和排序不会随之重算", self.js)
 
 
 if __name__ == "__main__":

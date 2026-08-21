@@ -213,6 +213,33 @@ class WorkerAssetBuildTests(unittest.TestCase):
                 "signal_date": "2026-08-19",
                 "generated_at": "2026-08-19T22:06:29+08:00",
                 "snapshot_key": "2026-08-20_2026-08-19_test.json",
+                "analysis_models": {
+                    "dual_low": {
+                        "status": "available",
+                        "mode": "shadow_overlay",
+                        "model_id": "dsa-screening-score-v1",
+                        "package_version": "1.0.0",
+                        "strategy_id": "dual_low",
+                        "strategy_version": "1.2-js.1",
+                        "pool_scope": "a_share.merged_recall_quote_pool.pre_kline_v1",
+                        "participates_in_decision": False,
+                        "supported_markets": ["a_share"],
+                        "score_as_of": "2026-08-19T15:00:00+08:00",
+                        "input_count": 93,
+                        "eligible_count": 7,
+                        "rejected_count": 86,
+                        "rank_universe_size": 7,
+                        "required_field_coverage": {
+                            "input_count": 93,
+                            "complete_count": 91,
+                            "ratio": 0.9785,
+                            "unbounded_debug_detail": ["must-not-reach-manifest"],
+                        },
+                        "top_ranked": [{"code": "600000", "final_score": 91.2}],
+                        "ranked_candidates": [{"sentinel": "full-ranked-pool"}],
+                        "rejected_candidates": [{"sentinel": "full-rejected-pool"}],
+                    }
+                },
                 "research_runtime": {
                     "serenity_skill": {
                         "installed": True,
@@ -254,6 +281,22 @@ class WorkerAssetBuildTests(unittest.TestCase):
             self.assertEqual(manifest["market_regimes"]["a_share"]["state"], "risk_off")
             self.assertEqual(manifest["market_regimes"]["hk"]["state"], "range")
             self.assertEqual(manifest["summaries"][0]["market_regimes"]["us"]["state"], "trend_risk_on")
+            dual_low = manifest["analysis_models"]["dual_low"]
+            self.assertEqual(dual_low["model_id"], "dsa-screening-score-v1")
+            self.assertEqual(dual_low["input_count"], 93)
+            self.assertEqual(dual_low["eligible_count"], 7)
+            self.assertFalse(dual_low["participates_in_decision"])
+            self.assertEqual(dual_low["required_field_coverage"]["ratio"], 0.9785)
+            history_dual_low = manifest["summaries"][0]["analysis_models"]["dual_low"]
+            self.assertEqual(history_dual_low, dual_low)
+            for pool_key in ("top_ranked", "ranked_candidates", "rejected_candidates"):
+                self.assertNotIn(pool_key, dual_low)
+                self.assertNotIn(pool_key, history_dual_low)
+            self.assertNotIn("unbounded_debug_detail", dual_low["required_field_coverage"])
+            manifest_text = json.dumps(manifest, ensure_ascii=False)
+            self.assertNotIn("full-ranked-pool", manifest_text)
+            self.assertNotIn("full-rejected-pool", manifest_text)
+            self.assertNotIn("must-not-reach-manifest", manifest_text)
             published = json.loads((public / "data" / "picks" / "latest.json").read_text(encoding="utf-8"))
             published_serenity = published["research_runtime"]["serenity_skill"]
             self.assertNotIn("path", published_serenity)
@@ -280,6 +323,17 @@ class CloudflareWorkflowContractTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 20", workflow)
         self.assertIn("python -m unittest discover -s tests -v", workflow)
         self.assertIn("node --check src/index.js", workflow)
+        self.assertIn("node --check scripts/score_dual_low.mjs", workflow)
+        self.assertIn("node --check vendor/stock-scoring-kit/index.js", workflow)
+        self.assertIn("python scripts/validate_snapshot.py data/picks/latest.json", workflow)
+        self.assertLess(
+            workflow.index("node --check scripts/score_dual_low.mjs"),
+            workflow.index("python server.py --once --force"),
+        )
+        self.assertLess(
+            workflow.index("python server.py --once --force"),
+            workflow.index("python scripts/validate_snapshot.py data/picks/latest.json"),
+        )
         self.assertNotIn("Install Serenity skill", workflow)
 
     def test_obsolete_render_blueprint_files_are_removed(self) -> None:

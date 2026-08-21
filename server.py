@@ -19,6 +19,7 @@ import os
 import pathlib
 import re
 import socketserver
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -35,14 +36,20 @@ CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-08-19.1-v2-shadow"
+MODEL_VERSION = "smart-selector-2026-08-22.1-dual-low-shadow"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 SERENITY_SKILL_DIR = pathlib.Path.home() / ".agents" / "skills" / "serenity-skill"
 SCHEMA_VERSION = "selector-snapshot-v2"
-SELECTOR_MODE = "legacy_active_v2_shadow"
+SELECTOR_MODE = "legacy_active_v2_dual_low_shadow"
 V2_WEIGHTS_VERSION = "v2-rule-prior-1"
 UNIVERSE_VERSION = "recall-v2-1"
+DUAL_LOW_MODEL_ID = "dsa-screening-score-v1"
+DUAL_LOW_PACKAGE_VERSION = "1.0.0"
+DUAL_LOW_STRATEGY_ID = "dual_low"
+DUAL_LOW_POOL_SCOPE = "a_share.merged_recall_quote_pool.pre_kline_v1"
+DUAL_LOW_BRIDGE = ROOT / "scripts" / "score_dual_low.mjs"
+DUAL_LOW_FACTOR_KEYS = ("value", "stability", "liquidity", "momentum", "activity", "reversal", "size")
 
 V2_REGIME_WEIGHTS = {
     "trend_risk_on": {
@@ -934,6 +941,371 @@ def safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def nullable_float(value) -> float | None:
+    """Parse a finite number without turning missing market data into zero."""
+    try:
+        if value in (None, "", "-"):
+            return None
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def nullable_product(value, multiplier: float) -> float | None:
+    parsed = nullable_float(value)
+    return parsed * multiplier if parsed is not None else None
+
+
+def dual_low_input_from_quote(quote: dict) -> dict:
+    """Normalize one A-share quote to the supplied model's documented units."""
+    fundamentals = quote.get("fundamentals") or {}
+    name = str(quote.get("name") or "")
+    return {
+        "code": str(quote.get("code") or ""),
+        "name": name,
+        "isST": bool(re.search(r"(?:^|\*)ST", name, re.IGNORECASE)),
+        "amount": nullable_product(quote.get("amount_wan_raw", quote.get("amount_wan")), 10_000),
+        "peRatio": nullable_float(fundamentals.get("pe_ttm")),
+        "pbRatio": nullable_float(fundamentals.get("pb")),
+        "totalMarketCap": nullable_product(fundamentals.get("total_mcap_yi"), 100_000_000),
+        "price": nullable_float(quote.get("price")),
+        "changePct": nullable_float(quote.get("change_pct")),
+        "volumeRatio": nullable_float(quote.get("vol_ratio")),
+        "turnoverRate": nullable_float(quote.get("turnover_pct")),
+    }
+
+
+def dual_low_unavailable(market_key: str, reason_code: str) -> dict:
+    applicable = market_key == "a_share"
+    return {
+        "status": "unavailable" if applicable else "not_applicable",
+        "model_id": DUAL_LOW_MODEL_ID,
+        "strategy_id": DUAL_LOW_STRATEGY_ID,
+        "mode": "shadow_overlay",
+        "market": market_key,
+        "pool_scope": DUAL_LOW_POOL_SCOPE if applicable else None,
+        "reason_code": reason_code,
+        "score_as_of": None,
+        "rank": None,
+        "rank_universe_size": None,
+        "rank_percentile": None,
+        "base_score": None,
+        "blended_score": None,
+        "final_score": None,
+        "factor_scores": {},
+        "contributions": {},
+        "risk_points": None,
+        "risk_penalty": None,
+        "risk_level": None,
+        "risk_flags": [],
+        "portfolio_penalty": None,
+        "portfolio_penalty_enabled": False,
+        "filter_reasons": [],
+        "missing_fields": [],
+        "interpretation": "数据不足" if applicable else "暂不适用",
+        "participates_in_decision": False,
+    }
+
+
+def _dual_low_missing_fields(reasons: list[dict]) -> list[str]:
+    fields = []
+    for reason in reasons:
+        match = re.match(r"^validation\.([A-Za-z0-9_]+)\.invalid$", str(reason.get("code") or ""))
+        if match and match.group(1) not in fields:
+            fields.append(match.group(1))
+    return fields
+
+
+def _dual_low_ranked_analysis(row: dict, eligible_count: int, score_as_of: str | None) -> dict:
+    rank = max(1, int(safe_float(row.get("rank"), 1)))
+    percentile = 1.0 if eligible_count <= 1 else (eligible_count - rank) / (eligible_count - 1)
+    final_score = round(safe_float(row.get("finalScore")), 2)
+    if percentile >= 0.8 and final_score >= 65:
+        interpretation = "双低优先"
+    elif final_score >= 55:
+        interpretation = "双低观察"
+    else:
+        interpretation = "双低一般"
+    return {
+        "status": "ranked",
+        "model_id": DUAL_LOW_MODEL_ID,
+        "strategy_id": DUAL_LOW_STRATEGY_ID,
+        "strategy_version": "1.2-js.1",
+        "package_version": DUAL_LOW_PACKAGE_VERSION,
+        "mode": "shadow_overlay",
+        "market": "a_share",
+        "pool_scope": DUAL_LOW_POOL_SCOPE,
+        "score_as_of": score_as_of,
+        "rank": rank,
+        "rank_universe_size": eligible_count,
+        "rank_percentile": round(percentile, 4),
+        "base_score": round(safe_float(row.get("baseScore")), 2),
+        "blended_score": round(safe_float(row.get("blendedScore")), 2),
+        "final_score": final_score,
+        "factor_scores": row.get("factorScores") or {},
+        "contributions": row.get("contributions") or {},
+        "risk_points": round(safe_float(row.get("riskPoints")), 2),
+        "risk_penalty": round(safe_float(row.get("riskPenalty")), 2),
+        "risk_level": row.get("riskLevel") or "low",
+        "risk_flags": row.get("riskFlags") or [],
+        "portfolio_penalty": round(safe_float(row.get("portfolioPenalty")), 2),
+        "portfolio_penalty_enabled": False,
+        "filter_reasons": [],
+        "missing_fields": [],
+        "explanations": row.get("explanations") or [],
+        "interpretation": interpretation,
+        "participates_in_decision": False,
+    }
+
+
+def _dual_low_rejected_analysis(row: dict, eligible_count: int, score_as_of: str | None) -> dict:
+    reasons = row.get("filterReasons") or []
+    missing_fields = _dual_low_missing_fields(reasons)
+    interpretation = "数据不足" if missing_fields else "非双低风格"
+    return {
+        "status": "rejected",
+        "model_id": DUAL_LOW_MODEL_ID,
+        "strategy_id": DUAL_LOW_STRATEGY_ID,
+        "strategy_version": "1.2-js.1",
+        "package_version": DUAL_LOW_PACKAGE_VERSION,
+        "mode": "shadow_overlay",
+        "market": "a_share",
+        "pool_scope": DUAL_LOW_POOL_SCOPE,
+        "score_as_of": score_as_of,
+        "rank": None,
+        "rank_universe_size": eligible_count,
+        "rank_percentile": None,
+        "base_score": None,
+        "blended_score": None,
+        "final_score": None,
+        "factor_scores": {},
+        "contributions": {},
+        "risk_points": None,
+        "risk_penalty": None,
+        "risk_level": None,
+        "risk_flags": [],
+        "portfolio_penalty": None,
+        "portfolio_penalty_enabled": False,
+        "filter_reasons": reasons,
+        "missing_fields": missing_fields,
+        "interpretation": interpretation,
+        "participates_in_decision": False,
+    }
+
+
+def _validate_dual_low_payload(payload: dict, stocks: list[dict]) -> None:
+    if payload.get("modelId") != DUAL_LOW_MODEL_ID:
+        raise ValueError("unexpected dual-low model id")
+    if payload.get("packageVersion") != DUAL_LOW_PACKAGE_VERSION:
+        raise ValueError("unexpected dual-low package version")
+    strategy = payload.get("strategy") or {}
+    if strategy.get("id") != DUAL_LOW_STRATEGY_ID or not strategy.get("version"):
+        raise ValueError("unexpected dual-low strategy")
+    input_count = int(safe_float(payload.get("inputCount"), -1))
+    eligible_count = int(safe_float(payload.get("eligibleCount"), -1))
+    rejected_count = int(safe_float(payload.get("rejectedCount"), -1))
+    ranked = payload.get("ranked")
+    rejected = payload.get("rejected")
+    if not isinstance(ranked, list) or not isinstance(rejected, list):
+        raise ValueError("dual-low result arrays are missing")
+    if input_count != len(stocks) or eligible_count < 0 or rejected_count < 0:
+        raise ValueError("dual-low counts do not match input")
+    if eligible_count + rejected_count != input_count:
+        raise ValueError("dual-low eligible and rejected counts do not add up")
+    if len(ranked) != eligible_count or len(rejected) != rejected_count:
+        raise ValueError("dual-low result lengths do not match counts")
+    input_codes = [str(stock.get("code") or "") for stock in stocks]
+    output_codes = [str(row.get("code") or "") for row in [*ranked, *rejected]]
+    if len(output_codes) != len(set(output_codes)) or set(output_codes) != set(input_codes):
+        raise ValueError("dual-low output codes do not match input")
+    if sorted(int(safe_float(row.get("rank"), -1)) for row in ranked) != list(range(1, eligible_count + 1)):
+        raise ValueError("dual-low ranks are not continuous")
+    for row in ranked:
+        factor_scores = row.get("factorScores") or {}
+        contributions = row.get("contributions") or {}
+        if set(factor_scores) != set(DUAL_LOW_FACTOR_KEYS) or set(contributions) != set(DUAL_LOW_FACTOR_KEYS):
+            raise ValueError("dual-low factor keys are invalid")
+        score_values = [
+            row.get("baseScore"),
+            row.get("blendedScore"),
+            row.get("finalScore"),
+            *factor_scores.values(),
+        ]
+        if any(nullable_float(value) is None or not 0 <= float(value) <= 100 for value in score_values):
+            raise ValueError("dual-low score is outside 0-100")
+        contribution_values = [nullable_float(value) for value in contributions.values()]
+        if any(value is None for value in contribution_values):
+            raise ValueError("dual-low contribution is invalid")
+        base_score = float(row["baseScore"])
+        if abs(sum(value for value in contribution_values if value is not None) - base_score) > 0.03:
+            raise ValueError("dual-low contributions do not sum to base score")
+        blended_score = float(row["blendedScore"])
+        risk_penalty = nullable_float(row.get("riskPenalty"))
+        portfolio_penalty = nullable_float(row.get("portfolioPenalty"))
+        if risk_penalty is None or portfolio_penalty is None:
+            raise ValueError("dual-low penalties are invalid")
+        expected_final = min(max(blended_score - risk_penalty - portfolio_penalty, 0), 100)
+        if abs(expected_final - float(row["finalScore"])) > 0.03:
+            raise ValueError("dual-low final score arithmetic is invalid")
+
+
+def run_dual_low_analysis(quotes: list[dict]) -> dict:
+    """Run the supplied batch model once; failure never blocks the active selector."""
+    unique_quotes: list[dict] = []
+    seen_codes: set[str] = set()
+    for quote in quotes:
+        code = str((quote or {}).get("code") or "")
+        if not code or code in seen_codes:
+            continue
+        seen_codes.add(code)
+        unique_quotes.append(quote)
+    stocks = [dual_low_input_from_quote(quote) for quote in unique_quotes]
+    score_as_of_by_code = {
+        str(quote.get("code") or ""): (quote.get("realtime") or {}).get("source_as_of")
+        for quote in unique_quotes
+    }
+    source_times = sorted(value for value in score_as_of_by_code.values() if value)
+    required_fields = ("amount", "peRatio", "pbRatio", "totalMarketCap", "price", "changePct")
+    complete_count = sum(
+        1 for stock in stocks if all(nullable_float(stock.get(field)) is not None for field in required_fields)
+    )
+    optional_fields = (
+        "volumeRatio",
+        "turnoverRate",
+        "change60d",
+        "macdStatus",
+        "rsiStatus",
+        "volatility20dPct",
+        "maxDrawdown20dPct",
+        "atr20Pct",
+        "dailyQualityScore",
+    )
+    optional_coverage = {
+        field: sum(1 for stock in stocks if stock.get(field) not in (None, ""))
+        for field in optional_fields
+    }
+    base_metadata = {
+        "model_id": DUAL_LOW_MODEL_ID,
+        "package_version": DUAL_LOW_PACKAGE_VERSION,
+        "strategy_id": DUAL_LOW_STRATEGY_ID,
+        "mode": "shadow_overlay",
+        "supported_markets": ["a_share"],
+        "pool_scope": DUAL_LOW_POOL_SCOPE,
+        "score_as_of": source_times[-1] if source_times else None,
+        "source_as_of_min": source_times[0] if source_times else None,
+        "source_as_of_max": source_times[-1] if source_times else None,
+        "raw_pool_count": len(quotes),
+        "quote_pool_count": len(stocks),
+        "input_profile": "quote_valuation_core_v1",
+        "required_field_coverage": {
+            "complete_count": complete_count,
+            "input_count": len(stocks),
+            "ratio": round(complete_count / len(stocks), 4) if stocks else 0,
+        },
+        "optional_factor_coverage": optional_coverage,
+        "warnings": [
+            "60日涨跌、MACD、RSI、20日波动率、回撤、ATR和日线质量尚未接入；相关可选项使用模型中性回退。"
+        ],
+        "participates_in_decision": False,
+        "portfolio_penalty_enabled": False,
+    }
+    try:
+        completed = subprocess.run(
+            ["node", str(DUAL_LOW_BRIDGE)],
+            cwd=ROOT,
+            input=json.dumps({"stocks": stocks}, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=True,
+        )
+        payload = json.loads(completed.stdout)
+        _validate_dual_low_payload(payload, stocks)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TypeError, ValueError):
+        unavailable = {}
+        for stock in stocks:
+            code = stock.get("code")
+            if not code:
+                continue
+            item = dual_low_unavailable("a_share", "MODEL_EXECUTION_FAILED")
+            item["score_as_of"] = score_as_of_by_code.get(code)
+            unavailable[code] = item
+        return {
+            "metadata": {
+                **base_metadata,
+                "status": "unavailable",
+                "reason_code": "MODEL_EXECUTION_FAILED",
+                "input_count": len(stocks),
+                "eligible_count": None,
+                "rejected_count": None,
+                "rank_universe_size": None,
+                "top_ranked": [],
+                "rejection_breakdown": [],
+            },
+            "by_code": unavailable,
+        }
+
+    eligible_count = int(safe_float(payload.get("eligibleCount")))
+    by_code: dict[str, dict] = {}
+    for row in payload.get("ranked") or []:
+        code = str(row.get("code") or "")
+        if code:
+            by_code[code] = _dual_low_ranked_analysis(row, eligible_count, score_as_of_by_code.get(code))
+    for row in payload.get("rejected") or []:
+        code = str(row.get("code") or "")
+        if code:
+            by_code[code] = _dual_low_rejected_analysis(row, eligible_count, score_as_of_by_code.get(code))
+    for stock in stocks:
+        code = stock.get("code")
+        if code and code not in by_code:
+            missing = dual_low_unavailable("a_share", "MODEL_RESULT_MISSING")
+            missing["score_as_of"] = score_as_of_by_code.get(code)
+            by_code[code] = missing
+    rejection_counts: dict[str, int] = {}
+    for row in payload.get("rejected") or []:
+        for reason in row.get("filterReasons") or []:
+            reason_code = str(reason.get("code") or "unknown")
+            rejection_counts[reason_code] = rejection_counts.get(reason_code, 0) + 1
+    top_ranked = [
+        {
+            "code": str(row.get("code") or ""),
+            "name": row.get("name"),
+            "rank": int(safe_float(row.get("rank"))),
+            "final_score": round(safe_float(row.get("finalScore")), 2),
+            "risk_level": row.get("riskLevel") or "low",
+        }
+        for row in (payload.get("ranked") or [])[:5]
+    ]
+    return {
+        "metadata": {
+            **base_metadata,
+            "status": "available",
+            "input_count": int(safe_float(payload.get("inputCount"))),
+            "eligible_count": eligible_count,
+            "rejected_count": int(safe_float(payload.get("rejectedCount"))),
+            "rank_universe_size": eligible_count,
+            "strategy_version": (payload.get("strategy") or {}).get("version"),
+            "top_ranked": top_ranked,
+            "rejection_breakdown": [
+                {"code": code, "count": count}
+                for code, count in sorted(rejection_counts.items(), key=lambda item: (-item[1], item[0]))
+            ],
+        },
+        "by_code": by_code,
+    }
+
+
+def attach_dual_low_analysis(candidate: dict, analysis: dict | None, market_key: str) -> dict:
+    projects = candidate.setdefault("analysis_projects", {})
+    if analysis is not None:
+        projects["dual_low"] = dict(analysis)
+    elif "dual_low" not in projects:
+        reason = "SNAPSHOT_MODEL_NOT_RUN" if market_key == "a_share" else "MARKET_STRATEGY_NOT_CONFIGURED"
+        projects["dual_low"] = dual_low_unavailable(market_key, reason)
+    return candidate
+
+
 def parse_cn_quote_timestamp(value) -> str | None:
     match = re.match(r"^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})", str(value or ""))
     if not match:
@@ -1496,6 +1868,7 @@ def attach_candidate_v2(candidate: dict, market_key: str, market: dict) -> dict:
     candidate["risk_items"] = risk_items
     candidate["decision_gates"] = evaluate_decision_gates(candidate, quality, risk_items)
     candidate["execution_state"] = "BLOCKED" if any(item["status"] == "BLOCK" for item in candidate["decision_gates"]) else "CANDIDATE"
+    attach_dual_low_analysis(candidate, None, market_key)
     return candidate
 
 
@@ -1619,6 +1992,20 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
     snapshot["selector_mode"] = SELECTOR_MODE
     snapshot["weights_version"] = V2_WEIGHTS_VERSION
     snapshot["universe_version"] = UNIVERSE_VERSION
+    (snapshot.setdefault("analysis_models", {})).setdefault(
+        "dual_low",
+        {
+            "model_id": DUAL_LOW_MODEL_ID,
+            "package_version": DUAL_LOW_PACKAGE_VERSION,
+            "strategy_id": DUAL_LOW_STRATEGY_ID,
+            "mode": "shadow_overlay",
+            "status": "unavailable",
+            "reason_code": "SNAPSHOT_MODEL_NOT_RUN",
+            "supported_markets": ["a_share"],
+            "pool_scope": DUAL_LOW_POOL_SCOPE,
+            "participates_in_decision": False,
+        },
+    )
     global_market = snapshot.get("market") or {}
     markets = snapshot.get("markets") or {}
     for market_key, section in markets.items():
@@ -1903,6 +2290,7 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
                 "volume": safe_float(vals[36]),
                 "volume_unit": "lot",
                 "amount_wan": safe_float(vals[37]),
+                "amount_wan_raw": nullable_float(vals[37]),
                 "turnover_pct": safe_float(vals[38]),
                 "pe_ttm": safe_float(vals[39]),
                 "amplitude_pct": safe_float(vals[43]),
@@ -1913,6 +2301,14 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
                 "limit_down": safe_float(vals[48]),
                 "vol_ratio": safe_float(vals[49]),
                 "pe_static": safe_float(vals[52]),
+                "fundamentals": {
+                    "pe_ttm": nullable_float(vals[39]),
+                    "pb": nullable_float(vals[46]),
+                    "total_mcap_yi": nullable_float(vals[44]),
+                    "currency": "CNY",
+                    "source": "Tencent realtime quote",
+                    "source_as_of": source_as_of,
+                },
                 "realtime": {
                     "price": safe_float(vals[3]),
                     "change_pct": safe_float(vals[32]),
@@ -3221,6 +3617,7 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
         preliminary.append({"hot": hot, "quote": quote, **pre})
 
     preliminary.sort(key=lambda item: item["pre_score"], reverse=True)
+    dual_low_batch = run_dual_low_analysis([item["quote"] for item in preliminary])
     final = []
     max_kline_checks = int(os.environ.get("CHAN_MAX_KLINE_CHECKS", "36"))
     for item in preliminary[:max_kline_checks]:
@@ -3305,6 +3702,13 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
                 "turnover_pct": quote["turnover_pct"],
                 "vol_ratio": quote["vol_ratio"],
                 "float_mcap_yi": quote["float_mcap_yi"],
+                "fundamentals": quote.get("fundamentals") or {},
+                "analysis_projects": {
+                    "dual_low": dual_low_batch["by_code"].get(
+                        code,
+                        dual_low_unavailable("a_share", "MODEL_RESULT_MISSING"),
+                    )
+                },
                 "reason_tags": item["hot"].get("reason", ""),
                 "theme_tags": item["theme_tags"],
                 "candidate_lineage": item["hot"].get("candidate_lineage"),
@@ -3354,6 +3758,7 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
         "raw_pool_size": len(hot_rows),
         "scored_size": len(final),
         "dragon_count": len(dragon_map),
+        "analysis_models": {"dual_low": dual_low_batch["metadata"]},
     }
 
 
@@ -3499,6 +3904,18 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "markets": market_sections,
         "market": market,
         "industry_heat": industries,
+        "analysis_models": scored.get("analysis_models") or {
+            "dual_low": {
+                "model_id": DUAL_LOW_MODEL_ID,
+                "package_version": DUAL_LOW_PACKAGE_VERSION,
+                "mode": "shadow_overlay",
+                "status": "unavailable",
+                "reason_code": "MODEL_RESULT_MISSING",
+                "supported_markets": ["a_share"],
+                "pool_scope": DUAL_LOW_POOL_SCOPE,
+                "participates_in_decision": False,
+            }
+        },
         "stats": {
             "hot_pool_size": scored["raw_pool_size"],
             "event_pool_size": len(event_rows),

@@ -9,7 +9,7 @@ const MARKET_META = {
 };
 const TAB_META = {
   decision: ["决策", "今日跨市场执行建议"],
-  candidates: ["候选", "候选来源、旧评分与 V2 影子排名"],
+  candidates: ["候选", "Legacy 决策、V2 影子与双低价值筛选"],
   events: ["事件", "三市场事件证据与模型信号"],
   history: ["历史", "不可变决策快照与复盘入口"],
   model: ["模型说明", "候选池、评分、门控与运行机制"],
@@ -20,6 +20,34 @@ const FACTOR_META = {
   industry: ["产业链", "ph-factory"],
   liquidity_flow: ["流动性 / 资金", "ph-waves"],
   quality: ["质量 / 风险", "ph-shield-check"],
+};
+const DUAL_LOW_FACTOR_META = {
+  value: ["估值", "PE / PB 横截面"],
+  stability: ["稳定性", "涨跌、活跃度与异常风险"],
+  liquidity: ["流动性", "成交额横截面"],
+  momentum: ["动量", "温和趋势，不过热"],
+  activity: ["活跃度", "量比与换手适中"],
+  reversal: ["反转", "可控回调线索"],
+  size: ["规模", "总市值横截面"],
+};
+const DUAL_LOW_REASON_META = {
+  "filter.peRatio.max": "PE TTM 高于上限",
+  "filter.peRatio.min": "PE TTM 低于下限",
+  "filter.pbRatio.max": "PB 高于上限",
+  "filter.pbRatio.min": "PB 低于下限",
+  "filter.changePct.max": "当日涨幅过热",
+  "filter.changePct.min": "当日跌幅过大",
+  "filter.totalMarketCap.min": "总市值低于下限",
+  "filter.totalMarketCap.max": "总市值高于上限",
+  "filter.price.max": "股价高于上限",
+  "filter.amount.min": "成交额低于下限",
+  "validation.peRatio.invalid": "PE TTM 数据缺失",
+  "validation.pbRatio.invalid": "PB 数据缺失",
+  "validation.totalMarketCap.invalid": "总市值数据缺失",
+};
+const DUAL_LOW_RISK_META = { low: "低", medium: "中", high: "高" };
+const DUAL_LOW_INPUT_META = {
+  quote_valuation_core_v1: "实时行情 + PE / PB / 总市值核心字段",
 };
 
 const state = {
@@ -140,12 +168,30 @@ function candidatesFor(snapshot, market) {
   });
 }
 
+function candidateDecisionRole(candidate, market) {
+  const decision = marketDecision(state.snapshot, market);
+  const key = candidateId(candidate, market);
+  if (decision.primary && candidateId(decision.primary, market) === key) return "primary";
+  if (decision.blocked_candidate && candidateId(decision.blocked_candidate, market) === key) return "blocked";
+  return "watchlist";
+}
+
+function decisionRoleLabel(role) {
+  return ({ primary: "当前首选", blocked: "门槛未过", watchlist: "观察候选" })[role] || "观察候选";
+}
+
 function allCandidates() {
-  return MARKET_ORDER.flatMap((market) => candidatesFor(state.snapshot, market).map((candidate, index) => ({ candidate, market, legacyRank: index + 1 })));
+  return MARKET_ORDER.flatMap((market) => candidatesFor(state.snapshot, market).map((candidate, index) => ({
+    candidate,
+    market,
+    legacyRank: index + 1,
+    decisionRole: candidateDecisionRole(candidate, market),
+  })));
 }
 
 function candidateScore(candidate) {
-  return num(candidate?.recommendation_degree ?? candidate?.confidence);
+  const value = candidate?.recommendation_degree ?? candidate?.confidence;
+  return value === null || value === undefined || value === "" ? NaN : num(value, NaN);
 }
 
 function candidatePrice(candidate) {
@@ -320,6 +366,143 @@ function factorCards(candidate) {
   }).join("")}</div>`;
 }
 
+function dualLowAnalysis(candidate) {
+  return candidate?.analysis_projects?.dual_low || null;
+}
+
+function dualLowLabel(analysis) {
+  if (!analysis) return "待生成";
+  if (analysis.status === "ranked") return analysis.interpretation || "双低观察";
+  if (analysis.status === "rejected") return analysis.interpretation || ((analysis.missing_fields || []).length ? "数据不足" : "非双低风格");
+  if (analysis.status === "not_applicable") return "暂不适用";
+  return "数据不足";
+}
+
+function dualLowTone(analysis) {
+  if (analysis?.status === "ranked" && num(analysis.rank_percentile) >= 0.8) return "positive";
+  if (analysis?.status === "ranked") return "primary";
+  if (analysis?.status === "rejected" && !(analysis.missing_fields || []).length) return "warning";
+  return "muted";
+}
+
+function dualLowReasonLabel(code) {
+  return DUAL_LOW_REASON_META[code] || code || "其他过滤条件";
+}
+
+function topPercent(rank, universe) {
+  const position = num(rank, NaN);
+  const size = num(universe, NaN);
+  return Number.isFinite(position) && Number.isFinite(size) && size > 0 ? Math.max(1, Math.ceil(position / size * 100)) : null;
+}
+
+function scoreLensCards(candidate, market) {
+  const dualLow = dualLowAnalysis(candidate);
+  const quality = candidate?.data_quality;
+  const row = allCandidates().find((item) => candidateId(item.candidate, item.market) === candidateId(candidate, market));
+  const role = row?.decisionRole || candidateDecisionRole(candidate, market);
+  const legacyAction = role === "primary" ? recommendationLabel(candidate, true) : role === "blocked" ? "暂不执行" : "观察候选";
+  const v2Top = topPercent(candidate?.v2?.rank, candidate?.v2?.rank_universe_size);
+  const dualTop = topPercent(dualLow?.rank, dualLow?.rank_universe_size);
+  const gates = candidate?.decision_gates || [];
+  const blocked = gates.filter((gate) => gate.status === "BLOCK").length;
+  const warned = gates.filter((gate) => gate.status === "WARN").length;
+  const passed = gates.filter((gate) => gate.status === "PASS").length;
+  const evidenceStatus = blocked ? "BLOCK" : warned ? "WARN" : gates.length ? "PASS" : "待生成";
+  const dualValue = dualLow?.status === "ranked" ? `前 ${dualTop || "--"}%` : dualLowLabel(dualLow);
+  const dualMeta = dualLow?.status === "ranked"
+    ? `${fmt(dualLow.final_score, 1)} 分 · #${dualLow.rank || "--"}/${dualLow.rank_universe_size || "--"}`
+    : dualLow?.status === "rejected"
+      ? `${(dualLow.filter_reasons || []).length} 项未通过`
+      : market === "a_share" ? "等待新快照" : "首版仅支持 A 股";
+  const lenses = [
+    {
+      key: "legacy", icon: "ph-seal-check", label: "实际决策", value: legacyAction,
+      meta: `推荐度 ${fmt(candidateScore(candidate), 0)}/100 · Legacy #${row?.legacyRank || "--"}`,
+      note: role === "primary" ? "当前实际首选，仍需服从门控和计划价" : role === "blocked" ? "最接近阈值，但当前不执行" : "保留观察，不代表买入信号",
+      tone: role === "primary" ? "active" : role === "blocked" ? "warning" : "muted",
+    },
+    {
+      key: "v2", icon: "ph-ranking", label: "影子排序", value: candidate?.v2?.rank ? `前 ${v2Top || "--"}%` : "待生成",
+      meta: candidate?.v2?.rank ? `${fmt(candidate.v2.rule_score, 1)} 分 · #${candidate.v2.rank}/${candidate.v2.rank_universe_size || "--"}` : "去重规则分",
+      note: "解释因子表现，不改变旧决策", tone: "shadow",
+    },
+    {
+      key: "dual-low", icon: "ph-scales", label: "价值筛选", value: dualValue,
+      meta: dualMeta, note: "A 股双低研究优先级，独立观察", tone: dualLowTone(dualLow),
+    },
+    {
+      key: "quality", icon: "ph-database", label: "证据与门控", value: evidenceStatus,
+      meta: quality ? `完整度 ${fmt(quality.score, 0)}% · ${passed}/${gates.length} PASS` : "旧快照 · 待生成",
+      note: "缺失项不会伪装成真实零值", tone: blocked ? "negative" : warned ? "warning" : gates.length ? "positive" : "muted",
+    },
+  ];
+  return `<div class="score-lens-grid">${lenses.map((lens) => `<article class="score-lens ${esc(lens.tone)}" data-score-lens="${esc(lens.key)}">
+    <div class="score-lens-head">${icon(lens.icon)}<span>${esc(lens.label)}</span></div>
+    <strong>${esc(lens.value)}</strong><small>${esc(lens.meta)}</small><p>${esc(lens.note)}</p>
+  </article>`).join("")}</div>`;
+}
+
+function scoreDivergence(candidate, market) {
+  const dualLow = dualLowAnalysis(candidate);
+  const role = candidateDecisionRole(candidate, market);
+  const v2Top = topPercent(candidate?.v2?.rank, candidate?.v2?.rank_universe_size);
+  if (role === "primary" && dualLow?.status === "rejected") {
+    const reason = dualLow.filter_reasons?.[0]?.message;
+    return `<div class="callout warning score-divergence">${icon("ph-arrows-left-right")}<div><strong>风格分歧，不是模型冲突</strong><br>Legacy 把它列为当前首选，但双低模型认为它不属于低估值风格${reason ? `：${esc(reason)}` : ""}。实际决策仍由 Legacy 与客观门控决定。</div></div>`;
+  }
+  if (role === "blocked" && dualLow?.status === "ranked") {
+    return `<div class="callout warning score-divergence">${icon("ph-shield-warning")}<div><strong>价值靠前，不等于现在能买</strong><br>双低研究排名较高，但 Legacy 或客观门控尚未通过；继续观察，不把价值分当交易指令。</div></div>`;
+  }
+  if (role === "primary" && dualLow?.status === "ranked" && v2Top !== null && v2Top <= 25) {
+    return `<div class="callout score-divergence">${icon("ph-check-circle")}<div><strong>多视角一致</strong><br>Legacy 当前首选，V2 结构位于前 25%，同时进入双低研究序列；三套结果仍保持独立，不合成为上涨概率。</div></div>`;
+  }
+  return `<div class="callout score-divergence">${icon("ph-info")}<div><strong>如何阅读三套结果</strong><br>Legacy 回答“当前怎么做”，V2 回答“结构质量如何”，双低回答“是否属于低估值风格”。</div></div>`;
+}
+
+function dualLowPanel(candidate, market) {
+  const analysis = dualLowAnalysis(candidate);
+  const title = "独立分析项目 · 双低七因子";
+  const disclaimer = "研究优先级，不是上涨概率，不参与当前 BUY / NO_TRADE。";
+  if (!analysis) {
+    return `<div class="dual-low-block"><div class="section-heading"><h3>${title}</h3><span>shadow overlay</span></div><div class="callout">${icon("ph-clock-countdown")}<div><strong>等待新快照</strong><br>当前历史快照尚未运行双低模型；Legacy 与 V2 结果仍然有效。</div></div></div>`;
+  }
+  if (analysis.status === "not_applicable") {
+    return `<div class="dual-low-block"><div class="section-heading"><h3>${title}</h3><span>not applicable</span></div><div class="callout">${icon("ph-info")}<div><strong>港股 / 美股暂不套用 A 股阈值</strong><br>币种、估值制度和比较池口径不同，首版明确显示暂不适用。</div></div></div>`;
+  }
+  if (analysis.status === "unavailable") {
+    return `<div class="dual-low-block"><div class="section-heading"><h3>${title}</h3><span>unavailable</span></div><div class="callout warning">${icon("ph-warning-circle")}<div><strong>本快照没有可用双低结果</strong><br>${esc(analysis.reason_code || "MODEL_EXECUTION_FAILED")}；现有选股流程不受影响。</div></div></div>`;
+  }
+  if (analysis.status === "rejected") {
+    const reasons = analysis.filter_reasons || [];
+    return `<div class="dual-low-block"><div class="section-heading"><h3>${title}</h3><span>${esc(dualLowLabel(analysis))}</span></div>
+      <div class="dual-low-verdict warning"><div>${icon((analysis.missing_fields || []).length ? "ph-database" : "ph-funnel-x")}<span><small>双低结论</small><strong>${esc(dualLowLabel(analysis))}</strong></span></div><p>这不代表公司不好，只表示不符合当前低 PE / 低 PB 风格或数据口径不完整。</p></div>
+      <ul class="dual-low-reasons">${reasons.map((reason) => `<li><span title="${esc(reason.code || "filter")}">${esc(dualLowReasonLabel(reason.code))}</span><div><b>${esc(reason.message || "未通过双低过滤")}</b><small>实际 ${esc(reason.actual ?? "--")} · 要求 ${esc(reason.expected || "--")}</small></div></li>`).join("") || `<li><div><b>未保存过滤明细</b></div></li>`}</ul>
+      <p class="dual-low-disclaimer">${disclaimer}</p></div>`;
+  }
+  const factorScores = analysis.factor_scores || {};
+  const contributions = analysis.contributions || {};
+  const risks = analysis.risk_flags || [];
+  return `<div class="dual-low-block"><div class="section-heading"><h3>${title}</h3><span>dsa-screening-score-v1</span></div>
+    <div class="dual-low-verdict ${esc(dualLowTone(analysis))}"><div>${icon("ph-scales")}<span><small>${esc(dualLowLabel(analysis))}</small><strong>${fmt(analysis.final_score, 1)}</strong></span></div><p>同批合格 A 股排名 #${fmt(analysis.rank, 0)} / ${fmt(analysis.rank_universe_size, 0)}，比较池为本次 selector quote pool。</p></div>
+    <div class="score-equation"><span><small>七因子基础分</small><b>${fmt(analysis.base_score, 1)}</b></span><i>−</i><span><small>风险扣分</small><b>${fmt(analysis.risk_penalty, 1)}</b></span><i>−</i><span><small>集中度扣分</small><b>${fmt(analysis.portfolio_penalty, 1)}</b></span><i>=</i><span class="result"><small>最终研究分</small><b>${fmt(analysis.final_score, 1)}</b></span></div>
+    <div class="dual-factor-grid">${Object.entries(DUAL_LOW_FACTOR_META).map(([key, meta]) => `<article><header><span>${esc(meta[0])}</span><b>${fmt(factorScores[key], 1)}</b></header><div class="progress-bar"><span style="width:${clamp(factorScores[key])}%"></span></div><footer><small>${esc(meta[1])}</small><em>贡献 ${fmt(contributions[key], 1)}</em></footer></article>`).join("")}</div>
+    ${risks.length ? `<ul class="dual-low-risk-list">${risks.map((risk) => `<li>${icon("ph-warning")}<span>${esc(risk.message || risk.code || "风险提示")}<small>扣分影响 ${fmt(risk.impact, 1)}</small></span></li>`).join("")}</ul>` : `<p class="muted dual-low-no-risk">当前双低模型未命中额外风险扣分。</p>`}
+    <p class="dual-low-disclaimer">${disclaimer}</p></div>`;
+}
+
+function dualLowBatchOverview() {
+  const model = state.snapshot?.analysis_models?.dual_low;
+  if (!model) return "";
+  if (model.status !== "available") {
+    return `<section class="panel dual-low-overview"><header class="panel-header"><div><h3 class="panel-title">A股双低独立榜单</h3><p class="panel-subtitle">同批 PE / PB 价值筛选 · 不参与实际决策</p></div>${badge("等待新快照", "warning")}</header><div class="callout">${icon("ph-clock-countdown")}<div>当前快照尚未生成独立双低榜单；Legacy 与 V2 结果照常展示。</div></div></section>`;
+  }
+  const leaders = model.top_ranked || [];
+  const rejections = model.rejection_breakdown || [];
+  return `<section class="panel dual-low-overview"><header class="panel-header"><div><h3 class="panel-title">A股双低独立榜单</h3><p class="panel-subtitle">${esc(dateTime(model.score_as_of))} · ${esc(model.pool_scope || "同批报价池")} · 研究优先级，不是上涨概率</p></div>${badge(`${fmt(model.eligible_count, 0)} 合格 / ${fmt(model.input_count, 0)} 输入`, "positive")}</header>
+    <div class="dual-low-overview-grid"><div><h4>研究优先序列 Top 5</h4><ol class="dual-low-leaderboard">${leaders.map((item) => `<li><span>${fmt(item.rank, 0)}</span><div><b>${esc(item.name || item.code)}</b><small>${esc(item.code)} · 风险 ${esc(DUAL_LOW_RISK_META[item.risk_level] || item.risk_level || "--")}</small></div><strong>${fmt(item.final_score, 1)}</strong></li>`).join("") || `<li class="empty-row">本批次没有通过双低过滤的股票。</li>`}</ol></div><div><h4>主要拒绝原因</h4><ul class="rejection-breakdown">${rejections.slice(0, 5).map((item) => `<li><span title="${esc(item.code)}">${esc(dualLowReasonLabel(item.code))}</span><b>${fmt(item.count, 0)} 只</b></li>`).join("") || `<li><span>无</span><b>0</b></li>`}</ul></div></div>
+    <p class="dual-low-disclaimer">本轮输入：${esc(DUAL_LOW_INPUT_META[model.input_profile] || model.input_profile || "行情估值核心字段")}。${esc((model.warnings || [])[0] || "部分可选技术字段缺失时使用模型中性回退。")}</p></section>`;
+}
+
 function renderDecision() {
   const root = $("#decisionView");
   const section = marketSection(state.snapshot);
@@ -344,7 +527,7 @@ function renderDecision() {
   const live = state.live.get(candidateId(baseCandidate, state.market));
   root.innerHTML = `
     <div class="toolbar">
-      <div class="toolbar-left"><div><h2>${MARKET_META[state.market].label} · ${esc(labelForRegime(regime))}</h2><p>${esc(section.description || decision.message || "根据当前快照执行")}</p></div>${badge(state.snapshot?.selector_mode === "legacy_active_v2_shadow" ? "Legacy Active · V2 Shadow" : "Legacy Active", "purple")}</div>
+      <div class="toolbar-left"><div><h2>${MARKET_META[state.market].label} · ${esc(labelForRegime(regime))}</h2><p>${esc(section.description || decision.message || "根据当前快照执行")}</p></div>${badge(state.snapshot?.selector_mode?.includes("dual_low") ? "Legacy Active · V2 + 双低 Shadow" : state.snapshot?.selector_mode?.includes("v2") ? "Legacy Active · V2 Shadow" : "Legacy Active", "purple")}</div>
       <div class="toolbar-right">${marketSwitch()}<button class="icon-button" type="button" data-action="live" data-market="${state.market}" data-code="${esc(baseCandidate.code || baseCandidate.symbol)}">${icon("ph-lightning")}刷新当前行情</button></div>
     </div>
     ${renderKpis([
@@ -369,7 +552,7 @@ function renderDecision() {
           </div>
         </article>
         <article class="chart-card"><header class="chart-header"><div><h3 class="chart-title">价格结构与计划位</h3><p class="chart-subtitle">日 K · MA5 / MA10 / MA20 · 当前行情只覆盖图表和执行提示</p></div>${badge(`${(candidate.kline || []).length} 根K线`)}</header><div class="chart-shell"><canvas id="decisionChart" aria-label="${esc(candidate.name)}日K线图"></canvas></div></article>
-        <article class="panel"><header class="panel-header"><div><h3 class="panel-title">评分证据拆解</h3><p class="panel-subtitle">旧分数继续实际决策；V2 分组只做可解释影子排序</p></div>${candidate.v2 ? badge(`V2 #${candidate.v2.rank || "--"} / ${candidate.v2.rank_universe_size || "--"}`, "primary") : ""}</header>${factorCards(candidate)}</article>
+        <article class="panel score-evidence-panel"><header class="panel-header"><div><h3 class="panel-title">评分证据拆解</h3><p class="panel-subtitle">先看实际决策，再分别核对 V2 与双低视角；三者不机械相加</p></div>${candidate.v2 ? badge(`V2 #${candidate.v2.rank || "--"} / ${candidate.v2.rank_universe_size || "--"}`, "primary") : ""}</header>${scoreLensCards(candidate, state.market)}${scoreDivergence(candidate, state.market)}<div class="detail-section"><div class="section-heading"><h3>V2 去重因子</h3><span>影子排序</span></div>${factorCards(candidate)}</div>${dualLowPanel(candidate, state.market)}</article>
       </div>
       <aside class="decision-side stack">
         <article class="panel"><header class="panel-header"><div><h3 class="panel-title">为什么是它</h3><p class="panel-subtitle">只展示快照保存的证据</p></div></header><ul class="evidence-list">${(candidate.reasons || []).slice(0, 7).map((reason) => `<li><h4>${esc(reason)}</h4></li>`).join("") || `<li><p>本快照未保存结构化理由。</p></li>`}</ul></article>
@@ -406,7 +589,7 @@ function featureEvidence(candidate) {
 }
 
 function candidateDetail(row) {
-  if (!row) return `<div class="empty-state">${icon("ph-cursor-click")}<h3>选择一只候选</h3><p>点击左侧候选查看来源链、两套评分和客观门控。</p></div>`;
+  if (!row) return `<div class="empty-state">${icon("ph-cursor-click")}<h3>选择一只候选</h3><p>点击左侧候选查看来源链、三种评分视角和客观门控。</p></div>`;
   const { candidate: raw, market } = row;
   const candidate = liveMerged(raw, market);
   const lineage = candidate.candidate_lineage || {};
@@ -416,20 +599,33 @@ function candidateDetail(row) {
   const riskTexts = [...(candidate.risk_items || []).map((risk) => `${risk.code}${risk.evidence ? ` · ${risk.evidence}` : ""}`), ...(candidate.risk_flags || [])];
   const features = featureEvidence(candidate);
   const checked = state.compare.includes(candidateId(raw, market));
+  const dualLow = dualLowAnalysis(candidate);
   return `<article class="detail-panel candidate-detail">
-    <header class="detail-header"><div><div class="eyebrow">${marketBadge(market)} ${esc(MARKET_META[market].label)} · ${esc(candidate.code || candidate.symbol)}</div><h2 class="detail-title">${esc(candidate.name)}</h2><p class="detail-subtitle">${esc(candidate.role || candidate.reason_tags || "综合候选")}</p></div><div class="detail-actions">${badge(`Legacy #${row.legacyRank}`, "primary")}${candidate.v2?.rank ? badge(`V2 #${candidate.v2.rank}/${candidate.v2.rank_universe_size}`, "purple") : ""}</div></header>
-    <div class="detail-score-grid">
-      <div><small>推荐度</small><strong>${fmt(candidateScore(candidate), 0)}</strong><span>实际决策</span></div>
-      <div><small>Legacy 总分</small><strong>${fmt(candidate.score, 1)}</strong><span>保留</span></div>
-      <div><small>V2 规则分</small><strong>${candidate.v2 ? fmt(candidate.v2.rule_score, 1) : "待生成"}</strong><span>影子排序</span></div>
-      <div><small>数据质量</small><strong>${quality ? `${fmt(quality.score, 0)}%` : "旧快照"}</strong><span>${esc(quality?.status || "待生成")}</span></div>
-    </div>
+    <header class="detail-header"><div><div class="eyebrow">${marketBadge(market)} ${esc(MARKET_META[market].label)} · ${esc(candidate.code || candidate.symbol)}</div><h2 class="detail-title">${esc(candidate.name)}</h2><p class="detail-subtitle">${esc(candidate.role || candidate.reason_tags || "综合候选")}</p></div><div class="detail-actions">${badge(`Legacy #${row.legacyRank}`, "primary")}${candidate.v2?.rank ? badge(`V2 #${candidate.v2.rank}/${candidate.v2.rank_universe_size}`, "purple") : ""}${dualLow?.status === "ranked" ? badge(`双低 #${dualLow.rank}/${dualLow.rank_universe_size}`, "positive") : dualLow ? badge(dualLowLabel(dualLow), dualLowTone(dualLow)) : ""}</div></header>
+    ${scoreLensCards(candidate, market)}
+    ${scoreDivergence(candidate, market)}
     <div class="detail-section"><div class="section-heading"><h3>来源链</h3><span>${esc(lineage.universe_origin || (market === "a_share" ? "dynamic_snapshot" : "curated_static"))}</span></div>${routes.length ? `<ul class="event-list">${routes.map((route) => `<li><h4>${esc(route.route || "legacy")} · ${esc(route.source || "来源未保存")}</h4><p>${esc(route.reason || "该路径召回")}</p><div class="event-meta"><span>${esc(route.published_at || route.observed_at || "时间未保存")}</span>${route.decay_weight !== undefined ? `<span>延续权重 ${fmt(route.decay_weight, 2)}</span>` : ""}</div></li>`).join("")}</ul>` : `<div class="callout">${icon("ph-info")}<div>旧快照没有结构化召回来源；这不会影响旧评分，但 V2 事件组不据此加分。</div></div>`}</div>
-    <div class="detail-section"><div class="section-heading"><h3>评分分组</h3><span>同一特征只在一组计分</span></div>${factorCards(candidate)}</div>
+    <div class="detail-section"><div class="section-heading"><h3>V2 评分分组</h3><span>同一特征只在一组计分</span></div>${factorCards(candidate)}</div>
+    <div class="detail-section">${dualLowPanel(candidate, market)}</div>
     ${features.length ? `<div class="detail-section"><div class="section-heading"><h3>特征证据</h3><span>${features.filter((f) => f.used_in_score).length}/${features.length} 参与</span></div><div class="feature-table">${features.map((feature) => `<div><span>${esc(feature.feature_id)}</span><b>${feature.used_in_score ? fmt(feature.score, 1) : "缺失"}</b><small>${esc(feature.evidence || "")}</small></div>`).join("")}</div></div>` : ""}
     <div class="detail-section"><div class="section-heading"><h3>客观门控与风险</h3><span>${esc(candidate.execution_state || "Legacy")}</span></div>${gates.length ? `<ul class="gate-list">${gates.map((gate) => `<li><span class="status-pill ${gate.status === "PASS" ? "positive" : gate.status === "BLOCK" ? "negative" : "warning"}">${esc(gate.status)}</span><div><strong>${esc(gate.id)}</strong><small>${esc(gate.reason || "")}</small></div></li>`).join("")}</ul>` : `<p class="muted">旧快照尚未保存 V2 门控。</p>`}${riskTexts.length ? `<ul class="evidence-list risk-list">${riskTexts.map((risk) => `<li><p>${esc(risk)}</p></li>`).join("")}</ul>` : `<p class="muted">未保存额外风险标签。</p>`}</div>
     <div class="detail-footer"><button class="icon-button" type="button" data-action="live" data-market="${market}" data-code="${esc(candidate.code || candidate.symbol)}">${icon("ph-lightning")}刷新行情</button><button class="icon-button ${checked ? "is-active" : ""}" type="button" data-action="compare" data-key="${esc(candidateId(raw, market))}">${icon(checked ? "ph-check" : "ph-scales")} ${checked ? "已加入对比" : "加入对比"}</button></div>
   </article>`;
+}
+
+function candidateMobileCard(row) {
+  const c = liveMerged(row.candidate, row.market);
+  const key = candidateId(row.candidate, row.market);
+  const risk = riskLevel(c);
+  const dualLow = dualLowAnalysis(c);
+  const dualText = dualLow?.status === "ranked"
+    ? `${fmt(dualLow.final_score, 0)} · #${dualLow.rank}/${dualLow.rank_universe_size}`
+    : dualLowLabel(dualLow);
+  return `<button class="candidate-mobile-card ${key === state.candidateKey ? "is-selected" : ""}" type="button" data-action="select-candidate" data-key="${esc(key)}" aria-pressed="${key === state.candidateKey}">
+    <header><span>${marketBadge(row.market)}<b>${esc(c.name)}</b><small>${esc(c.code || c.symbol)}</small></span>${badge(decisionRoleLabel(row.decisionRole), row.decisionRole === "primary" ? "positive" : row.decisionRole === "blocked" ? "negative" : "")}</header>
+    <div class="candidate-mobile-price"><strong>${price(candidatePrice(c))}</strong><span class="${toneFor(c.current_change_pct ?? c.change_pct)}">${pct(c.current_change_pct ?? c.change_pct)}</span></div>
+    <dl><div><dt>Legacy</dt><dd>${fmt(candidateScore(c), 0)} · #${row.legacyRank}</dd></div><div><dt>V2 结构</dt><dd>${c.v2?.rank ? `${fmt(c.v2.rule_score, 0)} · #${c.v2.rank}/${c.v2.rank_universe_size}` : "--"}</dd></div><div><dt>双低价值</dt><dd>${esc(dualText)}</dd></div><div><dt>风险证据</dt><dd class="${risk === "clear" ? "positive" : risk === "blocked" ? "negative" : "warning"}">${({ clear: "PASS", warning: "WARN", blocked: "BLOCK" })[risk]}</dd></div></dl>
+  </button>`;
 }
 
 function renderCandidates() {
@@ -441,7 +637,7 @@ function renderCandidates() {
   const withLineage = all.filter((row) => routeNames(row.candidate).length).length;
   root.innerHTML = `
     <div class="toolbar candidates-toolbar">
-      <div class="toolbar-left"><div><h2>跨市场候选池</h2><p>Legacy 顺序是实际结果，V2 排名用于观察去重后的因子表现</p></div></div>
+      <div class="toolbar-left"><div><h2>跨市场候选池</h2><p>Legacy 决定实际顺序；V2 与双低分别回答结构质量和价值风格</p></div></div>
       <div class="toolbar-right"><label class="search-field">${icon("ph-magnifying-glass")}<input id="candidateSearch" type="search" value="${esc(state.candidateFilters.query)}" placeholder="搜索公司 / 代码 / 主题" aria-label="搜索候选"></label></div>
     </div>
     <div class="filter-strip">
@@ -455,14 +651,18 @@ function renderCandidates() {
       { icon: "ph-prohibit", label: "客观阻断", value: fmt(blocked, 0), meta: "只统计结构化 BLOCK" },
       { icon: "ph-list-magnifying-glass", label: "筛选结果", value: fmt(rows.length, 0), meta: "表格不在前端重排" },
     ])}
+    ${dualLowBatchOverview()}
     <div class="master-detail candidate-master-detail">
       <section class="panel candidate-table-panel"><header class="panel-header"><div><h3 class="panel-title">候选清单</h3><p class="panel-subtitle">推荐度不是收益概率；点击行查看证据</p></div></header>
-        ${rows.length ? `<div class="data-table-wrap"><table class="data-table"><thead><tr><th>市场</th><th>公司 / 代码</th><th class="number">现价</th><th class="number">涨跌</th><th class="number">推荐度</th><th class="number">Legacy</th><th class="number">V2</th><th>风险</th><th></th></tr></thead><tbody>${rows.map((row) => {
+        ${rows.length ? `<div class="data-table-wrap"><table class="data-table"><thead><tr><th>市场</th><th>公司 / 代码</th><th class="number">现价</th><th class="number">涨跌</th><th class="number">推荐度</th><th class="number">Legacy</th><th class="number">V2</th><th class="number">双低</th><th>风险</th><th></th></tr></thead><tbody>${rows.map((row) => {
           const c = liveMerged(row.candidate, row.market);
           const key = candidateId(row.candidate, row.market);
           const risk = riskLevel(c);
-          return `<tr class="${key === state.candidateKey ? "is-selected" : ""}" tabindex="0" data-action="select-candidate" data-key="${esc(key)}"><td>${marketBadge(row.market)}</td><td><span class="name">${esc(c.name)}</span><br><span class="symbol">${esc(c.code || c.symbol)}</span></td><td class="number">${price(candidatePrice(c))}</td><td class="number ${toneFor(c.current_change_pct ?? c.change_pct)}">${pct(c.current_change_pct ?? c.change_pct)}</td><td class="number"><strong>${fmt(candidateScore(c), 0)}</strong></td><td class="number">#${row.legacyRank}</td><td class="number">${c.v2?.rank ? `#${c.v2.rank}` : "--"}</td><td><span class="status-pill ${risk === "clear" ? "positive" : risk === "blocked" ? "negative" : "warning"}">${({ clear: "清晰", warning: "警告", blocked: "阻断" })[risk]}</span></td><td><button class="row-action" type="button" data-action="select-candidate" data-key="${esc(key)}" aria-label="查看${esc(c.name)}详情">${icon("ph-caret-right")}</button></td></tr>`;
+          const dualLow = dualLowAnalysis(c);
+          const dualLowCell = dualLow?.status === "ranked" ? `#${dualLow.rank} · ${fmt(dualLow.final_score, 0)}` : dualLowLabel(dualLow);
+          return `<tr class="${key === state.candidateKey ? "is-selected" : ""}" tabindex="0" data-action="select-candidate" data-key="${esc(key)}"><td>${marketBadge(row.market)}</td><td><span class="name">${esc(c.name)}</span><br><span class="symbol">${esc(c.code || c.symbol)}</span></td><td class="number">${price(candidatePrice(c))}</td><td class="number ${toneFor(c.current_change_pct ?? c.change_pct)}">${pct(c.current_change_pct ?? c.change_pct)}</td><td class="number"><strong>${fmt(candidateScore(c), 0)}</strong></td><td class="number">#${row.legacyRank}/${candidatesFor(state.snapshot, row.market).length}</td><td class="number">${c.v2?.rank ? `#${c.v2.rank}/${c.v2.rank_universe_size || "--"}` : "--"}</td><td class="number dual-low-cell ${esc(dualLowTone(dualLow))}">${esc(dualLowCell)}</td><td><span class="status-pill ${risk === "clear" ? "positive" : risk === "blocked" ? "negative" : "warning"}">${({ clear: "清晰", warning: "警告", blocked: "阻断" })[risk]}</span></td><td><button class="row-action" type="button" data-action="select-candidate" data-key="${esc(key)}" aria-label="查看${esc(c.name)}详情">${icon("ph-caret-right")}</button></td></tr>`;
         }).join("")}</tbody></table></div>` : `<div class="empty-state">${icon("ph-funnel-x")}<h3>没有匹配候选</h3><p>调整市场、风险或召回来源筛选。</p></div>`}
+        ${rows.length ? `<div class="candidate-mobile-list">${rows.map(candidateMobileCard).join("")}</div>` : ""}
       </section>
       <div>${candidateDetail(selected)}</div>
     </div>
@@ -636,6 +836,7 @@ function renderModel() {
   const status = state.status || {};
   const snapshot = state.snapshot || {};
   const weights = modelWeightRows();
+  const dualModel = snapshot.analysis_models?.dual_low || {};
   root.innerHTML = `
     <div class="toolbar"><div class="toolbar-left"><div><h2>模型与运行机制</h2><p>把“从哪里找到、为什么入选、为何可执行”拆成可核查步骤</p></div>${badge(snapshot.selector_mode || "legacy_active", "purple")}</div><div class="toolbar-right"><a class="icon-button" href="https://github.com/dzhdingzihang/xuangu" target="_blank" rel="noopener noreferrer">${icon("ph-github-logo")}查看源码</a></div></div>
     ${renderKpis([
@@ -644,10 +845,11 @@ function renderModel() {
       { icon: "ph-stack", label: "候选池版本", value: snapshot.universe_version || "legacy", meta: "A股动态 · 港美精选静态" },
       { icon: "ph-cloud", label: "公开运行面", value: status.platform || "Cloudflare Workers", meta: "生成：GitHub Actions" },
     ])}
-    <section class="panel model-pipeline-panel"><header class="panel-header"><div><h3 class="panel-title">从数据到决策</h3><p class="panel-subtitle">实时行情不会偷偷改写已经发布的评分</p></div></header><ol class="pipeline-list"><li><span>01</span><div><b>多路召回候选</b><p>A股合并事件、动量、流动性、回踩与最多 5 个工作日的历史延续；港美为透明的精选静态池。</p></div></li><li><span>02</span><div><b>行情与结构深评</b><p>获取实时报价和日 K，计算缠论近似、CZSC 近似、UZI 风控 / 评审团与 Serenity 产业链先验。</p></div></li><li><span>03</span><div><b>Legacy 实际决策</b><p>旧总分、推荐度、排序、BUY / NO_TRADE 原样保留，保护既有逻辑连续性。</p></div></li><li><span>04</span><div><b>V2 影子评分</b><p>同一特征只在一个分组计分，加入来源链、市场状态、数据质量和稳定风险码，暂不替换 Legacy。</p></div></li><li><span>05</span><div><b>客观门控与快照</b><p>无有效价格、K线不足、停牌退市或交易时段明确陈旧行情会阻断；结果写入不可变 JSON。</p></div></li><li><span>06</span><div><b>Cloudflare 展示</b><p>Worker 读取构建时烘焙快照；/api/live 只刷新价格、K线和执行提示，不重排股票。</p></div></li></ol></section>
+    <section class="panel model-pipeline-panel"><header class="panel-header"><div><h3 class="panel-title">从数据到决策</h3><p class="panel-subtitle">实时行情不会偷偷改写已经发布的评分</p></div></header><ol class="pipeline-list"><li><span>01</span><div><b>多路召回候选</b><p>A股合并事件、动量、流动性、回踩与最多 5 个工作日的历史延续；港美为透明的精选静态池。</p></div></li><li><span>02</span><div><b>整批价值筛选</b><p>在 A 股同一报价池运行 PE / PB 双低七因子；先保留完整排名分母，再截取股票做深评。</p></div></li><li><span>03</span><div><b>行情与结构深评</b><p>获取日 K，计算缠论近似、CZSC 近似、UZI 风控 / 评审团与 Serenity 产业链先验。</p></div></li><li><span>04</span><div><b>Legacy 实际决策</b><p>旧总分、推荐度、排序、BUY / NO_TRADE 原样保留，保护既有逻辑连续性。</p></div></li><li><span>05</span><div><b>V2 + 双低影子</b><p>V2 去重解释结构质量；双低独立解释价值风格，两套影子分均不替换 Legacy。</p></div></li><li><span>06</span><div><b>客观门控与快照</b><p>无有效价格、K线不足、停牌退市或交易时段明确陈旧行情会阻断；结果写入不可变 JSON。</p></div></li><li><span>07</span><div><b>Cloudflare 展示</b><p>Worker 读取构建时快照；/api/live 只刷新价格、K线和执行提示，不重排股票。</p></div></li></ol></section>
     <div class="model-grid">
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">旧因子仍然保留</h3><p class="panel-subtitle">回答“之前的评分还在吗”</p></div>${badge("Active", "positive")}</header><div class="legacy-map"><div><b>初筛 pre_score</b><span>成交额、换手、量比、涨幅等</span></div><div><b>缠论近似 chan_score</b><span>均线结构、二买 / 三买、箱体回踩</span></div><div><b>CZSC 近似</b><span>中枢、趋势、箱体位置与背驰风险</span></div><div><b>UZI + 评审团</b><span>买点纪律、流动性、过热和杀猪盘门控</span></div><div><b>Serenity 先验</b><span>AI capex 上游稀缺环节与融资风险</span></div><div><b>推荐度与动作</b><span>继续决定实际排名和 BUY / NO_TRADE</span></div></div></article>
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">V2 分组权重</h3><p class="panel-subtitle">随市场状态采用规则先验；分数只作影子观察</p></div>${badge(snapshot.weights_version || "示意基准", "purple")}</header><div class="weight-list">${weights.map(([label, value]) => `<div><span>${esc(label)}</span><div class="progress-bar"><span style="width:${clamp(value)}%"></span></div><b>${fmt(value, 0)}%</b></div>`).join("")}</div><p class="fine-print">若市场基准数据不足，状态为 unknown 并保守处理；这里不声称是机器学习概率。</p></article>
+      <article class="panel"><header class="panel-header"><div><h3 class="panel-title">双低七因子 · 独立影子</h3><p class="panel-subtitle">补充估值视角，不与 Legacy / V2 机械相加</p></div>${badge(dualModel.status === "available" ? "Shadow available" : "Shadow", dualModel.status === "available" ? "positive" : "warning")}</header><dl><dt>模型</dt><dd>${esc(dualModel.model_id || "dsa-screening-score-v1")}</dd><dt>市场</dt><dd>A股；港美暂不适用</dd><dt>比较池</dt><dd>${esc(dualModel.pool_scope || "a_share.merged_recall_quote_pool.pre_kline_v1")}</dd><dt>输入 / 合格</dt><dd>${dualModel.input_count === undefined ? "待新快照" : `${fmt(dualModel.input_count, 0)} / ${fmt(dualModel.eligible_count, 0)}`}</dd><dt>默认风格</dt><dd>PE≤15、PB≤2、不过热</dd><dt>决策权限</dt><dd>无；仅输出研究优先级</dd></dl><p class="fine-print">“被过滤”只表示不符合这套价值风格或数据不完整，不表示公司质量差。</p></article>
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">候选池边界</h3><p class="panel-subtitle">扩大召回，但不承诺全市场无遗漏</p></div></header><dl><dt>A股</dt><dd>事件 + 动量 + 流动性 + 回踩 + 历史延续</dd><dt>港股</dt><dd>153 只左右精选静态清单，Yahoo 行情</dd><dt>美股</dt><dd>258 只左右精选静态清单，Yahoo 行情</dd><dt>历史延续</dt><dd>最多 5 个工作日、40 只、带衰减元数据</dd><dt>交易日</dt><dd>当前计划任务仅按周一至周五，不识别三地全部节假日</dd></dl></article>
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">运行架构</h3><p class="panel-subtitle">公开站点不依赖 Render</p></div>${badge("Cloudflare only", "primary")}</header><div class="architecture-list"><div>${icon("ph-github-logo")}<span><b>GitHub Actions</b><small>定时运行 Python，生成最新快照与历史文件</small></span></div><div>${icon("ph-package")}<span><b>构建时 JSON assets</b><small>数据随 Worker 部署，不使用 KV / D1 / R2</small></span></div><div>${icon("ph-cloud")}<span><b>Cloudflare Worker</b><small>提供静态页面、历史快照 API 与实时行情代理</small></span></div><div>${icon("ph-browser")}<span><b>浏览器</b><small>渲染证据、筛选与执行提示，不在前端重算评分</small></span></div></div></article>
     </div>
@@ -796,7 +998,14 @@ function handleClick(event) {
   const { action, market, key, code } = control.dataset;
   if (action === "market") { state.market = market; renderRail(); switchTab("decision"); return; }
   if (action === "candidate-market") { state.candidateFilters.market = market; renderCandidates(); return; }
-  if (action === "select-candidate") { state.candidateKey = key; renderCandidates(); return; }
+  if (action === "select-candidate") {
+    state.candidateKey = key;
+    renderCandidates();
+    if (window.matchMedia("(max-width: 760px)").matches) {
+      requestAnimationFrame(() => $(".candidate-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
+    return;
+  }
   if (action === "open-candidate") { state.candidateKey = key; state.candidateFilters.market = key.split(":")[0]; switchTab("candidates"); return; }
   if (action === "go-candidates") { state.candidateFilters.market = state.market; switchTab("candidates"); return; }
   if (action === "compare") {

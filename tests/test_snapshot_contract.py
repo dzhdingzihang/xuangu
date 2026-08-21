@@ -4,6 +4,7 @@ import copy
 import unittest
 
 import server
+from scripts.validate_snapshot import validate_snapshot
 from tests.test_selector_v2 import fixture_candidate
 
 
@@ -54,9 +55,19 @@ class SnapshotContractTests(unittest.TestCase):
                 "data_quality",
                 "decision_gates",
                 "candidate_lineage",
+                "analysis_projects",
             }
             self.assertTrue(required <= row.keys())
             self.assertEqual(enriched["markets"][key]["decision"]["action"], legacy_actions[key])
+        self.assertEqual(enriched["analysis_models"]["dual_low"]["mode"], "shadow_overlay")
+        self.assertEqual(
+            enriched["markets"]["a_share"]["decision"]["primary"]["analysis_projects"]["dual_low"]["status"],
+            "unavailable",
+        )
+        self.assertEqual(
+            enriched["markets"]["hk"]["decision"]["primary"]["analysis_projects"]["dual_low"]["status"],
+            "not_applicable",
+        )
         self.assertEqual(
             enriched["markets"]["hk"]["decision"]["primary"]["candidate_lineage"]["universe_origin"],
             "curated_static",
@@ -78,6 +89,12 @@ class SnapshotContractTests(unittest.TestCase):
             self.assertEqual(new["message"], old["message"])
             self.assertEqual(new["primary"]["score"], old["primary"]["score"])
             self.assertEqual(new["primary"]["recommendation_degree"], old["primary"]["recommendation_degree"])
+
+    def test_snapshot_validator_accepts_shadow_fallback_and_rejects_decision_participation(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        self.assertEqual(validate_snapshot(enriched), [])
+        enriched["analysis_models"]["dual_low"]["participates_in_decision"] = True
+        self.assertIn("dual-low model must not participate in the decision", validate_snapshot(enriched))
 
 
 if __name__ == "__main__":

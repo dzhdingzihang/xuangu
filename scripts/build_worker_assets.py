@@ -12,6 +12,21 @@ STATIC = ROOT / "static"
 PICKS = ROOT / "data" / "picks"
 REQUIRED_STATIC_FILES = ("index.html", "styles.css", "app.js")
 MANIFEST_VERSION = "selector-manifest-v2"
+DUAL_LOW_SUMMARY_FIELDS = (
+    "status",
+    "mode",
+    "model_id",
+    "package_version",
+    "strategy_id",
+    "strategy_version",
+    "pool_scope",
+    "participates_in_decision",
+    "score_as_of",
+    "input_count",
+    "eligible_count",
+    "rejected_count",
+    "rank_universe_size",
+)
 
 
 def validate_required_assets() -> None:
@@ -89,6 +104,36 @@ def summarize_market_regime(section: dict) -> dict | None:
     return summary or None
 
 
+def summarize_analysis_models(pick: dict) -> dict:
+    """Keep model identity and batch health without copying pool-sized results."""
+    dual_low = ((pick.get("analysis_models") or {}).get("dual_low") or {})
+    if not isinstance(dual_low, dict):
+        return {}
+
+    summary = {
+        key: dual_low.get(key)
+        for key in DUAL_LOW_SUMMARY_FIELDS
+        if dual_low.get(key) is not None
+    }
+    supported_markets = dual_low.get("supported_markets")
+    if isinstance(supported_markets, list):
+        summary["supported_markets"] = [
+            market for market in supported_markets[:3] if isinstance(market, str)
+        ]
+
+    coverage = dual_low.get("required_field_coverage")
+    if isinstance(coverage, dict):
+        coverage_summary = {
+            key: coverage.get(key)
+            for key in ("input_count", "complete_count", "ratio")
+            if coverage.get(key) is not None
+        }
+        if coverage_summary:
+            summary["required_field_coverage"] = coverage_summary
+
+    return {"dual_low": summary} if summary else {}
+
+
 def summarize_pick(path: pathlib.Path) -> dict | None:
     try:
         pick = json.loads(path.read_text(encoding="utf-8"))
@@ -110,6 +155,9 @@ def summarize_pick(path: pathlib.Path) -> dict | None:
         "universe_version": pick.get("universe_version"),
         **summarize_decision(pick.get("decision") or {}),
     }
+    analysis_models = summarize_analysis_models(pick)
+    if analysis_models:
+        summary["analysis_models"] = analysis_models
     markets = pick.get("markets") or {}
     if markets:
         summary["markets"] = {}
@@ -161,6 +209,7 @@ def main() -> None:
         "weights_version": latest_summary.get("weights_version"),
         "universe_version": latest_summary.get("universe_version"),
         "market_regimes": latest_summary.get("market_regimes") or {},
+        "analysis_models": latest_summary.get("analysis_models") or {},
         "files": files,
         "summaries": summaries,
     }

@@ -19,7 +19,7 @@ GitHub Actions 定时或手动触发
   → xuangu.alixjd.com 提供网页、快照 API 和实时行情 API
 ```
 
-这里有一个重要边界：现有 Python 选股程序不能在普通 Worker 请求里直接运行。模型计算发生在 GitHub Actions，Worker 读取发布时烘焙的不可变 JSON。网页“刷新”会重读最新快照；`/api/live` 只刷新当前股票的行情和执行提示，不会偷偷改变推荐度、V2 排名或 BUY/NO_TRADE。
+这里有一个重要边界：现有 Python 选股程序不能在普通 Worker 请求里直接运行。模型计算发生在 GitHub Actions，Worker 读取发布时烘焙的不可变 JSON。网页“刷新”会重读最新快照；`/api/live` 只刷新当前股票的行情和执行提示，不会偷偷改变推荐度、V2 排名、双低排名或 BUY/NO_TRADE。
 
 `GET /api/pick?force=1` 在生产环境会返回 `409`，明确提示使用 GitHub Actions 手动工作流，避免出现“按钮显示正在重算、实际仍是旧快照”的假动作。
 
@@ -28,12 +28,12 @@ GitHub Actions 定时或手动触发
 网站使用五个独立 Tab：
 
 1. **决策**：A 股、港股、美股的当前结论，首选/被拦截候选、买入参考、止损/止盈、K 线、因子证据和门控。
-2. **候选**：当前 API 返回候选的 Legacy 顺序、V2 影子排名、来源链、数据质量、风险项和单股详情。
+2. **候选**：当前 API 返回候选的 Legacy 顺序、V2 结构排名、A 股双低独立榜单、来源链、数据质量、风险项和单股详情。
 3. **事件**：真实事件召回和模型信号证据；没有原文 URL 或发布时间时明确标记“部分证据”，不会伪造交易所公告。
 4. **历史**：按 `snapshot_key` 打开同一天的每一次不可变快照，比较当时首选和推荐度变化。没有成熟收益标签时显示“待验证”。
-5. **模型说明**：候选池、旧因子、V2 分组、市场状态权重、数据门控、版本和运行架构。
+5. **模型说明**：候选池、旧因子、V2 分组、双低七因子、市场状态权重、数据门控、版本和运行架构。
 
-## 当前上线方式：Legacy Active + V2 Shadow
+## 当前上线方式：Legacy Active + V2 Shadow + Dual-Low Shadow
 
 这次升级没有删掉之前的选股因子，也没有立即用新分数替换历史决策。
 
@@ -44,6 +44,10 @@ Legacy Active
 V2 Shadow
   同步输出去重后的分组得分、市场状态、来源链、数据质量、风险码和市场内排名
   暂不改变 Legacy 决策，用真实历史样本观察 20–40 个交易日后再决定是否切换
+
+Dual-Low Shadow（A 股）
+  在同一批 A 股报价池中运行 PE/PB 双低七因子，输出通过/拒绝、横截面排名和风险扣分
+  作为独立价值风格分析，不进入 Legacy、V2 或 BUY/NO_TRADE
 ```
 
 每个候选仍保留这些旧字段：
@@ -66,13 +70,15 @@ V2 Shadow
 - `data_quality`：行情、K 线、事件和市场输入的完整度。
 - `decision_gates`：明确列出 PASS / WARN / BLOCK。
 - `risk_items`：用稳定风险码去重，避免同一风险在多个模块重复扣分。
+- `analysis_projects.dual_low`：单股双低状态、排名、七因子、扣分、过滤原因和缺失字段。
+- `analysis_models.dual_low`：整批输入/合格/拒绝数量、评分时点、前五名和拒绝原因分布。
 
 顶层兼容标识：
 
 ```json
 {
   "schema_version": "selector-snapshot-v2",
-  "selector_mode": "legacy_active_v2_shadow",
+  "selector_mode": "legacy_active_v2_dual_low_shadow",
   "weights_version": "v2-rule-prior-1",
   "universe_version": "recall-v2-1"
 }
@@ -181,11 +187,49 @@ V2 使用可解释先验权重，不使用尚未训练的机器学习模型：
 
 不能用抓取时间伪装成最新成交时间。V2 第一阶段只让客观执行问题进入 BLOCK：无有效价格、K 线不足、明确停牌/退市风险、明确不可成交，以及正常交易时段已知行情严重过期。数据缺少、市场状态未知、估值/财务未接入等先作为 WARN，不抢先改变 Legacy 决策。
 
+## 双低七因子独立分析
+
+模型 ID 为 `dsa-screening-score-v1`，来自随项目保留许可证和第三方声明的 `stock-scoring-kit 1.0.0`。源码以零运行时依赖形式保存在 `vendor/stock-scoring-kit/`，Python 每次快照只通过 Node bridge 批量调用一次；浏览器和 Cloudflare Worker 不重算。
+
+### 比较池和执行边界
+
+- 仅支持 A 股；港股、美股明确返回 `not_applicable`，不会把人民币阈值或 A 股估值口径硬套过去。
+- 在 A 股合并召回且取得报价的完整 `preliminary` 池上计算，发生在最多 36 只 K 线深评截断之前。
+- 页面只携带可见候选的既有结果；`rank_universe_size` 仍是完整合格批次，不用网页上的 8–9 只重新排名。
+- 运行失败、Node 不可用、结果损坏或字段异常时标记 `unavailable`，Legacy 和 V2 继续生成。
+
+默认风格过滤：成交额至少 5000 万元、PE TTM 0–15、PB 0–2、总市值 50–3000 亿元、价格 3–80 元、当日涨跌幅 -4.5%–4.5%，同时排除 ST/退市风险名称。边界只决定“是否符合双低风格”，不会把股票从主候选池删除；被拒绝不等于公司质量差。
+
+七因子权重：
+
+| 因子 | 权重 | 主要含义 |
+|---|---:|---|
+| 估值 `value` | 34% | PE/PB 同批横截面 |
+| 稳定性 `stability` | 20% | 涨跌、活跃度与异常风险 |
+| 流动性 `liquidity` | 14% | 成交额横截面 |
+| 动量 `momentum` | 10% | 温和趋势、避免过热 |
+| 活跃度 `activity` | 10% | 量比与换手适中 |
+| 反转 `reversal` | 6% | 可控回调线索 |
+| 规模 `size` | 6% | 总市值横截面 |
+
+```text
+base_score = Σ(七因子分 × 归一化权重)
+final_score = base_score - risk_penalty - portfolio_penalty
+```
+
+首版显式关闭组合集中度扣分和外部分融合：`portfolio_penalty_enabled=false`、`externalWeight=0`。当前输入配置 `quote_valuation_core_v1` 已接入 PE、PB、总市值、成交额、价格、涨跌幅、换手率和量比；60 日涨跌、MACD、RSI、20 日波动率/回撤/ATR及日线质量尚未对整批公平接入，因此相关可选项使用模型中性回退，快照会保留覆盖率和警告。
+
+硬过滤必需值使用 nullable 原始字段。PE/PB/总市值缺失时输出 `validation.*.invalid` 和 `missing_fields`，不会通过 `safe_float` 把缺失伪装成 0。
+
+页面把三套结果解释为：Legacy 回答“当前怎么做”，V2 回答“结构质量如何”，双低回答“是否属于低估值风格”。它们不机械相加，任何分数都不是上涨概率。
+
 ## 排名、推荐度和未来模型
 
 - `legacy.recommendation_degree`：当前生产规则推荐度。
 - `v2.rule_score`：去重后的影子规则分。
 - `v2.rank_percentile`：本次同市场已深评候选内的百分位，不是全市场百分位。
+- `analysis_projects.dual_low.final_score`：同批 A 股双低研究优先分；只在 `status=ranked` 时存在。
+- `analysis_projects.dual_low.rank`：双低合格池内排名；拒绝、不可用和港美不适用状态使用 `null`，不是 0 分。
 - 页面只展示 API 实际返回的首选/被拦截候选和 watchlist；`scored_size` 不等于浏览器能看到的完整列表数量。
 
 以下内容尚未上线，也不会在页面中伪造：LightGBM/LambdaRank、未来 10 日正收益概率、q10/q50/q90、Expected Alpha、Brier/ECE、Rank IC、跨市场统一概率排名。启用前至少需要点时历史、真实交易所日历、可成交入场价、费用/滑点、不可成交处理、purge/embargo 滚动样本外验证，以及 20–40 个交易日影子样本。
@@ -194,7 +238,8 @@ V2 使用可解释先验权重，不使用尚未训练的机器学习模型：
 
 - A 股事件/题材：同花顺公开事件接口。
 - A 股全市场、行业热度、龙虎榜：东方财富。
-- A 股实时报价：腾讯财经；Worker 实时接口优先东方财富，整组失败时回退腾讯。
+- A 股实时报价与双低核心字段：腾讯财经，包括成交额、换手率、量比、PE TTM、PB 和总市值；缺失状态单独保留。
+- Worker 实时接口：优先东方财富，整组失败时回退腾讯；只覆盖行情，不重算任何评分。
 - A 股日 K：百度股市通 → 东方财富 → 腾讯三级回退。
 - 港股/美股日 K 和实时参考：Yahoo Finance chart。
 - 历史连续性：近期不可变快照中的真实候选/K 线；不会凭空生成走势。
@@ -256,7 +301,10 @@ npm ci
 
 ```bash
 python3 -m unittest discover -s tests -v
+node --check src/index.js
 node --check static/app.js
+node --check scripts/score_dual_low.mjs
+node --check vendor/stock-scoring-kit/index.js
 ```
 
 构建和 Wrangler dry-run：

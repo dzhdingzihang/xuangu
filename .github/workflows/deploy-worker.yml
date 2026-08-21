@@ -48,10 +48,15 @@ jobs:
         run: |
           node --check src/index.js
           node --check static/app.js
+          node --check scripts/score_dual_low.mjs
+          node --check vendor/stock-scoring-kit/index.js
 
       - name: Generate smart pick snapshot
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
         run: python server.py --once --force
+
+      - name: Validate published snapshot schema
+        run: python scripts/validate_snapshot.py data/picks/latest.json
 
       - name: Install Node dependencies
         run: npm ci
