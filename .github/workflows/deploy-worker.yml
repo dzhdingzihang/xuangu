@@ -11,9 +11,14 @@ on:
     - cron: "28 13 * * 1-5"
   workflow_dispatch:
 
+concurrency:
+  group: xuangu-production
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
@@ -36,12 +41,16 @@ jobs:
         if: github.event_name == 'schedule'
         run: python scripts/schedule_gate.py
 
-      - name: Install Serenity skill
-        if: github.event_name != 'push' && (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true')
-        run: python scripts/install_serenity_skill.py
+      - name: Run Python unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Check Worker and browser JavaScript
+        run: |
+          node --check src/index.js
+          node --check static/app.js
 
       - name: Generate smart pick snapshot
-        if: github.event_name != 'push' && (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true')
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
         run: python server.py --once --force
 
       - name: Install Node dependencies
@@ -51,7 +60,7 @@ jobs:
         run: npm run build
 
       - name: Commit generated snapshot
-        if: github.event_name != 'push' && (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true')
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update daily pick snapshot"
