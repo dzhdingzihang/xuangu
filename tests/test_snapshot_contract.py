@@ -64,6 +64,9 @@ class SnapshotContractTests(unittest.TestCase):
         enriched = server.enrich_snapshot_v2(snapshot)
         self.assertEqual(enriched["schema_version"], server.SCHEMA_VERSION)
         self.assertEqual(enriched["selector_mode"], server.SELECTOR_MODE)
+        self.assertEqual(
+            enriched["analysis_models"]["ten_day_return"]["label_version"], server.TEN_DAY_LABEL_VERSION
+        )
         for key in ("a_share", "hk", "us"):
             row = enriched["markets"][key]["decision"]["primary"]
             required = {

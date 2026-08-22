@@ -40,6 +40,7 @@ CN_TZ = ZoneInfo("Asia/Shanghai")
 MODEL_VERSION = "smart-selector-2026-08-22.1-dual-low-shadow"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
+TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
 SERENITY_SKILL_DIR = pathlib.Path.home() / ".agents" / "skills" / "serenity-skill"
 SCHEMA_VERSION = "selector-snapshot-v2"
 SELECTOR_MODE = "legacy_active_v2_dual_low_shadow"
@@ -838,15 +839,16 @@ def summarize_decision(decision: dict) -> dict:
         "has_primary": bool(decision.get("primary")),
     }
     if primary:
-        range_obj = primary.get("estimated_2w_range") or primary.get("estimated_2d_range") or {}
+        two_week_range = primary.get("estimated_2w_range") or {}
+        two_day_range = primary.get("estimated_2d_range") or {}
         summary.update(
             {
                 "code": primary.get("code"),
                 "name": primary.get("name"),
                 "confidence": primary.get("recommendation_degree") or primary.get("confidence"),
                 "recommendation_degree": primary.get("recommendation_degree") or primary.get("confidence"),
-                "estimated_2w_range": range_obj.get("text"),
-                "estimated_2d_range": range_obj.get("text"),
+                "estimated_2w_range": two_week_range.get("text") if isinstance(two_week_range, dict) else None,
+                "estimated_2d_range": two_day_range.get("text") if isinstance(two_day_range, dict) else None,
                 "entry_price": primary.get("entry_price") or primary.get("price"),
                 "current_change_pct": primary.get("current_change_pct") or primary.get("change_pct"),
                 "realtime_session": ((primary.get("realtime") or {}).get("session_label")),
@@ -860,8 +862,50 @@ def summarize_decision(decision: dict) -> dict:
     return summary
 
 
+def is_global_ten_day_decision(decision: object) -> bool:
+    return bool(
+        isinstance(decision, dict)
+        and decision.get("contract_version") == "global-10d-v1"
+        and decision.get("decision_scope") == "global_10d"
+        and decision.get("action_basis") == "strict_cross_market_gate_v1"
+    )
+
+
+def summarize_history_outcome(pick: dict) -> dict | None:
+    outcome = pick.get("ten_day_outcome") or pick.get("outcome")
+    if not isinstance(outcome, dict):
+        return None
+    keys = (
+        "status",
+        "prediction_id",
+        "model_id",
+        "label_version",
+        "entry_at",
+        "entry_price",
+        "entry_source",
+        "exit_at",
+        "exit_price",
+        "exit_source",
+        "gross_total_return",
+        "net_total_return",
+        "transaction_cost",
+        "corporate_action_adjusted",
+        "calendar_id",
+        "currency",
+        "fx_rate_source",
+        "positive_label",
+        "settled_at",
+    )
+    summary = {key: outcome.get(key) for key in keys if key in outcome}
+    return summary or None
+
+
 def summarize_pick(pick: dict) -> dict:
-    decision = pick.get("decision") or {}
+    legacy_decision = pick.get("decision") or {}
+    raw_global = pick.get("global_decision")
+    is_global = is_global_ten_day_decision(raw_global)
+    global_decision = raw_global if is_global else None
+    action = (global_decision or {}).get("action") or ("NO_VALID_PICK" if is_global else "LEGACY_ONLY")
     summary = {
         "target_date": pick.get("target_date"),
         "signal_date": pick.get("signal_date"),
@@ -871,8 +915,26 @@ def summarize_pick(pick: dict) -> dict:
         "forecast_end_date": pick.get("forecast_end_date"),
         "forecast_horizon": pick.get("forecast_horizon"),
         "model_version": pick.get("model_version"),
-        **summarize_decision(decision),
+        "history_kind": "global_10d_v1" if is_global else "legacy_snapshot",
+        "decision_scope": "global_10d" if is_global else "legacy_market_rules",
+        "action": action,
+        "title": (
+            "跨市场候选待复核"
+            if action == "REVIEW_EXECUTABLE_PICK"
+            else "当前没有可执行跨市场候选"
+        )
+        if is_global
+        else "Legacy 规则快照",
+        "message": " · ".join((global_decision or {}).get("blocker_codes") or [])
+        if is_global
+        else "PRE_GLOBAL_10D_CONTRACT",
+        "has_primary": bool((global_decision or {}).get("primary")) if is_global else False,
+        "global_decision": global_decision if is_global else None,
+        "a_share_legacy": summarize_decision(legacy_decision),
     }
+    outcome = summarize_history_outcome(pick)
+    if outcome:
+        summary["outcome"] = outcome
     markets = pick.get("markets") or {}
     if markets:
         summary["markets"] = {
@@ -895,7 +957,119 @@ def blocker_level(decision: dict, primary: dict | None = None) -> str:
     return "no_signal"
 
 
-def history_payload(limit: int = 30) -> dict:
+def latest_decision_days(rows: list[dict]) -> list[dict]:
+    by_date: dict[str, dict] = {}
+    for row in rows:
+        key = row.get("target_date") or row.get("signal_date") or row.get("snapshot_key") or row.get("cache_key")
+        current = by_date.get(key)
+        if current is None or (
+            current.get("history_kind") != "global_10d_v1" and row.get("history_kind") == "global_10d_v1"
+        ):
+            by_date[key] = row
+    return list(by_date.values())
+
+
+def history_metadata(rows: list[dict], days: list[dict], view: str, returned_count: int) -> dict:
+    contract_days = [row for row in days if row.get("history_kind") == "global_10d_v1"]
+    legacy_days = [row for row in days if row.get("history_kind") == "legacy_snapshot"]
+    executable_groups: dict[str, list[dict]] = {}
+    for row in rows:
+        primary = (row.get("global_decision") or {}).get("primary")
+        prediction_id = primary.get("prediction_id") if isinstance(primary, dict) else None
+        if (
+            row.get("history_kind") == "global_10d_v1"
+            and (row.get("global_decision") or {}).get("action") == "REVIEW_EXECUTABLE_PICK"
+            and prediction_id
+        ):
+            executable_groups.setdefault(str(prediction_id), []).append(row)
+    executable = list(executable_groups.values())
+
+    def outcome_status(row: dict) -> str:
+        return str((row.get("outcome") or {}).get("status") or "").upper()
+
+    def valid_settled_outcome(row: dict) -> bool:
+        primary = (row.get("global_decision") or {}).get("primary") or {}
+        outcome = row.get("outcome") or {}
+        if outcome_status(row) != "SETTLED":
+            return False
+        try:
+            generated_at = _parse_iso_moment(row.get("generated_at"))
+            entry_at = _parse_iso_moment(outcome.get("entry_at"))
+            exit_at = _parse_iso_moment(outcome.get("exit_at"))
+            settled_at = _parse_iso_moment(outcome.get("settled_at"))
+            forecast_end = dt.datetime.combine(
+                dt.date.fromisoformat(str(row.get("forecast_end_date") or "")), dt.time.min, tzinfo=CN_TZ
+            )
+        except (TypeError, ValueError):
+            return False
+        numeric_fields = ("entry_price", "exit_price", "gross_total_return", "net_total_return", "transaction_cost")
+        valid_numbers = all(
+            isinstance(outcome.get(key), (int, float))
+            and not isinstance(outcome.get(key), bool)
+            and math.isfinite(outcome[key])
+            for key in numeric_fields
+        )
+        string_fields = ("entry_source", "exit_source", "calendar_id", "currency", "fx_rate_source")
+        valid_strings = all(isinstance(outcome.get(key), str) and bool(outcome[key]) for key in string_fields)
+        positive_label = outcome.get("positive_label")
+        net_total_return = outcome.get("net_total_return")
+        return bool(
+            primary.get("prediction_id")
+            and outcome.get("prediction_id") == primary.get("prediction_id")
+            and primary.get("model_id")
+            and outcome.get("model_id") == primary.get("model_id")
+            and primary.get("label_version")
+            and outcome.get("label_version") == primary.get("label_version")
+            and valid_numbers
+            and outcome.get("entry_price", 0) > 0
+            and outcome.get("exit_price", 0) > 0
+            and outcome.get("transaction_cost", -1) >= 0
+            and valid_strings
+            and isinstance(outcome.get("corporate_action_adjusted"), bool)
+            and isinstance(positive_label, bool)
+            and positive_label == (net_total_return > 0)
+            and generated_at
+            and entry_at
+            and exit_at
+            and settled_at
+            and entry_at >= generated_at
+            and exit_at >= forecast_end
+            and settled_at >= exit_at
+        )
+
+    selected_count = len(rows) if view == "raw" else len(days)
+    return {
+        "view": view,
+        "raw_run_count": len(rows),
+        "decision_day_count": len(days),
+        "duplicate_run_count": max(0, len(rows) - len(days)),
+        "global_contract_day_count": len(contract_days),
+        "legacy_day_count": len(legacy_days),
+        "no_valid_pick_day_count": sum(
+            1 for row in contract_days if (row.get("global_decision") or {}).get("action") == "NO_VALID_PICK"
+        ),
+        "executable_prediction_count": len(executable),
+        "pending_settlement_count": sum(
+            1
+            for group in executable
+            if not any(valid_settled_outcome(row) for row in group)
+            and any(outcome_status(row) == "PENDING" for row in group)
+        ),
+        "settled_sample_count": sum(
+            1 for group in executable if any(valid_settled_outcome(row) for row in group)
+        ),
+        "missing_outcome_count": sum(
+            1
+            for group in executable
+            if not any(valid_settled_outcome(row) for row in group)
+            and not any(outcome_status(row) == "PENDING" for row in group)
+        ),
+        "returned_count": returned_count,
+        "has_more": selected_count > returned_count,
+    }
+
+
+def history_payload(limit: int = 30, view: str = "daily") -> dict:
     rows = []
     for path in PICKS.glob("*.json"):
         parsed = parse_cache_name(path)
@@ -909,6 +1083,10 @@ def history_payload(limit: int = 30) -> dict:
         summary["cache_key"] = path.name
         rows.append(summary)
     rows.sort(key=lambda item: (item.get("target_date") or "", item.get("generated_at") or ""), reverse=True)
+    days = latest_decision_days(rows)
+    view = "raw" if view == "raw" else "daily"
+    selected_rows = rows if view == "raw" else days
+    history = selected_rows[:limit]
 
     latest = None
     latest_path = PICKS / "latest.json"
@@ -922,7 +1100,8 @@ def history_payload(limit: int = 30) -> dict:
         "ok": True,
         "time": now_cn().isoformat(timespec="seconds"),
         "latest": latest,
-        "history": rows[:limit],
+        "meta": history_metadata(rows, days, view, len(history)),
+        "history": history,
     }
 
 
@@ -2022,11 +2201,30 @@ def _candidate_prediction(model: dict, market_key: str, code: str) -> dict | Non
     if not 0 <= prediction["probability"] <= 1 or prediction["transaction_cost"] < 0 or prediction["tail_risk"] < 0:
         return None
     model_id = prediction.get("model_id") or model.get("model_id")
-    if not model_id:
+    label_version = prediction.get("label_version") or model.get("label_version")
+    if not model_id or not label_version:
         return None
     result = dict(prediction)
     result["model_id"] = model_id
+    result["label_version"] = label_version
     return result
+
+
+def _stable_prediction_id(snapshot: dict, prediction: dict, market_key: str, code: str) -> str:
+    scheduled_slot = (snapshot.get("automation") or {}).get("scheduled_slot")
+    identity = "|".join(
+        str(value or "")
+        for value in (
+            "global-10d-v1",
+            scheduled_slot or snapshot.get("generated_at"),
+            snapshot.get("target_date"),
+            market_key,
+            code,
+            prediction.get("model_id"),
+            prediction.get("label_version"),
+        )
+    )
+    return f"pred_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:24]}"
 
 
 def build_event_feed(snapshot: dict) -> dict:
@@ -2193,6 +2391,10 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
             for item in automatic_external
         )
         prediction = _candidate_prediction(model, market_key, code) if model_ready else None
+        if prediction:
+            prediction["prediction_id"] = prediction.get("prediction_id") or _stable_prediction_id(
+                snapshot, prediction, market_key, code
+            )
         candidate_blockers = list(reasons)
         if hard_blocked:
             candidate_blockers.append("CANDIDATE_EXECUTION_BLOCKED")
@@ -2222,6 +2424,8 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
             "transaction_cost": prediction.get("transaction_cost") if prediction else None,
             "tail_risk": prediction.get("tail_risk") if prediction else None,
             "model_id": prediction.get("model_id") if prediction else None,
+            "label_version": prediction.get("label_version") if prediction else None,
+            "prediction_id": prediction.get("prediction_id") if prediction else None,
             "calibrated": bool(prediction and prediction.get("calibrated") is True),
             "blocker_codes": list(dict.fromkeys(candidate_blockers)),
         }
@@ -2301,6 +2505,7 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
         "ten_day_return",
         {
             "model_id": "ten-day-net-return-v0",
+            "label_version": TEN_DAY_LABEL_VERSION,
             "status": "planned",
             "calibrated": False,
             "costs_ready": False,
@@ -2309,6 +2514,7 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
             "probability": None,
         },
     )
+    snapshot["analysis_models"]["ten_day_return"].setdefault("label_version", TEN_DAY_LABEL_VERSION)
     global_market = snapshot.get("market") or {}
     markets = snapshot.get("markets") or {}
     for market_key, section in markets.items():
@@ -4398,7 +4604,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "automation": automation_metadata(),
         "snapshot_key": cache_key,
         "target_date": target_day.isoformat(),
-        "next_trade_date": forecast_end.isoformat(),
+        "next_trade_date": target_day.isoformat(),
         "forecast_end_date": forecast_end.isoformat(),
         "forecast_horizon": f"{FORECAST_TRADE_DAYS}个交易日 / 约2周",
         "signal_date": hot_date,
@@ -4491,7 +4697,8 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/history":
             query = urllib.parse.parse_qs(parsed.query)
             limit = int(query.get("limit", ["30"])[0])
-            self.send_json(history_payload(limit=max(1, min(limit, 240))))
+            view = query.get("view", ["daily"])[0]
+            self.send_json(history_payload(limit=max(1, min(limit, 1000)), view=view))
             return
         if parsed.path == "/api/live":
             query = urllib.parse.parse_qs(parsed.query)

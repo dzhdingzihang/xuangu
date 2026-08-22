@@ -67,15 +67,16 @@ def summarize_decision(decision: dict) -> dict:
         "has_primary": bool(decision.get("primary")),
     }
     if primary:
-        range_ = primary.get("estimated_2w_range") or primary.get("estimated_2d_range") or {}
+        two_week_range = primary.get("estimated_2w_range") or {}
+        two_day_range = primary.get("estimated_2d_range") or {}
         summary.update(
             {
                 "code": primary.get("code"),
                 "name": primary.get("name"),
                 "confidence": primary.get("recommendation_degree") or primary.get("confidence"),
                 "recommendation_degree": primary.get("recommendation_degree") or primary.get("confidence"),
-                "estimated_2w_range": range_.get("text"),
-                "estimated_2d_range": range_.get("text"),
+                "estimated_2w_range": two_week_range.get("text") if isinstance(two_week_range, dict) else None,
+                "estimated_2d_range": two_day_range.get("text") if isinstance(two_day_range, dict) else None,
                 "entry_price": primary.get("entry_price") or primary.get("price"),
                 "current_change_pct": primary.get("current_change_pct") or primary.get("change_pct"),
                 "score": primary.get("score"),
@@ -179,6 +180,8 @@ def summarize_global_decision(pick: dict) -> dict | None:
         summary["primary"] = {
             key: primary.get(key)
             for key in (
+                "prediction_id",
+                "label_version",
                 "market",
                 "code",
                 "name",
@@ -197,24 +200,66 @@ def summarize_global_decision(pick: dict) -> dict | None:
     return summary
 
 
+def history_kind(global_decision: dict | None) -> str:
+    if (
+        isinstance(global_decision, dict)
+        and global_decision.get("contract_version") == "global-10d-v1"
+        and global_decision.get("decision_scope") == "global_10d"
+        and global_decision.get("action_basis") == "strict_cross_market_gate_v1"
+    ):
+        return "global_10d_v1"
+    return "legacy_snapshot"
+
+
+def summarize_outcome(pick: dict) -> dict | None:
+    outcome = pick.get("ten_day_outcome") or pick.get("outcome")
+    if not isinstance(outcome, dict):
+        return None
+    keys = (
+        "status",
+        "prediction_id",
+        "model_id",
+        "label_version",
+        "entry_at",
+        "entry_price",
+        "entry_source",
+        "exit_at",
+        "exit_price",
+        "exit_source",
+        "gross_total_return",
+        "net_total_return",
+        "transaction_cost",
+        "corporate_action_adjusted",
+        "calendar_id",
+        "currency",
+        "fx_rate_source",
+        "positive_label",
+        "settled_at",
+    )
+    summary = {key: outcome.get(key) for key in keys if key in outcome}
+    return summary or None
+
+
 def summarize_pick(path: pathlib.Path) -> dict | None:
     try:
         pick = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
     legacy_summary = summarize_decision(pick.get("decision") or {})
-    global_decision = summarize_global_decision(pick) or {
-        "horizon_trade_days": 10,
-        "action": "NO_VALID_PICK",
-        "action_basis": "strict_cross_market_gate_v1",
-        "probability_status": "UNAVAILABLE",
-        "probability": None,
-        "calibrated": False,
-        "primary": None,
-        "research_priority": None,
-        "blocker_codes": ["GLOBAL_DECISION_MISSING"],
-        "automatic_external_evidence_count": 0,
-    }
+    raw_global_decision = summarize_global_decision(pick)
+    kind = history_kind(raw_global_decision)
+    is_global_contract = kind == "global_10d_v1"
+    global_decision = raw_global_decision if is_global_contract else None
+    if is_global_contract:
+        action = global_decision.get("action") or "NO_VALID_PICK"
+        title = "跨市场候选待复核" if action == "REVIEW_EXECUTABLE_PICK" else "当前没有可执行跨市场候选"
+        message = " · ".join(global_decision.get("blocker_codes") or [])
+        has_primary = bool(global_decision.get("primary"))
+    else:
+        action = "LEGACY_ONLY"
+        title = "Legacy 规则快照"
+        message = "PRE_GLOBAL_10D_CONTRACT"
+        has_primary = False
     summary = {
         "target_date": pick.get("target_date"),
         "signal_date": pick.get("signal_date"),
@@ -229,18 +274,22 @@ def summarize_pick(path: pathlib.Path) -> dict | None:
         "model_version": pick.get("model_version"),
         "weights_version": pick.get("weights_version"),
         "universe_version": pick.get("universe_version"),
-        "decision_scope": "global_10d",
-        "action": global_decision.get("action") or "NO_VALID_PICK",
-        "title": "跨市场候选待复核" if global_decision.get("action") == "REVIEW_EXECUTABLE_PICK" else "当前没有可执行跨市场候选",
-        "message": " · ".join(global_decision.get("blocker_codes") or []),
-        "has_primary": bool(global_decision.get("primary")),
+        "history_kind": kind,
+        "decision_scope": "global_10d" if is_global_contract else "legacy_market_rules",
+        "action": action,
+        "title": title,
+        "message": message,
+        "has_primary": has_primary,
         "a_share_legacy": legacy_summary,
         "global_decision": global_decision,
     }
+    outcome = summarize_outcome(pick)
+    if outcome:
+        summary["outcome"] = outcome
     analysis_models = summarize_analysis_models(pick)
     if analysis_models:
         summary["analysis_models"] = analysis_models
-    primary = global_decision.get("primary")
+    primary = global_decision.get("primary") if global_decision else None
     if isinstance(primary, dict):
         for key in ("code", "name", "probability", "expected_net_utility", "transaction_cost", "tail_risk", "model_id"):
             if key in primary:

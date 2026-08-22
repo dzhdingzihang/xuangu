@@ -207,13 +207,14 @@ function summarizeDecision(decision) {
     has_primary: Boolean(decision.primary),
   };
   if (primary) {
-    const range = primary.estimated_2w_range || primary.estimated_2d_range;
+    const twoWeekRange = primary.estimated_2w_range;
+    const twoDayRange = primary.estimated_2d_range;
     summary.code = primary.code;
     summary.name = primary.name;
     summary.confidence = primary.recommendation_degree || primary.confidence;
     summary.recommendation_degree = primary.recommendation_degree || primary.confidence;
-    summary.estimated_2w_range = range && range.text;
-    summary.estimated_2d_range = range && range.text;
+    summary.estimated_2w_range = twoWeekRange && twoWeekRange.text;
+    summary.estimated_2d_range = twoDayRange && twoDayRange.text;
     summary.entry_price = primary.entry_price || primary.price;
     summary.current_change_pct = primary.current_change_pct || primary.change_pct;
     summary.realtime_session = primary.realtime && primary.realtime.session_label;
@@ -226,21 +227,21 @@ function summarizeDecision(decision) {
   return summary;
 }
 
+function isGlobalTenDayDecision(decision) {
+  return Boolean(
+    decision
+    && typeof decision === "object"
+    && decision.contract_version === "global-10d-v1"
+    && decision.decision_scope === "global_10d"
+    && decision.action_basis === "strict_cross_market_gate_v1",
+  );
+}
+
 function summarizePick(pick) {
   const legacySummary = summarizeDecision(pick.decision || {});
-  const globalDecision = pick.global_decision && typeof pick.global_decision === "object"
-    ? pick.global_decision
-    : {
-      action: "NO_VALID_PICK",
-      action_basis: "strict_cross_market_gate_v1",
-      probability_status: "UNAVAILABLE",
-      probability: null,
-      calibrated: false,
-      primary: null,
-      research_priority: null,
-      blocker_codes: ["GLOBAL_DECISION_MISSING"],
-      automatic_external_evidence_count: 0,
-    };
+  const globalDecision = isGlobalTenDayDecision(pick.global_decision) ? pick.global_decision : null;
+  const isGlobal = Boolean(globalDecision);
+  const action = isGlobal ? globalDecision.action || "NO_VALID_PICK" : "LEGACY_ONLY";
   const summary = {
     target_date: pick.target_date,
     signal_date: pick.signal_date,
@@ -250,14 +251,19 @@ function summarizePick(pick) {
     forecast_end_date: pick.forecast_end_date,
     forecast_horizon: pick.forecast_horizon,
     model_version: pick.model_version,
-    decision_scope: "global_10d",
-    action: globalDecision.action || "NO_VALID_PICK",
-    title: globalDecision.action === "REVIEW_EXECUTABLE_PICK" ? "跨市场候选待复核" : "当前没有可执行跨市场候选",
-    message: (globalDecision.blocker_codes || []).join(" · "),
-    has_primary: Boolean(globalDecision.primary),
-    global_decision: {
-      action: globalDecision.action || "NO_VALID_PICK",
-      action_basis: globalDecision.action_basis || "strict_cross_market_gate_v1",
+    history_kind: isGlobal ? "global_10d_v1" : "legacy_snapshot",
+    decision_scope: isGlobal ? "global_10d" : "legacy_market_rules",
+    action,
+    title: isGlobal
+      ? (action === "REVIEW_EXECUTABLE_PICK" ? "跨市场候选待复核" : "当前没有可执行跨市场候选")
+      : "Legacy 规则快照",
+    message: isGlobal ? (globalDecision.blocker_codes || []).join(" · ") : "PRE_GLOBAL_10D_CONTRACT",
+    has_primary: isGlobal && Boolean(globalDecision.primary),
+    global_decision: isGlobal ? {
+      contract_version: globalDecision.contract_version,
+      decision_scope: globalDecision.decision_scope,
+      action: action,
+      action_basis: globalDecision.action_basis,
       probability_status: globalDecision.probability_status || "UNAVAILABLE",
       probability: globalDecision.probability ?? null,
       calibrated: globalDecision.calibrated === true,
@@ -265,10 +271,10 @@ function summarizePick(pick) {
       research_priority: globalDecision.research_priority || null,
       blocker_codes: globalDecision.blocker_codes || [],
       automatic_external_evidence_count: globalDecision.automatic_external_evidence_count || 0,
-    },
+    } : null,
     a_share_legacy: legacySummary,
   };
-  const primary = globalDecision.primary;
+  const primary = globalDecision && globalDecision.primary;
   if (primary && typeof primary === "object") {
     summary.code = primary.code || primary.symbol;
     summary.name = primary.name;
@@ -286,6 +292,99 @@ function summarizePick(pick) {
   return summary;
 }
 
+function historyKind(row) {
+  if (row && row.history_kind === "global_10d_v1") return "global_10d_v1";
+  return isGlobalTenDayDecision(row && row.global_decision) ? "global_10d_v1" : "legacy_snapshot";
+}
+
+function latestDecisionDays(rows) {
+  const byDate = new Map();
+  rows.forEach((row) => {
+    const key = row.target_date || row.signal_date || row.snapshot_key || row.cache_key;
+    const current = byDate.get(key);
+    if (!current || (historyKind(current) !== "global_10d_v1" && historyKind(row) === "global_10d_v1")) {
+      byDate.set(key, row);
+    }
+  });
+  return [...byDate.values()];
+}
+
+function validSettledOutcome(row) {
+  const primary = row?.global_decision?.primary;
+  const outcome = row?.outcome;
+  if (!primary || !outcome || String(outcome.status || "").toUpperCase() !== "SETTLED") return false;
+  const generatedAt = Date.parse(row.generated_at || "");
+  const entryAt = Date.parse(outcome.entry_at || "");
+  const exitAt = Date.parse(outcome.exit_at || "");
+  const settledAt = Date.parse(outcome.settled_at || "");
+  const forecastEnd = Date.parse(`${String(row.forecast_end_date || "").slice(0, 10)}T00:00:00+08:00`);
+  const netTotalReturn = outcome.net_total_return;
+  const requiredNumbers = [outcome.entry_price, outcome.exit_price, outcome.gross_total_return, netTotalReturn, outcome.transaction_cost];
+  const requiredStrings = [outcome.entry_source, outcome.exit_source, outcome.calendar_id, outcome.currency, outcome.fx_rate_source];
+  return Boolean(
+    primary.prediction_id
+    && outcome.prediction_id === primary.prediction_id
+    && primary.model_id
+    && outcome.model_id === primary.model_id
+    && primary.label_version
+    && outcome.label_version === primary.label_version
+    && requiredNumbers.every((value) => typeof value === "number" && Number.isFinite(value))
+    && outcome.entry_price > 0
+    && outcome.exit_price > 0
+    && outcome.transaction_cost >= 0
+    && requiredStrings.every((value) => typeof value === "string" && value.length > 0)
+    && typeof outcome.corporate_action_adjusted === "boolean"
+    && typeof outcome.positive_label === "boolean"
+    && outcome.positive_label === (netTotalReturn > 0)
+    && Number.isFinite(generatedAt)
+    && Number.isFinite(entryAt)
+    && entryAt >= generatedAt
+    && Number.isFinite(exitAt)
+    && Number.isFinite(settledAt)
+    && Number.isFinite(forecastEnd)
+    && exitAt >= forecastEnd
+    && settledAt >= exitAt
+  );
+}
+
+function historyMetadata(rows, days, view, returnedCount) {
+  const contractDays = days.filter((row) => historyKind(row) === "global_10d_v1");
+  const legacyDays = days.filter((row) => historyKind(row) === "legacy_snapshot");
+  const executableGroups = new Map();
+  rows.forEach((row) => {
+    const primary = row?.global_decision?.primary;
+    if (
+      historyKind(row) !== "global_10d_v1"
+      || row?.global_decision?.action !== "REVIEW_EXECUTABLE_PICK"
+      || !primary
+      || typeof primary !== "object"
+      || !primary.prediction_id
+    ) return;
+    if (!executableGroups.has(primary.prediction_id)) executableGroups.set(primary.prediction_id, []);
+    executableGroups.get(primary.prediction_id).push(row);
+  });
+  const executable = [...executableGroups.values()];
+  const outcomeStatus = (row) => String(row.outcome?.status || "").toUpperCase();
+  const selectedCount = view === "raw" ? rows.length : days.length;
+  return {
+    view,
+    raw_run_count: rows.length,
+    decision_day_count: days.length,
+    duplicate_run_count: Math.max(0, rows.length - days.length),
+    global_contract_day_count: contractDays.length,
+    legacy_day_count: legacyDays.length,
+    no_valid_pick_day_count: contractDays.filter((row) => row.global_decision?.action === "NO_VALID_PICK").length,
+    executable_prediction_count: executable.length,
+    pending_settlement_count: executable.filter((group) =>
+      !group.some(validSettledOutcome) && group.some((row) => outcomeStatus(row) === "PENDING")).length,
+    settled_sample_count: executable.filter((group) => group.some(validSettledOutcome)).length,
+    missing_outcome_count: executable.filter((group) =>
+      !group.some(validSettledOutcome) && !group.some((row) => outcomeStatus(row) === "PENDING")).length,
+    returned_count: returnedCount,
+    has_more: selectedCount > returnedCount,
+  };
+}
+
 function blockerLevel(decision, primary) {
   if (decision.primary) return "pass";
   const message = decision.message || "";
@@ -298,7 +397,7 @@ function blockerLevel(decision, primary) {
 
 async function loadManifest(env) {
   const manifest = await readAssetJson(env, "/data/picks/manifest.json");
-  return manifest && typeof manifest === "object" ? manifest : { files: [], summaries: [] };
+  return manifest && typeof manifest === "object" ? manifest : null;
 }
 
 async function loadPickByFile(env, file) {
@@ -321,6 +420,7 @@ async function latestPick(env) {
 
 async function pickForTarget(env, targetDate) {
   const manifest = await loadManifest(env);
+  if (!manifest) return null;
   const summaries = Array.isArray(manifest.summaries) ? manifest.summaries : [];
   const match = summaries
     .filter((item) => item.target_date === targetDate && item.cache_key)
@@ -576,18 +676,24 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === "/api/history") {
-    const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 120), 240));
+    const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 120), 1000));
+    const view = url.searchParams.get("view") === "raw" ? "raw" : "daily";
     const manifest = await loadManifest(env);
+    if (!manifest) return json({ ok: false, error: "HISTORY_MANIFEST_UNAVAILABLE" }, 503);
     const rows = Array.isArray(manifest.summaries) ? [...manifest.summaries] : [];
     rows.sort((a, b) =>
       `${b.target_date || ""}${b.generated_at || ""}`.localeCompare(`${a.target_date || ""}${a.generated_at || ""}`),
     );
+    const days = latestDecisionDays(rows);
+    const selectedRows = view === "raw" ? rows : days;
+    const history = selectedRows.slice(0, limit);
     const latest = await latestPick(env);
     return json({
       ok: true,
       time: nowCN(),
       latest: latest ? summarizePick(latest) : null,
-      history: rows.slice(0, limit),
+      meta: historyMetadata(rows, days, view, history.length),
+      history,
     });
   }
 

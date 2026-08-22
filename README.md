@@ -30,7 +30,7 @@ GitHub Actions 定时或手动触发
 1. **今日答案**：先给跨市场全局输出；可执行门禁未通过时显示 `NO_VALID_PICK`，同时保留一只 `RESEARCH_ONLY` 研究优先项。
 2. **候选池**：单市场保留快照中的 Legacy 顺序；跨市场研究视图按自动证据、执行状态、数据质量和 V2 结构排序，并展示 A 股双低独立榜单、来源链、风险项和单股详情。
 3. **事件证据**：已自动入库且参与门禁的官方证据置顶，人工核验待入库证据和 `model_signal` 分栏；模型信号绝不伪装成公告或新闻。
-4. **历史检验**：概率模型未上线时显示 `NOT_READY`；模型上线但真实样本尚未到期时显示 `MODEL_READY · 待结算`。原始不可变快照仍可展开核对，但不会提前生成伪胜率或模拟收益曲线。
+4. **历史检验**：按 `target_date` 将同一决策日的多次盘中运行合并展示，并明确区分 `Legacy` 与 `global-10d-v1`。只有合法的已结算预测才进入绩效指标；没有样本时保持 `NO_SETTLED_SAMPLE`，不会生成伪胜率或模拟收益。
 5. **模型逻辑**：展示 10 日净效用目标、七阶段决策链、Legacy / V2 / 双低边界、版本和运行架构。
 6. **数据健康**：把任务是否成功、快照是否新鲜、市场覆盖是否完整和结论是否可用分开监控。
 
@@ -288,7 +288,8 @@ final_score = base_score - risk_penalty - portfolio_penalty
 GET /api/status
 GET /api/latest-summary
 GET /api/latest
-GET /api/history?limit=120
+GET /api/history?view=daily&limit=120
+GET /api/history?view=raw&limit=120
 GET /api/pick?date=2026-08-19
 GET /api/pick?snapshot=2026-08-19_2026-08-19_220629.json
 GET /api/live?market=a_share&code=603228
@@ -298,6 +299,13 @@ GET /api/live?market=us&code=PWR
 
 行为说明：
 
+- `/api/history` 默认使用 `view=daily`：按 `target_date` 合并盘中重复运行，优先保留正式 `global-10d-v1` 合同，同类保留最后一次快照；`view=raw` 返回全部不可变原始运行，用于审计，不直接作为预测样本。绩效 cohort 另按不可变 `prediction_id` 去重。
+- `signal_date` 是信号形成日，`generated_at` 是快照生成时间。对 `global-10d-v1`，`target_date` 是计划执行日；对早期 Legacy，它只作为历史归档日，不追溯声称为真实下单日。
+- `history_kind=legacy_snapshot` 表示总决策合同上线前的 Legacy 规则历史。它可以保留市场级 `BUY_CANDIDATE`，但不会被伪装成全局 `NO_VALID_PICK`，也不进入 10 日模型绩效。
+- 绩效样本必须来自 `global-10d-v1` 的可执行预测，并具有合法的版本化结算结果：`outcome.status=SETTLED`，`prediction_id` / 模型 / 标签版本相符，入场与退出时点、价格和来源完整，已记录费用、公司行为复权、交易日历、币种与汇率来源，收益为有限数值，且退出不早于预测窗口结束。`PENDING`、字段缺失和不匹配结果均不计入绩效。
+- 当前仓库尚未接入自动结算任务和追加式 outcome ledger；原始决策快照不会为了“凑回测”被事后改写。在该管道真正上线前，线上 `settled_sample_count` 应保持 0。
+- `NO_VALID_PICK` 是主动放弃，不是一次买入预测，也不是亏损样本。
+- 截至 2026-08-22，已发布档案包含 230 次原始运行，合并后为 63 个决策日；其中只有 1 个 `global-10d-v1` 决策日且结果为 `NO_VALID_PICK`，因此可执行预测和已结算样本均为 0。动态数量以 `/api/history` 返回的 `meta` 为准。
 - 历史详情必须优先使用 `snapshot_key`；同一天可能有多次快照。
 - 日期没有匹配时，`/api/pick?date=` 可能回退 latest，前端会明确提示实际展示的快照日期。
 - `latest-summary` 和 `history` 是轻量摘要；候选、K 线和完整诊断在 `latest` / `pick`。

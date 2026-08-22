@@ -45,12 +45,14 @@ def valid_executable_snapshot() -> dict:
             "probability": 0.63,
             "calibrated": True,
             "primary": {
+                "prediction_id": "pred_fixture_us_nvda",
                 "market": "us",
                 "code": "NVDA",
                 "name": "NVIDIA",
                 "status": "EXECUTABLE",
                 "score_kind": "TEN_DAY_EXPECTED_NET_UTILITY",
                 "model_id": model["model_id"],
+                "label_version": model["label_version"],
                 "calibrated": True,
                 "probability": 0.63,
                 "expected_net_utility": 0.024,
@@ -142,6 +144,16 @@ class GlobalDecisionContractTests(unittest.TestCase):
         self.assertEqual(decision["action"], "REVIEW_EXECUTABLE_PICK")
         self.assertEqual(decision["primary"]["market"], "us")
         self.assertEqual(decision["primary"]["expected_net_utility"], 0.04)
+        self.assertRegex(decision["primary"]["prediction_id"], r"^pred_[0-9a-f]{24}$")
+        self.assertEqual(decision["primary"]["label_version"], server.TEN_DAY_LABEL_VERSION)
+
+    def test_builder_prediction_id_is_stable_for_the_same_slot(self) -> None:
+        snapshot = executable_builder_input()
+        snapshot["automation"] = {"scheduled_slot": "2026-08-22T08:58:00+08:00"}
+        first = server.build_global_ten_day_decision(copy.deepcopy(snapshot))["primary"]["prediction_id"]
+        snapshot["generated_at"] = "2026-08-22T09:03:00+08:00"
+        second = server.build_global_ten_day_decision(copy.deepcopy(snapshot))["primary"]["prediction_id"]
+        self.assertEqual(first, second)
 
     def test_builder_does_not_treat_ready_status_as_calibration(self) -> None:
         snapshot = executable_builder_input()

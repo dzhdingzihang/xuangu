@@ -207,12 +207,18 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                 else:
                     if primary.get("status") != "EXECUTABLE":
                         errors.append("executable primary status must be EXECUTABLE")
+                    if not isinstance(primary.get("prediction_id"), str) or not primary.get("prediction_id"):
+                        errors.append("executable primary prediction_id is required")
                     if primary.get("score_kind") not in VALID_EXECUTABLE_SCORE_KINDS:
                         errors.append("executable primary score_kind must be a calibrated model output")
                     if not isinstance(primary.get("model_id"), str) or not primary.get("model_id"):
                         errors.append("executable primary model_id is required")
                     elif isinstance(ten_day_model, dict) and primary.get("model_id") != ten_day_model.get("model_id"):
                         errors.append("executable primary model_id must match ten_day_return.model_id")
+                    if not isinstance(primary.get("label_version"), str) or not primary.get("label_version"):
+                        errors.append("executable primary label_version is required")
+                    elif isinstance(ten_day_model, dict) and primary.get("label_version") != ten_day_model.get("label_version"):
+                        errors.append("executable primary label_version must match ten_day_return.label_version")
                     if primary.get("calibrated") is not True:
                         errors.append("executable primary must be calibrated")
                     if not probability(primary.get("probability")):

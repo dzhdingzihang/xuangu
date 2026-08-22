@@ -74,7 +74,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("status.generated_at !== previousGeneratedAt", self.js)
         self.assertIn("!state.snapshot ||", self.js)
         self.assertIn('getJson("/api/latest")', self.js)
-        self.assertIn('getJson("/api/history?limit=120")', self.js)
+        self.assertIn("getHistoryPayload()", self.js)
         self.assertIn("window.setInterval(pollStatus, STATUS_POLL_INTERVAL_MS)", self.js)
         for label in ("数据正常", "更新中", "数据已过期", "状态未知"):
             self.assertIn(label, self.js)
@@ -136,10 +136,27 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('state.eventAuditOpen ? "open" : ""', self.js)
 
     def test_history_is_explicitly_not_ready(self) -> None:
-        self.assertIn("NOT_READY · 未上线", self.js)
-        self.assertIn("10 日概率校准尚未上线", self.js)
+        self.assertIn("historyMeta", self.js)
+        self.assertIn("historyError", self.js)
+        self.assertIn("HISTORY_DATA_UNAVAILABLE", self.js)
+        self.assertIn("getHistoryPayload", self.js)
+        self.assertIn("HISTORY_LIMIT = 1000", self.js)
+        self.assertIn("暂无已结算的可执行预测样本", self.js)
+        self.assertIn("原始运行", self.js)
+        self.assertIn("决策日", self.js)
+        self.assertIn("Legacy 历史日", self.js)
+        self.assertIn("已结算样本", self.js)
         self.assertIn("不展示胜率或模拟收益", self.js)
-        self.assertIn("空白代表尚未有可靠评估", self.js)
+        self.assertIn("historyArchiveOpen", self.js)
+        self.assertIn("state.historyArchiveOpen = currentArchive.open", self.js)
+        self.assertIn("return item.a_share_legacy || {}", self.js)
+        self.assertIn("state.historySnapshotKey === itemKey", self.js)
+        self.assertIn("信号日", self.js)
+        self.assertIn("计划执行日", self.js)
+        self.assertIn("Legacy 归档日", self.js)
+        self.assertIn("正式十日预测", self.js)
+        self.assertIn("prediction_id", self.js)
+        self.assertNotIn("空白代表尚未有可靠评估", self.js)
 
 
 if __name__ == "__main__":

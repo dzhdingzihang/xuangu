@@ -188,8 +188,232 @@ class WorkerApiContractTests(unittest.TestCase):
             """
         )
 
+    def test_history_consolidates_daily_runs_and_reports_truthful_meta(self) -> None:
+        run_node(
+            f"""
+            import assert from "node:assert/strict";
+            const worker = (await import({json.dumps(WORKER_URI)} + "?history-contract")).default;
+            const legacyOld = {{
+              target_date: "2026-08-20",
+              signal_date: "2026-08-19",
+              generated_at: "2026-08-20T10:00:00+08:00",
+              snapshot_key: "legacy-old.json",
+              history_kind: "legacy_snapshot",
+              decision_scope: "legacy_market_rules",
+              action: "LEGACY_ONLY",
+              global_decision: null,
+            }};
+            const legacyLatest = {{
+              ...legacyOld,
+              generated_at: "2026-08-20T15:00:00+08:00",
+              snapshot_key: "legacy-latest.json",
+            }};
+            const contractNoPick = {{
+              target_date: "2026-08-21",
+              signal_date: "2026-08-20",
+              generated_at: "2026-08-21T15:30:00+08:00",
+              snapshot_key: "contract-no-pick.json",
+              history_kind: "global_10d_v1",
+              decision_scope: "global_10d",
+              action: "NO_VALID_PICK",
+              global_decision: {{
+                contract_version: "global-10d-v1",
+                decision_scope: "global_10d",
+                action_basis: "strict_cross_market_gate_v1",
+                action: "NO_VALID_PICK",
+                primary: null,
+              }},
+            }};
+            const laterLegacySameDay = {{
+              ...legacyLatest,
+              target_date: "2026-08-21",
+              generated_at: "2026-08-21T22:00:00+08:00",
+              snapshot_key: "legacy-after-contract.json",
+            }};
+            const manifest = {{ summaries: [legacyOld, contractNoPick, legacyLatest, laterLegacySameDay] }};
+            const env = {{
+              ASSETS: {{
+                async fetch(input) {{
+                  const url = new URL(typeof input === "string" ? input : input.url);
+                  if (url.pathname === "/data/picks/manifest.json") {{
+                    return new Response(JSON.stringify(manifest));
+                  }}
+                  if (url.pathname === "/data/picks/latest.json") {{
+                    return new Response(JSON.stringify(contractNoPick));
+                  }}
+                  return new Response("missing", {{ status: 404 }});
+                }},
+              }},
+            }};
+
+            const response = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/history?limit=120"),
+              env,
+            );
+            assert.equal(response.status, 200);
+            const payload = await response.json();
+            assert.equal(payload.history.length, 2);
+            assert.equal(payload.history[0].snapshot_key, "contract-no-pick.json");
+            assert.equal(payload.history[1].snapshot_key, "legacy-latest.json");
+            assert.equal(payload.meta.view, "daily");
+            assert.equal(payload.meta.raw_run_count, 4);
+            assert.equal(payload.meta.decision_day_count, 2);
+            assert.equal(payload.meta.duplicate_run_count, 2);
+            assert.equal(payload.meta.global_contract_day_count, 1);
+            assert.equal(payload.meta.legacy_day_count, 1);
+            assert.equal(payload.meta.no_valid_pick_day_count, 1);
+            assert.equal(payload.meta.executable_prediction_count, 0);
+            assert.equal(payload.meta.settled_sample_count, 0);
+
+            const rawResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/history?view=raw&limit=2"),
+              env,
+            );
+            const rawPayload = await rawResponse.json();
+            assert.equal(rawPayload.history.length, 2);
+            assert.equal(rawPayload.meta.view, "raw");
+            assert.equal(rawPayload.meta.raw_run_count, 4);
+            assert.equal(rawPayload.meta.returned_count, 2);
+            assert.equal(rawPayload.meta.has_more, true);
+
+            const invalidSettlement = {{
+              target_date: "2026-08-22",
+              signal_date: "2026-08-21",
+              generated_at: "2026-08-22T15:30:00+08:00",
+              forecast_end_date: "2026-09-04",
+              snapshot_key: "invalid-settlement.json",
+              history_kind: "global_10d_v1",
+              decision_scope: "global_10d",
+              action: "REVIEW_EXECUTABLE_PICK",
+              global_decision: {{
+                contract_version: "global-10d-v1",
+                decision_scope: "global_10d",
+                action_basis: "strict_cross_market_gate_v1",
+                action: "REVIEW_EXECUTABLE_PICK",
+                primary: {{ prediction_id: "prediction-1", model_id: "model-1", label_version: "label-v1" }},
+              }},
+              outcome: {{
+                status: "SETTLED",
+                prediction_id: "prediction-1",
+                model_id: "model-1",
+                label_version: "label-v1",
+                entry_at: "2026-08-22T16:00:00+08:00",
+                entry_price: 100,
+                entry_source: "exchange_open_v1",
+                exit_at: "2026-09-04T15:00:00+08:00",
+                exit_price: 108,
+                exit_source: "exchange_close_v1",
+                gross_total_return: 0.082,
+                net_total_return: null,
+                transaction_cost: 0.002,
+                corporate_action_adjusted: true,
+                calendar_id: "XSHG-v1",
+                currency: "CNY",
+                fx_rate_source: "same_currency",
+                positive_label: true,
+                settled_at: "2026-09-05T16:00:00+08:00",
+              }},
+            }};
+            const laterNoPickSameDay = {{
+              ...contractNoPick,
+              target_date: "2026-08-22",
+              generated_at: "2026-08-22T22:00:00+08:00",
+              snapshot_key: "later-no-pick.json",
+            }};
+            manifest.summaries = [invalidSettlement, laterNoPickSameDay];
+            const invalidResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/history?limit=120"),
+              env,
+            );
+            const invalidPayload = await invalidResponse.json();
+            assert.equal(invalidPayload.meta.executable_prediction_count, 1);
+            assert.equal(invalidPayload.meta.settled_sample_count, 0);
+            assert.equal(invalidPayload.meta.missing_outcome_count, 1);
+            invalidSettlement.outcome.net_total_return = 0.08;
+            invalidSettlement.outcome.exit_at = "2026-09-03T18:00:00Z";
+            invalidSettlement.outcome.settled_at = "2026-09-03T19:00:00Z";
+            const validResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/history?limit=120"),
+              env,
+            );
+            const validPayload = await validResponse.json();
+            assert.equal(validPayload.meta.settled_sample_count, 1);
+            assert.equal(validPayload.meta.missing_outcome_count, 0);
+
+            const unavailableResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/history?limit=120"),
+              {{ ASSETS: {{ fetch: async () => new Response("missing", {{ status: 404 }}) }} }},
+            );
+            assert.equal(unavailableResponse.status, 503);
+            assert.equal((await unavailableResponse.json()).error, "HISTORY_MANIFEST_UNAVAILABLE");
+            """
+        )
+
 
 class WorkerAssetBuildTests(unittest.TestCase):
+    def test_manifest_does_not_fabricate_global_decision_for_legacy_snapshot(self) -> None:
+        module = load_build_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            legacy_path = root / "legacy.json"
+            legacy_path.write_text(
+                json.dumps(
+                    {
+                        "target_date": "2026-08-20",
+                        "signal_date": "2026-08-19",
+                        "generated_at": "2026-08-20T15:00:00+08:00",
+                        "decision": {
+                            "action": "BUY_CANDIDATE",
+                            "primary": {
+                                "code": "600000",
+                                "name": "Legacy 标的",
+                                "estimated_2d_range": {"text": "-1.0% ~ +3.0%"},
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            legacy = module.summarize_pick(legacy_path)
+            self.assertIsNotNone(legacy)
+            self.assertEqual(legacy["history_kind"], "legacy_snapshot")
+            self.assertEqual(legacy["decision_scope"], "legacy_market_rules")
+            self.assertEqual(legacy["action"], "LEGACY_ONLY")
+            self.assertEqual(legacy["title"], "Legacy 规则快照")
+            self.assertEqual(legacy["message"], "PRE_GLOBAL_10D_CONTRACT")
+            self.assertIsNone(legacy["global_decision"])
+            self.assertFalse(legacy["has_primary"])
+            self.assertIsNone(legacy["a_share_legacy"]["estimated_2w_range"])
+            self.assertEqual(legacy["a_share_legacy"]["estimated_2d_range"], "-1.0% ~ +3.0%")
+
+            contract_path = root / "contract.json"
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "target_date": "2026-08-21",
+                        "signal_date": "2026-08-20",
+                        "generated_at": "2026-08-21T15:30:00+08:00",
+                        "global_decision": {
+                            "contract_version": "global-10d-v1",
+                            "decision_scope": "global_10d",
+                            "action_basis": "strict_cross_market_gate_v1",
+                            "action": "NO_VALID_PICK",
+                            "primary": None,
+                            "blocker_codes": ["NO_CANDIDATE_PASSED_STRICT_GATE"],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            contract = module.summarize_pick(contract_path)
+            self.assertIsNotNone(contract)
+            self.assertEqual(contract["history_kind"], "global_10d_v1")
+            self.assertEqual(contract["decision_scope"], "global_10d")
+            self.assertEqual(contract["action"], "NO_VALID_PICK")
+            self.assertEqual(contract["global_decision"]["contract_version"], "global-10d-v1")
+
     def test_manifest_preserves_v2_versions_and_market_regimes(self) -> None:
         module = load_build_module()
         with tempfile.TemporaryDirectory() as temporary:
