@@ -10,6 +10,19 @@ const SECURITY_HEADERS = {
   "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
 };
 
+const SHANGHAI_TIME_ZONE = "Asia/Shanghai";
+const STATUS_GRACE_MINUTES = 45;
+const WEEKDAY_CHECKPOINTS = [
+  [8, 58],
+  [9, 58],
+  [10, 58],
+  [12, 58],
+  [13, 58],
+  [14, 58],
+  [21, 28],
+  [23, 58],
+];
+
 function withSecurityHeaders(response) {
   const headers = new Headers(response.headers);
   Object.entries(SECURITY_HEADERS).forEach(([key, value]) => headers.set(key, value));
@@ -41,7 +54,7 @@ function json(payload, status = 200) {
 
 function nowCN() {
   const parts = new Intl.DateTimeFormat("sv-SE", {
-    timeZone: "Asia/Shanghai",
+    timeZone: SHANGHAI_TIME_ZONE,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -51,6 +64,117 @@ function nowCN() {
     hour12: false,
   }).format(new Date());
   return `${parts.replace(" ", "T")}+08:00`;
+}
+
+function shanghaiDateParts(date) {
+  const values = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: SHANGHAI_TIME_ZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(date).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]),
+  );
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+  };
+}
+
+function shiftCalendarDate(parts, days) {
+  const shifted = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days));
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate(),
+  };
+}
+
+function calendarWeekday(parts) {
+  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay();
+}
+
+function isBusinessDay(parts) {
+  const weekday = calendarWeekday(parts);
+  return weekday >= 1 && weekday <= 5;
+}
+
+function previousBusinessDay(parts) {
+  let candidate = shiftCalendarDate(parts, -1);
+  while (!isBusinessDay(candidate)) candidate = shiftCalendarDate(candidate, -1);
+  return candidate;
+}
+
+function expectedCheckpoint(current) {
+  const local = shanghaiDateParts(current);
+  let checkpointDate = { year: local.year, month: local.month, day: local.day };
+  let checkpoint = null;
+  if (isBusinessDay(checkpointDate)) {
+    const currentMinute = local.hour * 60 + local.minute;
+    checkpoint = [...WEEKDAY_CHECKPOINTS]
+      .reverse()
+      .find(([hour, minute]) => hour * 60 + minute <= currentMinute) || null;
+    if (!checkpoint) checkpointDate = previousBusinessDay(checkpointDate);
+  } else {
+    while (!isBusinessDay(checkpointDate)) checkpointDate = shiftCalendarDate(checkpointDate, -1);
+  }
+  checkpoint ||= WEEKDAY_CHECKPOINTS.at(-1);
+  const [hour, minute] = checkpoint;
+  const epoch = Date.UTC(
+    checkpointDate.year,
+    checkpointDate.month - 1,
+    checkpointDate.day,
+    hour - 8,
+    minute,
+  );
+  const pad = (value) => String(value).padStart(2, "0");
+  return {
+    epoch,
+    iso: `${checkpointDate.year}-${pad(checkpointDate.month)}-${pad(checkpointDate.day)}T${pad(hour)}:${pad(minute)}:00+08:00`,
+  };
+}
+
+export function snapshotFreshness(generatedAt, current = new Date()) {
+  const now = current instanceof Date ? current : new Date(current);
+  if (Number.isNaN(now.getTime())) {
+    return {
+      freshness_state: "unknown",
+      expected_checkpoint: null,
+      snapshot_age_minutes: null,
+      checkpoint_lag_minutes: null,
+    };
+  }
+  const expected = expectedCheckpoint(now);
+  const generated = generatedAt ? new Date(generatedAt) : null;
+  if (!generated || Number.isNaN(generated.getTime())) {
+    return {
+      freshness_state: "unknown",
+      expected_checkpoint: expected.iso,
+      snapshot_age_minutes: null,
+      checkpoint_lag_minutes: null,
+    };
+  }
+  const generatedEpoch = generated.getTime();
+  const nowEpoch = now.getTime();
+  const snapshotAge = Math.max(0, Math.floor((nowEpoch - generatedEpoch) / 60_000));
+  const checkpointLag = Math.max(0, Math.floor((expected.epoch - generatedEpoch) / 60_000));
+  let freshnessState = "fresh";
+  if (generatedEpoch < expected.epoch) {
+    freshnessState = nowEpoch <= expected.epoch + STATUS_GRACE_MINUTES * 60_000 ? "updating" : "stale";
+  }
+  return {
+    freshness_state: freshnessState,
+    expected_checkpoint: expected.iso,
+    snapshot_age_minutes: snapshotAge,
+    checkpoint_lag_minutes: checkpointLag,
+  };
 }
 
 function isoFromEpoch(value) {
@@ -375,6 +499,7 @@ async function handleApi(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/api/status") {
     const latest = await latestPick(env);
+    const freshness = snapshotFreshness(latest ? latest.generated_at : null);
     return json({
       ok: true,
       time: nowCN(),
@@ -389,6 +514,8 @@ async function handleApi(request, env) {
       weights_version: latest ? latest.weights_version || null : null,
       universe_version: latest ? latest.universe_version || null : null,
       generated_at: latest ? latest.generated_at || null : null,
+      snapshot_key: latest ? latest.snapshot_key || null : null,
+      ...freshness,
     });
   }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import unittest
+from unittest import mock
 
 import server
 from scripts.validate_snapshot import validate_snapshot
@@ -37,6 +38,26 @@ def snapshot_fixture() -> dict:
 
 
 class SnapshotContractTests(unittest.TestCase):
+    def test_automation_metadata_uses_workflow_environment(self) -> None:
+        with mock.patch.dict(
+            server.os.environ,
+            {
+                "AUTOMATION_TRIGGER": "schedule",
+                "SCHEDULED_SLOT": "2026-08-21T23:58:00+08:00",
+                "GENERATION_ATTEMPT": "2",
+            },
+            clear=False,
+        ):
+            snapshot = server.enrich_snapshot_v2(snapshot_fixture())
+        self.assertEqual(
+            snapshot["automation"],
+            {
+                "trigger": "schedule",
+                "scheduled_slot": "2026-08-21T23:58:00+08:00",
+                "generation_attempt": 2,
+            },
+        )
+
     def test_three_markets_keep_old_fields_and_add_v2_contract(self) -> None:
         snapshot = snapshot_fixture()
         legacy_actions = {key: section["decision"]["action"] for key, section in snapshot["markets"].items()}

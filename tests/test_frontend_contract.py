@@ -66,6 +66,36 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("analysis_projects?.dual_low", self.js)
         self.assertIn("评分和排序不会随之重算", self.js)
 
+    def test_freshness_polling_reloads_only_when_snapshot_changes(self) -> None:
+        self.assertIn("const STATUS_POLL_INTERVAL_MS = 5 * 60 * 1000", self.js)
+        self.assertRegex(self.js, r"async function pollStatus\(")
+        self.assertIn('getJson("/api/status")', self.js)
+        self.assertIn("status.generated_at !== previousGeneratedAt", self.js)
+        self.assertIn("!state.snapshot ||", self.js)
+        self.assertIn('getJson("/api/latest")', self.js)
+        self.assertIn('getJson("/api/history?limit=120")', self.js)
+        self.assertIn("window.setInterval(pollStatus, STATUS_POLL_INTERVAL_MS)", self.js)
+        for label in ("数据正常", "更新中", "数据已过期", "状态未知"):
+            self.assertIn(label, self.js)
+
+    def test_decision_page_makes_degraded_pool_visible(self) -> None:
+        self.assertRegex(self.js, r"function poolHealthAlert\(")
+        self.assertIn("候选池降级", self.js)
+        self.assertIn("覆盖不足", self.js)
+        self.assertIn("decision.blocker_codes", self.js)
+        self.assertIn("section.pool_health", self.js)
+        self.assertIn("health.reason_codes", self.js)
+        self.assertIn("health.broad_pool_count", self.js)
+        self.assertIn("health.quote_coverage", self.js)
+        self.assertIn("POOL_COVERAGE_INSUFFICIENT", self.js)
+        self.assertIn("pool-health-alert", self.css)
+
+    def test_freshness_and_data_quality_have_separate_badges(self) -> None:
+        self.assertIn('id="healthBadge"', self.html)
+        self.assertIn('id="qualityBadge"', self.html)
+        self.assertIn("快照新鲜度与数据完整度分开判断", self.js)
+        self.assertIn("health-badge.is-degraded", self.css)
+
 
 if __name__ == "__main__":
     unittest.main()

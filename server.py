@@ -22,6 +22,7 @@ import socketserver
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -50,6 +51,11 @@ DUAL_LOW_STRATEGY_ID = "dual_low"
 DUAL_LOW_POOL_SCOPE = "a_share.merged_recall_quote_pool.pre_kline_v1"
 DUAL_LOW_BRIDGE = ROOT / "scripts" / "score_dual_low.mjs"
 DUAL_LOW_FACTOR_KEYS = ("value", "stability", "liquidity", "momentum", "activity", "reversal", "size")
+NETWORK_RETRY_ATTEMPTS = 3
+NETWORK_RETRY_BASE_DELAY_SECONDS = 0.25
+NETWORK_RETRY_MAX_DELAY_SECONDS = 1.0
+A_SHARE_MIN_BROAD_POOL_COUNT = 80
+A_SHARE_MIN_QUOTE_COVERAGE = 0.80
 
 V2_REGIME_WEIGHTS = {
     "trend_risk_on": {
@@ -939,6 +945,20 @@ def safe_float(value, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def automation_metadata() -> dict:
+    """Describe the generation attempt without depending on one scheduler."""
+    raw_attempt = os.environ.get("GENERATION_ATTEMPT") or os.environ.get("GITHUB_RUN_ATTEMPT") or "1"
+    try:
+        generation_attempt = max(1, int(raw_attempt))
+    except (TypeError, ValueError):
+        generation_attempt = 1
+    return {
+        "trigger": os.environ.get("AUTOMATION_TRIGGER") or os.environ.get("GITHUB_EVENT_NAME") or "local",
+        "scheduled_slot": os.environ.get("SCHEDULED_SLOT") or os.environ.get("SCHEDULE_GATE_SLOT") or None,
+        "generation_attempt": generation_attempt,
+    }
 
 
 def nullable_float(value) -> float | None:
@@ -1992,6 +2012,7 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
     snapshot["selector_mode"] = SELECTOR_MODE
     snapshot["weights_version"] = V2_WEIGHTS_VERSION
     snapshot["universe_version"] = UNIVERSE_VERSION
+    snapshot.setdefault("automation", automation_metadata())
     (snapshot.setdefault("analysis_models", {})).setdefault(
         "dual_low",
         {
@@ -2037,14 +2058,52 @@ def eastmoney_secid(code: str) -> str:
     return ("1." if code.startswith(("6", "9")) else "0.") + code
 
 
+def _retry_delay(attempt_index: int) -> float:
+    return min(
+        NETWORK_RETRY_MAX_DELAY_SECONDS,
+        NETWORK_RETRY_BASE_DELAY_SECONDS * (2 ** attempt_index),
+    )
+
+
+def requests_get_with_retry(url: str, **kwargs):
+    """Perform a GET with three bounded attempts, including transient HTTP errors."""
+    last_error: Exception | None = None
+    for attempt in range(NETWORK_RETRY_ATTEMPTS):
+        try:
+            response = requests.get(url, **kwargs)
+            response.raise_for_status()
+            return response
+        except (requests.RequestException, OSError) as exc:
+            last_error = exc
+            if attempt + 1 < NETWORK_RETRY_ATTEMPTS:
+                time.sleep(_retry_delay(attempt))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("request failed without an error")
+
+
+def urlopen_with_retry(request, *, timeout: int):
+    """Open Tencent endpoints with the same bounded retry policy."""
+    last_error: Exception | None = None
+    for attempt in range(NETWORK_RETRY_ATTEMPTS):
+        try:
+            return urllib.request.urlopen(request, timeout=timeout)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt + 1 < NETWORK_RETRY_ATTEMPTS:
+                time.sleep(_retry_delay(attempt))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("urlopen failed without an error")
+
+
 def http_get_json(url: str, params: dict | None = None, timeout: int = 14) -> dict:
-    response = requests.get(
+    response = requests_get_with_retry(
         url,
         params=params,
         headers={"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"},
         timeout=timeout,
     )
-    response.raise_for_status()
     return response.json()
 
 
@@ -2086,8 +2145,7 @@ def load_ths_hot(date_text: str) -> list[dict]:
         "http://zx.10jqka.com.cn/event/api/getharden/"
         f"date/{date_text}/orderby/date/orderway/desc/charset/GBK/"
     )
-    response = requests.get(url, headers={"User-Agent": UA}, timeout=12)
-    response.raise_for_status()
+    response = requests_get_with_retry(url, headers={"User-Agent": UA}, timeout=12)
     data = response.json()
     if data.get("errocode", 0) != 0:
         return []
@@ -2264,7 +2322,7 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
         prefixed = [market_prefix(code) + code for code in batch]
         url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
         req = urllib.request.Request(url, headers={"User-Agent": UA})
-        raw = urllib.request.urlopen(req, timeout=16).read().decode("gbk", "ignore")
+        raw = urlopen_with_retry(req, timeout=16).read().decode("gbk", "ignore")
         for line in raw.strip().split(";"):
             if not line.strip() or "=\"" not in line:
                 continue
@@ -2335,7 +2393,7 @@ def index_quotes() -> dict:
     url = "https://qt.gtimg.cn/q=" + ",".join(mapping)
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA})
-        raw = urllib.request.urlopen(req, timeout=12).read().decode("gbk", "ignore")
+        raw = urlopen_with_retry(req, timeout=12).read().decode("gbk", "ignore")
     except Exception:
         return {"items": [], "risk": "unknown", "risk_note": "指数接口暂不可用"}
 
@@ -2457,8 +2515,7 @@ def baidu_stock_kline(code: str, limit: int = 70) -> list[dict]:
         "Referer": "https://gushitong.baidu.com/",
     }
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=12)
-        response.raise_for_status()
+        response = requests_get_with_retry(url, params=params, headers=headers, timeout=12)
         data = response.json()
         market = (((data.get("Result") or {}).get("newMarketData") or {}).get("marketData")) or ""
     except Exception:
@@ -2531,13 +2588,12 @@ def tencent_stock_kline(code: str, limit: int = 70) -> list[dict]:
     url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     params = {"param": f"{symbol},day,,,{limit},qfq"}
     try:
-        response = requests.get(
+        response = requests_get_with_retry(
             url,
             params=params,
             headers={"User-Agent": UA, "Referer": "https://gu.qq.com/"},
             timeout=10,
         )
-        response.raise_for_status()
         data = response.json()
         payload = ((data.get("data") or {}).get(symbol) or {})
         klines = payload.get("qfqday") or payload.get("day") or []
@@ -3561,26 +3617,60 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
     return {"candidates": final, "raw_pool_size": len(candidates), "scored_size": len(final)}
 
 
+def candidate_is_executable(candidate: dict) -> bool:
+    if str(candidate.get("execution_state") or "").upper() in {"BLOCK", "BLOCKED"}:
+        return False
+    return not any(
+        str(gate.get("status") or "").upper() == "BLOCK"
+        for gate in (candidate.get("decision_gates") or [])
+        if isinstance(gate, dict)
+    )
+
+
+def _remaining_in_legacy_order(candidates: list[dict], primary: dict) -> list[dict]:
+    return [candidate for candidate in candidates if candidate is not primary]
+
+
 def make_serenity_decision(candidates: list[dict], market_key: str) -> dict:
-    if not candidates:
+    legacy_order = list(candidates)
+    if not legacy_order:
         return {
             "action": "NO_TRADE",
             "title": "无推荐",
             "message": "该市场没有足够完整的行情或结构信号，未来2周暂不推荐。",
             "primary": None,
             "watchlist": [],
+            "data_state": "DEGRADED",
+            "blocker_codes": ["NO_CANDIDATES"],
         }
-    primary = candidates[0]
-    blockers = []
+    executable = [candidate for candidate in legacy_order if candidate_is_executable(candidate)]
+    if not executable:
+        return {
+            "action": "NO_TRADE",
+            "title": "无推荐",
+            "message": "候选股均被客观行情、K线完整性或可交易性门控拦截。",
+            "primary": None,
+            "blocked_candidate": legacy_order[0],
+            "watchlist": legacy_order[:8],
+            "data_state": "DEGRADED",
+            "blocker_codes": ["OBJECTIVE_GATE_BLOCKED"],
+        }
+    primary = executable[0]
+    blockers: list[str] = []
+    blocker_codes: list[str] = []
     threshold = SERENITY_MARKET_POLICY.get(market_key, SERENITY_MARKET_POLICY["hk"])["threshold"]
     if primary["confidence"] < threshold:
         blockers.append(f"推荐度低于 {threshold}")
+        blocker_codes.append("CONFIDENCE_BELOW_THRESHOLD")
     if primary.get("hard_risk_count", 0) >= 2:
         blockers.append("硬风险项过多")
+        blocker_codes.append("HARD_RISK_COUNT")
     if primary["estimated_2w_range"]["low_pct"] <= (-7.0 if market_key == "us" else -5.5):
         blockers.append("预估下行空间偏大")
+        blocker_codes.append("DOWNSIDE_TOO_LARGE")
     if len(primary["risk_flags"]) >= 4:
         blockers.append("风险标签过多")
+        blocker_codes.append("RISK_FLAGS_EXCESSIVE")
     if blockers:
         return {
             "action": "NO_TRADE",
@@ -3588,21 +3678,55 @@ def make_serenity_decision(candidates: list[dict], market_key: str) -> dict:
             "message": "；".join(blockers),
             "primary": None,
             "blocked_candidate": primary,
-            "watchlist": candidates[:8],
+            "watchlist": legacy_order[:8],
+            "data_state": "READY",
+            "blocker_codes": blocker_codes,
         }
     return {
         "action": "BUY_CANDIDATE",
         "title": "两周推荐",
         "message": "实时买入价、UZI评审团、CZSC结构和产业链因子同时通过两周上涨阈值。",
         "primary": primary,
-        "watchlist": candidates[1:9],
+        "watchlist": _remaining_in_legacy_order(legacy_order, primary)[:8],
+        "data_state": "READY",
+        "blocker_codes": [],
+    }
+
+
+def quote_health_contract(requested_count: int, quote_count: int, failed: bool = False) -> dict:
+    coverage = round(quote_count / requested_count, 4) if requested_count else 0.0
+    if failed:
+        status = "unavailable"
+        reason_codes = ["TENCENT_QUOTE_UNAVAILABLE"]
+    elif requested_count == 0:
+        status = "unavailable"
+        reason_codes = ["QUOTE_INPUT_EMPTY"]
+    elif quote_count < requested_count:
+        status = "partial"
+        reason_codes = ["TENCENT_QUOTE_PARTIAL"]
+    else:
+        status = "available"
+        reason_codes = []
+    return {
+        "status": status,
+        "source": "Tencent realtime quote",
+        "requested_count": requested_count,
+        "quote_count": quote_count,
+        "quote_coverage": coverage,
+        "reason_codes": reason_codes,
     }
 
 
 def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> dict:
-    codes = [row.get("code") for row in hot_rows if row.get("code")]
-    quotes = tencent_quote(codes)
-    dragon_map = daily_dragon_tiger(signal_date)
+    codes = list(dict.fromkeys(row.get("code") for row in hot_rows if row.get("code")))
+    quote_failed = False
+    try:
+        quotes = tencent_quote(codes)
+    except Exception:
+        quotes = {}
+        quote_failed = True
+    quote_health = quote_health_contract(len(codes), len(quotes), failed=quote_failed)
+    dragon_map = daily_dragon_tiger(signal_date) if quotes else {}
 
     preliminary = []
     for hot in hot_rows:
@@ -3758,36 +3882,110 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
         "raw_pool_size": len(hot_rows),
         "scored_size": len(final),
         "dragon_count": len(dragon_map),
+        "quote_health": quote_health,
         "analysis_models": {"dual_low": dual_low_batch["metadata"]},
     }
 
 
-def make_decision(candidates: list[dict], market: dict) -> dict:
-    if not candidates:
+def a_share_pool_health(
+    broad_rows: list[dict],
+    *,
+    event_count: int = 0,
+    cached_count: int = 0,
+    quote_count: int = 0,
+    merged_count: int | None = None,
+    min_broad_pool_count: int = A_SHARE_MIN_BROAD_POOL_COUNT,
+    min_quote_coverage: float = A_SHARE_MIN_QUOTE_COVERAGE,
+) -> dict:
+    broad_pool_count = len(broad_rows)
+    if merged_count is None:
+        merged_count = broad_pool_count + max(0, int(event_count)) + max(0, int(cached_count))
+    merged_pool_count = max(0, int(merged_count))
+    quote_count = max(0, int(quote_count))
+    quote_coverage = (
+        round(min(1.0, quote_count / merged_pool_count), 4)
+        if merged_pool_count
+        else 0.0
+    )
+    reason_codes: list[str] = []
+    if broad_pool_count < min_broad_pool_count:
+        reason_codes.append("BROAD_POOL_BELOW_MINIMUM")
+    if merged_pool_count == 0:
+        reason_codes.append("MERGED_POOL_EMPTY")
+    elif quote_coverage < min_quote_coverage:
+        reason_codes.append("QUOTE_COVERAGE_BELOW_MINIMUM")
+    return {
+        "status": "degraded" if reason_codes else "healthy",
+        "reason_codes": reason_codes,
+        "broad_pool_count": broad_pool_count,
+        "merged_pool_count": merged_pool_count,
+        "quote_count": quote_count,
+        "quote_coverage": quote_coverage,
+        "min_broad_pool_count": min_broad_pool_count,
+        "min_quote_coverage": min_quote_coverage,
+    }
+
+
+def make_decision(candidates: list[dict], market: dict, pool_health: dict | None = None) -> dict:
+    legacy_order = list(candidates)
+    pool_health = pool_health or {"status": "healthy", "reason_codes": []}
+    if pool_health.get("status") == "degraded":
+        return {
+            "action": "NO_TRADE",
+            "title": "数据降级，暂停推荐",
+            "message": "A股候选池或行情覆盖不足；保留候选研究结果，但不生成可执行推荐。",
+            "primary": None,
+            "blocked_candidate": legacy_order[0] if legacy_order else None,
+            "watchlist": legacy_order[:8],
+            "data_state": "DEGRADED",
+            "blocker_codes": ["POOL_COVERAGE_INSUFFICIENT"],
+        }
+    if not legacy_order:
         return {
             "action": "NO_TRADE",
             "title": "无推荐",
             "message": "没有足够强的候选池，未来2周暂不推荐。",
             "primary": None,
             "watchlist": [],
+            "data_state": "DEGRADED",
+            "blocker_codes": ["NO_CANDIDATES"],
         }
-    candidates = sorted(candidates, key=lambda item: (item.get("hard_risk_count", 0), -item["confidence"], -item["score"]))
-    primary = candidates[0]
-    blockers = []
+    executable = [candidate for candidate in legacy_order if candidate_is_executable(candidate)]
+    if not executable:
+        return {
+            "action": "NO_TRADE",
+            "title": "无推荐",
+            "message": "候选股均被客观行情、K线完整性或可交易性门控拦截。",
+            "primary": None,
+            "blocked_candidate": legacy_order[0],
+            "watchlist": legacy_order[:8],
+            "data_state": "DEGRADED",
+            "blocker_codes": ["OBJECTIVE_GATE_BLOCKED"],
+        }
+    primary = executable[0]
+    blockers: list[str] = []
+    blocker_codes: list[str] = []
     if market.get("risk") == "high":
         blockers.append("指数环境触发高风险拦截")
+        blocker_codes.append("MARKET_RISK_HIGH")
     if primary["confidence"] < 64:
         blockers.append("推荐度低于 64")
+        blocker_codes.append("CONFIDENCE_BELOW_THRESHOLD")
     if primary.get("hard_risk_count", 0) >= 2:
         blockers.append("硬风险项过多，不适合未来2周持有")
+        blocker_codes.append("HARD_RISK_COUNT")
     if len(primary["risk_flags"]) >= 3:
         blockers.append("候选股风险标签过多")
+        blocker_codes.append("RISK_FLAGS_EXCESSIVE")
     if primary["amount_yi"] < 2.5:
         blockers.append("成交额不足，承接不够")
+        blocker_codes.append("LIQUIDITY_INSUFFICIENT")
     if primary["change_pct"] >= 9.5:
         blockers.append("信号日已接近涨停，次日追高性价比不足")
+        blocker_codes.append("PRICE_NEAR_LIMIT_UP")
     if primary["estimated_2w_range"]["low_pct"] <= -5.5:
         blockers.append("预估下行空间过大")
+        blocker_codes.append("DOWNSIDE_TOO_LARGE")
 
     if blockers:
         return {
@@ -3796,14 +3994,18 @@ def make_decision(candidates: list[dict], market: dict) -> dict:
             "message": "；".join(blockers),
             "primary": None,
             "blocked_candidate": primary,
-            "watchlist": candidates[:8],
+            "watchlist": legacy_order[:8],
+            "data_state": "READY",
+            "blocker_codes": blocker_codes,
         }
     return {
         "action": "BUY_CANDIDATE",
         "title": "两周推荐",
         "message": "满足实时买入价下未来2周上涨的买点纪律、资金承接和 UZI 风控阈值。",
         "primary": primary,
-        "watchlist": candidates[1:9],
+        "watchlist": _remaining_in_legacy_order(legacy_order, primary)[:8],
+        "data_state": "READY",
+        "blocker_codes": [],
     }
 
 
@@ -3833,7 +4035,15 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
     industries = industry_heat()
     scored = score_candidates(hot_date, hot_rows, market)
     enrich_market_candidates(scored["candidates"], "a_share", market)
-    decision = make_decision(scored["candidates"], market)
+    quote_health = scored.get("quote_health") or quote_health_contract(len(hot_rows), 0, failed=True)
+    pool_health = a_share_pool_health(
+        broad_rows,
+        event_count=len(event_rows),
+        cached_count=len(cached_rows),
+        quote_count=int(quote_health.get("quote_count") or 0),
+        merged_count=len(hot_rows),
+    )
+    decision = make_decision(scored["candidates"], market, pool_health=pool_health)
     hk_universe = market_universe("hk")
     us_universe = market_universe("us")
     hk_scored = score_serenity_candidates("hk", hk_universe)
@@ -3849,6 +4059,8 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "label": "A股",
             "description": "A股实时价 + UZI评审团/风控重权重 + CZSC结构 + Serenity AI 上游瓶颈。",
             "decision": decision,
+            "pool_health": pool_health,
+            "quote_health": quote_health,
             "stats": {
                 "raw_pool_size": scored["raw_pool_size"],
                 "universe_size": scored["raw_pool_size"],
@@ -3893,6 +4105,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "model_version": MODEL_VERSION,
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "generated_label": generated_at.strftime("%Y-%m-%d %H:%M"),
+        "automation": automation_metadata(),
         "snapshot_key": cache_key,
         "target_date": target_day.isoformat(),
         "next_trade_date": forecast_end.isoformat(),

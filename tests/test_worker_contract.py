@@ -319,8 +319,8 @@ class CloudflareWorkflowContractTests(unittest.TestCase):
     def test_workflow_is_serial_tested_and_does_not_install_unused_skill(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "deploy-worker.yml").read_text(encoding="utf-8")
         self.assertIn("group: xuangu-production", workflow)
-        self.assertIn("cancel-in-progress: true", workflow)
-        self.assertIn("timeout-minutes: 20", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertIn("timeout-minutes: 40", workflow)
         self.assertIn("python -m unittest discover -s tests -v", workflow)
         self.assertIn("node --check src/index.js", workflow)
         self.assertIn("node --check scripts/score_dual_low.mjs", workflow)

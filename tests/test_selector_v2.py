@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import tempfile
 import unittest
+import urllib.error
+from unittest import mock
 
+import requests
 import server
 
 
@@ -111,7 +115,182 @@ def fixture_candidate(price: float = 12.8, kline_count: int = 40) -> dict:
     }
 
 
+def decision_ready_candidate(code: str = "603228") -> dict:
+    candidate = fixture_candidate()
+    candidate.update(
+        {
+            "code": code,
+            "confidence": 88,
+            "recommendation_degree": 88,
+            "hard_risk_count": 0,
+            "risk_flags": [],
+            "amount_yi": 18.4,
+            "change_pct": 1.2,
+            "estimated_2w_range": {"low_pct": -2.0, "high_pct": 8.0},
+            "execution_state": "CANDIDATE",
+            "decision_gates": [{"id": "quote_valid", "status": "PASS"}],
+        }
+    )
+    return candidate
+
+
+def tencent_quote_payload(code: str = "600000", name: str = "浦发银行") -> bytes:
+    values = [""] * 53
+    values[1] = name
+    values[3] = "10.25"
+    values[4] = "10.00"
+    values[5] = "10.01"
+    values[30] = "20260821145958"
+    values[32] = "2.50"
+    values[33] = "10.30"
+    values[34] = "9.98"
+    values[36] = "100000"
+    values[37] = "20000"
+    values[38] = "1.20"
+    values[39] = "6.80"
+    values[43] = "3.20"
+    values[44] = "3000"
+    values[45] = "2500"
+    values[46] = "0.75"
+    values[47] = "11.00"
+    values[48] = "9.00"
+    values[49] = "1.10"
+    values[52] = "7.00"
+    return f'v_sh{code}="{"~".join(values)}";'.encode("gbk")
+
+
 class SelectorV2Tests(unittest.TestCase):
+    def test_http_get_json_retries_transient_requests_error(self) -> None:
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"ok": True}
+        with (
+            mock.patch.object(
+                server.requests,
+                "get",
+                side_effect=[requests.ConnectionError("temporary"), response],
+            ) as get,
+            mock.patch.object(server.time, "sleep"),
+        ):
+            result = server.http_get_json("https://example.test/api", timeout=1)
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(get.call_count, 2)
+
+    def test_tencent_quote_retries_transient_network_error(self) -> None:
+        response = mock.Mock()
+        response.read.return_value = tencent_quote_payload()
+        with (
+            mock.patch.object(
+                server.urllib.request,
+                "urlopen",
+                side_effect=[urllib.error.URLError("temporary"), response],
+            ) as urlopen,
+            mock.patch.object(server.time, "sleep"),
+        ):
+            result = server.tencent_quote(["600000"])
+        self.assertEqual(result["600000"]["name"], "浦发银行")
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_tencent_quote_stops_after_three_attempts(self) -> None:
+        with (
+            mock.patch.object(
+                server.urllib.request,
+                "urlopen",
+                side_effect=urllib.error.URLError("still down"),
+            ) as urlopen,
+            mock.patch.object(server.time, "sleep") as sleep,
+        ):
+            with self.assertRaises(urllib.error.URLError):
+                server.tencent_quote(["600000"])
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_a_share_quote_failure_returns_unavailable_health(self) -> None:
+        with mock.patch.object(server, "tencent_quote", side_effect=urllib.error.URLError("down")):
+            scored = server.score_candidates("2026-08-21", [{"code": "600000"}], {})
+        self.assertEqual(scored["quote_health"]["status"], "unavailable")
+        self.assertEqual(scored["quote_health"]["reason_codes"], ["TENCENT_QUOTE_UNAVAILABLE"])
+        self.assertEqual(scored["candidates"], [])
+
+    def test_degraded_a_share_still_builds_hk_and_us_sections(self) -> None:
+        scored = {
+            "candidates": [],
+            "raw_pool_size": 1,
+            "scored_size": 0,
+            "dragon_count": 0,
+            "quote_health": server.quote_health_contract(1, 0, failed=True),
+            "analysis_models": {},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                mock.patch.object(server, "PICKS", server.pathlib.Path(temp_dir)),
+                mock.patch.object(server, "find_hot_pool", return_value=("2026-08-21", [{"code": "600000"}])),
+                mock.patch.object(server, "load_broad_market_pool", return_value=[]),
+                mock.patch.object(server, "cached_a_share_pool", return_value=[]),
+                mock.patch.object(server, "index_quotes", return_value={"items": [], "risk": "unknown"}),
+                mock.patch.object(server, "industry_heat", return_value={"top": [], "total": 0}),
+                mock.patch.object(server, "score_candidates", return_value=scored),
+                mock.patch.object(server, "market_universe", return_value=[]),
+                mock.patch.object(server, "score_serenity_candidates", return_value={"candidates": [], "raw_pool_size": 0, "scored_size": 0}),
+                mock.patch.object(server, "runtime_research_status", return_value={}),
+                mock.patch.object(server, "serenity_source_status", return_value={}),
+            ):
+                snapshot = server.run_selector("2026-08-24", force=True)
+        self.assertEqual(snapshot["markets"]["a_share"]["decision"]["action"], "NO_TRADE")
+        self.assertEqual(snapshot["markets"]["a_share"]["pool_health"]["status"], "degraded")
+        self.assertEqual(set(snapshot["markets"]), {"a_share", "hk", "us"})
+
+    def test_zero_broad_pool_forces_degraded_no_trade(self) -> None:
+        health = server.a_share_pool_health(
+            [],
+            event_count=57,
+            cached_count=40,
+            quote_count=93,
+            merged_count=96,
+        )
+        decision = server.make_decision([decision_ready_candidate()], {}, pool_health=health)
+        self.assertEqual(health["status"], "degraded")
+        self.assertIn("BROAD_POOL_BELOW_MINIMUM", health["reason_codes"])
+        self.assertEqual(decision["action"], "NO_TRADE")
+        self.assertEqual(decision["data_state"], "DEGRADED")
+        self.assertIn("POOL_COVERAGE_INSUFFICIENT", decision["blocker_codes"])
+
+    def test_low_quote_coverage_has_stable_reason_code(self) -> None:
+        health = server.a_share_pool_health(
+            [{"code": str(index)} for index in range(100)],
+            event_count=0,
+            cached_count=0,
+            quote_count=39,
+            merged_count=100,
+        )
+        self.assertEqual(health["status"], "degraded")
+        self.assertIn("QUOTE_COVERAGE_BELOW_MINIMUM", health["reason_codes"])
+        self.assertEqual(health["quote_coverage"], 0.39)
+
+    def test_objectively_blocked_candidate_cannot_be_a_share_primary(self) -> None:
+        blocked = decision_ready_candidate("600001")
+        blocked["execution_state"] = "BLOCKED"
+        blocked["decision_gates"] = [{"id": "quote_valid", "status": "BLOCK"}]
+        eligible = decision_ready_candidate("600002")
+        decision = server.make_decision(
+            [blocked, eligible],
+            {},
+            pool_health={"status": "healthy"},
+        )
+        self.assertEqual(decision["action"], "BUY_CANDIDATE")
+        self.assertEqual(decision["primary"]["code"], "600002")
+        self.assertEqual([row["code"] for row in decision["watchlist"]], ["600001"])
+
+    def test_objectively_blocked_candidate_cannot_be_hk_or_us_primary(self) -> None:
+        for market_key in ("hk", "us"):
+            blocked = decision_ready_candidate("BLOCKED")
+            blocked["decision_gates"] = [{"id": "kline_complete", "status": "BLOCK"}]
+            eligible = decision_ready_candidate("ELIGIBLE")
+            decision = server.make_serenity_decision([blocked, eligible], market_key)
+            self.assertEqual(decision["action"], "BUY_CANDIDATE")
+            self.assertEqual(decision["primary"]["code"], "ELIGIBLE")
+            self.assertEqual([row["code"] for row in decision["watchlist"]], ["BLOCKED"])
+
     def test_serenity_runtime_status_does_not_publish_local_path_or_overstate_execution(self):
         status = server.serenity_skill_status()
         self.assertEqual(status["mode"], "built-in-lens")

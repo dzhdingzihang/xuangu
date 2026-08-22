@@ -4,25 +4,31 @@ on:
   push:
     branches: [main]
   schedule:
-    # Beijing trading-day checkpoints:
-    # 08:58, 09:58, 10:58, 12:58, 13:58, 14:58, 21:28, 23:58
+    # Beijing primary checkpoints:
+    # 08:58, 09:58, 10:58, 12:58, 13:58, 14:58, 21:28, 23:58.
     - cron: "58 0,1,2,4,5,6,15 * * 1-5"
-    # Beijing 21:28
     - cron: "28 13 * * 1-5"
+    # Thirty-minute fallbacks. The final 00:28 fallback intentionally runs on
+    # UTC Friday so schedule_gate can associate it with Friday 23:58 Beijing.
+    - cron: "28 1,2,3,5,6,7,16 * * 1-5"
+    - cron: "58 13 * * 1-5"
   workflow_dispatch:
 
 concurrency:
   group: xuangu-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -40,6 +46,9 @@ jobs:
         id: schedule_gate
         if: github.event_name == 'schedule'
         run: python scripts/schedule_gate.py
+        env:
+          SCHEDULE_GATE_STATUS_URL: https://xuangu.alixjd.com/api/status
+          SCHEDULE_GATE_LATEST_PATH: data/picks/latest.json
 
       - name: Run Python unit tests
         run: python -m unittest discover -s tests -v
@@ -53,10 +62,35 @@ jobs:
 
       - name: Generate smart pick snapshot
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
-        run: python server.py --once --force
+        env:
+          AUTOMATION_TRIGGER: ${{ github.event_name }}
+          SCHEDULED_SLOT: ${{ steps.schedule_gate.outputs.slot }}
+        run: |
+          for attempt in 1 2 3; do
+            echo "Snapshot generation attempt ${attempt}/3"
+            if GENERATION_ATTEMPT="${attempt}" python server.py --once --force; then
+              break
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "Snapshot generation failed after 3 attempts" >&2
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 15))
+            echo "Retrying in ${sleep_seconds}s"
+            sleep "${sleep_seconds}"
+          done
 
       - name: Validate published snapshot schema
         run: python scripts/validate_snapshot.py data/picks/latest.json
+
+      - name: Upload latest snapshot recovery artifact
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-snapshot-${{ github.run_id }}
+          path: data/picks/latest.json
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Install Node dependencies
         run: npm ci
@@ -64,15 +98,22 @@ jobs:
       - name: Build Worker assets
         run: npm run build
 
-      - name: Commit generated snapshot
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Update daily pick snapshot"
-          file_pattern: data/picks/*.json
-
       - name: Deploy Worker
         if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Verify deployed snapshot identity
+        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        run: python scripts/verify_deployment.py data/picks/latest.json --base-url https://xuangu.alixjd.com
+
+      # Archival is deliberately last: a transient Git push conflict must not
+      # prevent a validated snapshot from reaching Cloudflare.
+      - name: Commit generated snapshot
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        continue-on-error: true
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update daily pick snapshot"
+          file_pattern: data/picks/*.json

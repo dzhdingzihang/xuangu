@@ -49,6 +49,19 @@ const DUAL_LOW_RISK_META = { low: "低", medium: "中", high: "高" };
 const DUAL_LOW_INPUT_META = {
   quote_valuation_core_v1: "实时行情 + PE / PB / 总市值核心字段",
 };
+const POOL_HEALTH_REASON_META = {
+  POOL_COVERAGE_INSUFFICIENT: "候选池或报价覆盖未达安全阈值",
+  BROAD_POOL_BELOW_MINIMUM: "全市场宽基池低于最低数量",
+  MERGED_POOL_EMPTY: "合并候选池为空",
+  QUOTE_COVERAGE_BELOW_MINIMUM: "候选报价覆盖率低于最低要求",
+};
+const STATUS_POLL_INTERVAL_MS = 5 * 60 * 1000;
+const FRESHNESS_META = {
+  fresh: { label: "数据正常", icon: "ph-check-circle", className: "is-fresh" },
+  updating: { label: "更新中", icon: "ph-arrows-clockwise", className: "is-updating" },
+  stale: { label: "数据已过期", icon: "ph-warning-circle", className: "is-stale" },
+  unknown: { label: "状态未知", icon: "ph-question", className: "is-unknown" },
+};
 
 const state = {
   tab: "decision",
@@ -146,6 +159,38 @@ function marketSection(snapshot, market = state.market) {
 
 function marketDecision(snapshot, market = state.market) {
   return marketSection(snapshot, market).decision || {};
+}
+
+function poolHealthState(section, decision) {
+  const health = section.pool_health || {};
+  const blockerCodes = Array.isArray(decision.blocker_codes) ? decision.blocker_codes : [];
+  const reasonCodes = Array.isArray(health.reason_codes) ? health.reason_codes : [];
+  const healthState = String(health.state || health.status || health.data_state || "").toUpperCase();
+  const poolBlocker = blockerCodes.some((code) => /POOL_COVERAGE|UNIVERSE_COVERAGE|BROAD_POOL|QUOTE_COVERAGE/i.test(String(code)));
+  const degraded = healthState === "DEGRADED" || poolBlocker || reasonCodes.length > 0;
+  const stats = section.stats || {};
+  const broadPoolSize = health.broad_pool_count ?? health.broad_pool_size ?? stats.broad_pool_size;
+  const coverage = health.quote_coverage ?? health.coverage_ratio ?? health.coverage_pct;
+  return { health, blockerCodes, reasonCodes, degraded, broadPoolSize, coverage };
+}
+
+function poolHealthAlert(section, decision) {
+  const poolHealth = poolHealthState(section, decision);
+  if (!poolHealth.degraded) return "";
+  const textReasons = Array.isArray(poolHealth.health.reasons) ? poolHealth.health.reasons : [];
+  const codedReasons = poolHealth.reasonCodes.map((code) => POOL_HEALTH_REASON_META[code] || code);
+  const codedBlockers = poolHealth.blockerCodes.map((code) => POOL_HEALTH_REASON_META[code] || code);
+  const reasons = [...textReasons, ...codedReasons];
+  const detail = poolHealth.health.message
+    || reasons[0]
+    || (codedBlockers.length ? codedBlockers.join(" · ") : "全市场宽基或关键召回来源没有达到完整覆盖要求");
+  const metrics = [];
+  if (poolHealth.broadPoolSize !== null && poolHealth.broadPoolSize !== undefined && Number.isFinite(Number(poolHealth.broadPoolSize))) metrics.push(`宽基池 ${fmt(poolHealth.broadPoolSize, 0)} 只`);
+  if (poolHealth.coverage !== null && poolHealth.coverage !== undefined && Number.isFinite(Number(poolHealth.coverage))) {
+    const coveragePct = Number(poolHealth.coverage) <= 1 ? Number(poolHealth.coverage) * 100 : Number(poolHealth.coverage);
+    metrics.push(`覆盖率 ${fmt(coveragePct, 0)}%`);
+  }
+  return `<div class="pool-health-alert" role="alert">${icon("ph-warning-octagon")}<div><strong>候选池降级 · 覆盖不足</strong><p>${esc(detail)}。当前结果可用于观察，但不能视为完整市场筛选结论。</p>${metrics.length ? `<small>${esc(metrics.join(" · "))}</small>` : ""}</div></div>`;
 }
 
 function currentCandidate(decision) {
@@ -319,9 +364,36 @@ function updateTopbar() {
   $("#pageSubtitle").textContent = subtitle;
   $("#snapshotTime").textContent = dateTime(state.snapshot?.generated_at);
   const health = $("#healthBadge");
-  const healthy = Boolean(state.snapshot && state.status?.ok !== false);
-  health.className = `health-badge ${healthy ? "" : "is-error"}`;
-  health.innerHTML = `${icon(healthy ? "ph-check" : "ph-warning")}${healthy ? "数据正常" : "数据异常"}`;
+  const freshnessState = state.snapshot && state.status?.ok !== false
+    ? state.status?.freshness_state || "unknown"
+    : "unknown";
+  const freshness = FRESHNESS_META[freshnessState] || FRESHNESS_META.unknown;
+  health.className = `health-badge ${freshness.className}`;
+  health.innerHTML = `${icon(freshness.icon)}${freshness.label}`;
+  const checkpoint = state.status?.expected_checkpoint ? dateTime(state.status.expected_checkpoint) : "--";
+  const lagValue = state.status?.checkpoint_lag_minutes;
+  const lag = lagValue !== null && lagValue !== undefined && Number.isFinite(Number(lagValue)) ? `${fmt(lagValue, 0)} 分钟` : "--";
+  health.title = `${freshness.label}；最近应完成检查点 ${checkpoint}；快照落后 ${lag}`;
+  health.setAttribute("aria-label", health.title);
+
+  const quality = $("#qualityBadge");
+  const sections = Object.entries(state.snapshot?.markets || {});
+  const poolDegraded = sections.filter(([, section]) => poolHealthState(section || {}, section?.decision || {}).degraded);
+  const quoteUnavailable = sections.filter(([, section]) => section?.quote_health?.status === "unavailable");
+  const otherRestricted = sections.filter(([, section]) => {
+    const decision = section?.decision || {};
+    return decision.data_state === "DEGRADED" && !poolHealthState(section || {}, decision).degraded;
+  });
+  const restricted = [...new Set([...poolDegraded, ...quoteUnavailable, ...otherRestricted].map(([market]) => market))];
+  quality.hidden = restricted.length === 0;
+  if (restricted.length) {
+    const labels = restricted.map((market) => MARKET_META[market]?.label || market).join("、");
+    const label = poolDegraded.length ? "候选池降级" : quoteUnavailable.length ? "行情不可用" : "部分市场受限";
+    quality.className = "health-badge is-degraded";
+    quality.innerHTML = `${icon("ph-warning-octagon")}${label}`;
+    quality.title = `${labels}：${label}；快照新鲜度与数据完整度分开判断`;
+    quality.setAttribute("aria-label", quality.title);
+  }
 }
 
 function switchTab(tab, writeHash = true) {
@@ -509,7 +581,7 @@ function renderDecision() {
   const decision = section.decision || {};
   const baseCandidate = currentCandidate(decision);
   if (!baseCandidate) {
-    root.innerHTML = `<div class="toolbar"><div><h2>${MARKET_META[state.market].label}决策</h2><p>${esc(decision.message || "本轮没有保存候选")}</p></div>${marketSwitch()}</div><div class="empty-state">${icon("ph-magnifying-glass")}<h3>没有可展示候选</h3><p>系统没有在当前数据证据下产生可执行候选，请查看其他市场或历史快照。</p></div>`;
+    root.innerHTML = `<div class="toolbar"><div><h2>${MARKET_META[state.market].label}决策</h2><p>${esc(decision.message || "本轮没有保存候选")}</p></div>${marketSwitch()}</div>${poolHealthAlert(section, decision)}<div class="empty-state">${icon("ph-magnifying-glass")}<h3>没有可展示候选</h3><p>系统没有在当前数据证据下产生可执行候选，请查看其他市场或历史快照。</p></div>`;
     return;
   }
   const candidate = liveMerged(baseCandidate, state.market);
@@ -525,13 +597,15 @@ function renderDecision() {
   const passCount = gates.filter((gate) => gate.status === "PASS").length;
   const risks = [...(candidate.risk_items || []).map((risk) => `${risk.code}${risk.evidence ? ` · ${risk.evidence}` : ""}`), ...(candidate.risk_flags || [])];
   const live = state.live.get(candidateId(baseCandidate, state.market));
+  const poolHealth = poolHealthState(section, decision);
   root.innerHTML = `
     <div class="toolbar">
       <div class="toolbar-left"><div><h2>${MARKET_META[state.market].label} · ${esc(labelForRegime(regime))}</h2><p>${esc(section.description || decision.message || "根据当前快照执行")}</p></div>${badge(state.snapshot?.selector_mode?.includes("dual_low") ? "Legacy Active · V2 + 双低 Shadow" : state.snapshot?.selector_mode?.includes("v2") ? "Legacy Active · V2 Shadow" : "Legacy Active", "purple")}</div>
       <div class="toolbar-right">${marketSwitch()}<button class="icon-button" type="button" data-action="live" data-market="${state.market}" data-code="${esc(baseCandidate.code || baseCandidate.symbol)}">${icon("ph-lightning")}刷新当前行情</button></div>
     </div>
+    ${poolHealthAlert(section, decision)}
     ${renderKpis([
-      { icon: "ph-binoculars", label: "候选池扫描", value: fmt(pool, 0), meta: `${esc(stats.universe_origin || (state.market === "a_share" ? "动态召回" : "精选静态池"))}` },
+      { icon: poolHealth.degraded ? "ph-warning-octagon" : "ph-binoculars", label: "候选池扫描", value: poolHealth.degraded ? "DEGRADED" : fmt(pool, 0), tone: poolHealth.degraded ? "warning" : "", meta: poolHealth.degraded ? "候选池降级 · 覆盖不足" : `${esc(stats.universe_origin || (state.market === "a_share" ? "动态召回" : "精选静态池"))}` },
       { icon: "ph-funnel", label: "完成深评", value: fmt(stats.scored_size, 0), meta: `页面保留 ${shown} 只证据卡` },
       { icon: "ph-ranking", label: "推荐度", value: `${fmt(candidateScore(candidate), 0)}`, tone: hasPrimary ? "positive" : "warning", meta: `旧逻辑实际决策 · 总分 ${fmt(candidate.score, 1)}` },
       { icon: "ph-shield-check", label: "客观门控", value: gates.length ? `${passCount}/${gates.length}` : "Legacy", meta: gates.length ? `${gates.filter((g) => g.status === "BLOCK").length} 个阻断` : "V2 快照生成后启用展示" },
@@ -972,10 +1046,13 @@ async function loadHistorySnapshot(key) {
 }
 
 async function refreshAll() {
+  const requestGeneration = ++snapshotLoadGeneration;
   const button = $("#refreshBtn");
   button.classList.add("is-loading"); button.disabled = true;
   try {
     const [status, historyPayload, snapshot] = await Promise.all([getJson("/api/status"), getJson("/api/history?limit=120"), getJson("/api/latest")]);
+    if (requestGeneration !== snapshotLoadGeneration) return;
+    if (status.generated_at && snapshot.generated_at !== status.generated_at) throw new Error("最新快照仍在边缘节点传播");
     state.status = status; state.history = historyPayload.history || []; state.snapshot = snapshot; state.live.clear(); state.historySnapshot = null;
     renderRail(); updateTopbar(); renderActiveTab();
     showToast("最新已发布快照已刷新。Cloudflare 页面不会在线重算选股。", "success");
@@ -983,6 +1060,46 @@ async function refreshAll() {
     showToast(error.message || "刷新失败", "error");
   } finally {
     button.classList.remove("is-loading"); button.disabled = false;
+  }
+}
+
+let statusPollInFlight = false;
+let snapshotLoadGeneration = 0;
+async function pollStatus() {
+  if (statusPollInFlight) return;
+  statusPollInFlight = true;
+  const previousGeneratedAt = state.snapshot?.generated_at || state.status?.generated_at || null;
+  try {
+    const status = await getJson("/api/status");
+    state.status = status;
+    updateTopbar();
+    if (!state.snapshot || (status.generated_at && status.generated_at !== previousGeneratedAt)) {
+      const requestGeneration = ++snapshotLoadGeneration;
+      const [snapshot, historyPayload] = await Promise.all([
+        getJson("/api/latest"),
+        getJson("/api/history?limit=120"),
+      ]);
+      if (requestGeneration !== snapshotLoadGeneration) return;
+      if (status.generated_at && snapshot.generated_at !== status.generated_at) throw new Error("新快照仍在边缘节点传播");
+      state.snapshot = snapshot;
+      state.history = historyPayload.history || [];
+      state.live.clear();
+      state.historySnapshot = null;
+      if (!state.candidateKey || !allCandidates().some((row) => candidateId(row.candidate, row.market) === state.candidateKey)) {
+        const first = allCandidates()[0];
+        state.candidateKey = first ? candidateId(first.candidate, first.market) : "";
+      }
+      renderRail();
+      updateTopbar();
+      renderActiveTab();
+      showToast("检测到新决策快照，页面已自动更新；筛选条件保持不变。", "success");
+    }
+  } catch (error) {
+    state.status = { ...(state.status || {}), ok: false, freshness_state: "unknown" };
+    updateTopbar();
+    window.setTimeout(pollStatus, 15_000);
+  } finally {
+    statusPollInFlight = false;
   }
 }
 
@@ -1073,6 +1190,7 @@ async function initialize() {
   window.addEventListener("resize", handleResize);
   window.addEventListener("hashchange", () => switchTab(location.hash.slice(1), false));
   $("#refreshBtn").addEventListener("click", refreshAll);
+  window.setInterval(pollStatus, STATUS_POLL_INTERVAL_MS);
   try {
     const [statusResult, historyResult, latestResult] = await Promise.allSettled([
       getJson("/api/status"), getJson("/api/history?limit=120"), getJson("/api/latest"),
@@ -1085,10 +1203,12 @@ async function initialize() {
     if (first) state.candidateKey = candidateId(first.candidate, first.market);
     renderRail();
     switchTab(location.hash.slice(1) || "decision", false);
+    window.setTimeout(pollStatus, 1500);
   } catch (error) {
     updateTopbar();
     $$(".view-loading").forEach((view) => { view.innerHTML = `<div class="empty-state">${icon("ph-warning-circle")}<h3>无法读取决策快照</h3><p>${esc(error.message || "请稍后刷新")}</p><button class="icon-button" type="button" onclick="location.reload()">重新加载</button></div>`; });
     showToast(error.message || "初始化失败", "error");
+    window.setTimeout(pollStatus, 5000);
   }
 }
 
