@@ -15,6 +15,7 @@ from tests.test_selector_v2 import fixture_candidate
 
 def snapshot_fixture() -> dict:
     markets = {}
+    targets = {"a_share": 300, "hk": 200, "us": 300}
     for market_key, code in (("a_share", "603228"), ("hk", "0700.HK"), ("us", "NVDA")):
         row = fixture_candidate()
         row["code"] = code
@@ -28,6 +29,28 @@ def snapshot_fixture() -> dict:
                 "volume_unit": "lot" if market_key == "a_share" else "share",
             }
         )
+        stats = {
+            "recall_target": targets[market_key],
+            "recall_selected_size": targets[market_key],
+            "recall_shortfall": 0,
+            "raw_pool_size": targets[market_key],
+            "universe_size": targets[market_key],
+            "valid_quote_size": 1,
+            "deep_scored_size": 1,
+            "scored_size": 1,
+            "source_counts": {"fixture": targets[market_key]},
+        }
+        if market_key == "a_share":
+            stats.update(
+                {
+                    "board_targets": dict(server.A_SHARE_BOARD_TARGETS),
+                    "board_counts": dict(server.A_SHARE_BOARD_TARGETS),
+                    "board_shortfalls": {},
+                    "route_targets": dict(server.A_SHARE_ROUTE_TARGETS),
+                    "route_counts": dict(server.A_SHARE_ROUTE_TARGETS),
+                    "route_shortfalls": {},
+                }
+            )
         markets[market_key] = {
             "key": market_key,
             "label": market_key,
@@ -38,7 +61,7 @@ def snapshot_fixture() -> dict:
                 "primary": row,
                 "watchlist": [],
             },
-            "stats": {},
+            "stats": stats,
         }
     return {
         "model_version": "legacy-fixture",
@@ -165,6 +188,50 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(validate_snapshot(enriched), [])
         enriched["analysis_models"]["dual_low"]["participates_in_decision"] = True
         self.assertIn("dual-low model must not participate in the decision", validate_snapshot(enriched))
+
+    def test_snapshot_validator_checks_published_recall_funnel_contract(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        targets = {"a_share": 300, "hk": 200, "us": 300}
+        for market_key, target in targets.items():
+            enriched["markets"][market_key]["stats"].update(
+                {
+                    "recall_target": target,
+                    "recall_selected_size": target,
+                    "recall_shortfall": 0,
+                    "valid_quote_size": target,
+                    "deep_scored_size": 1,
+                }
+            )
+        enriched["markets"]["a_share"]["stats"].update(
+            {
+                "board_targets": server.A_SHARE_BOARD_TARGETS,
+                "board_counts": server.A_SHARE_BOARD_TARGETS,
+            }
+        )
+        self.assertEqual(validate_snapshot(enriched), [])
+
+        enriched["markets"]["hk"]["stats"]["recall_selected_size"] = 199
+        errors = validate_snapshot(enriched)
+        self.assertIn("markets.hk.stats.recall_shortfall is inconsistent", errors)
+
+    def test_expanded_universe_cannot_omit_or_falsify_recall_funnel(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        del enriched["markets"]["us"]["stats"]["recall_target"]
+        enriched["markets"]["a_share"]["stats"]["board_counts"] = {
+            "sh_main": 300,
+            "sz_main": 0,
+            "chinext": 0,
+            "star": 0,
+        }
+        enriched["markets"]["hk"]["stats"]["raw_pool_size"] = 1
+        enriched["markets"]["hk"]["stats"]["scored_size"] = 99
+
+        errors = validate_snapshot(enriched)
+
+        self.assertTrue(any("markets.us.stats recall funnel fields missing" in error for error in errors))
+        self.assertIn("markets.a_share.stats.board_shortfalls is inconsistent", errors)
+        self.assertIn("markets.hk.stats.raw_pool_size must equal selected size", errors)
+        self.assertIn("markets.hk.stats.scored_size must equal deep scored size", errors)
 
     def test_snapshot_validator_requires_global_ten_day_contract(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())

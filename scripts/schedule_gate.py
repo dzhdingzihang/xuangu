@@ -19,14 +19,27 @@ EARLY_GRACE_SECONDS = 5 * 60
 # silently skipping the trading snapshot.
 MAX_DELAY_SECONDS = 4 * 60 * 60
 RECOVERABLE_SOURCE_REASON_CODES = {
+    "BOARD_QUOTA_PARTIAL",
     "BROAD_POOL_BELOW_MINIMUM",
     "MERGED_POOL_EMPTY",
+    "POOL_TARGET_NOT_MET",
     "QUOTE_COVERAGE_BELOW_MINIMUM",
     "QUOTE_INPUT_EMPTY",
     "TENCENT_QUOTE_PARTIAL",
     "TENCENT_QUOTE_UNAVAILABLE",
     "YAHOO_QUOTE_PARTIAL",
     "YAHOO_QUOTE_UNAVAILABLE",
+}
+MARKET_RECALL_TARGETS = {
+    "a_share": 300,
+    "hk": 200,
+    "us": 300,
+}
+A_SHARE_BOARD_TARGETS = {
+    "sh_main": 90,
+    "sz_main": 75,
+    "chinext": 75,
+    "star": 60,
 }
 
 
@@ -141,11 +154,45 @@ def snapshot_data_source_recovery_reasons(snapshot: dict) -> list[str]:
             and quote_coverage < 0.8
         ):
             reasons.append(f"{market.upper()}_QUOTE_COVERAGE_BELOW_RECOVERY_THRESHOLD")
+        if market in {"hk", "us"}:
+            realtime_coverage = quote_health.get("realtime_coverage")
+            if (
+                not isinstance(realtime_coverage, (int, float))
+                or isinstance(realtime_coverage, bool)
+                or realtime_coverage < 0.98
+            ):
+                reasons.append(f"{market.upper()}_REALTIME_COVERAGE_BELOW_MINIMUM")
         quote_codes = {str(code) for code in reason_codes} if isinstance(reason_codes, list) else set()
         reasons.extend(sorted(quote_codes & RECOVERABLE_SOURCE_REASON_CODES))
 
         stats = section.get("stats")
         stats = stats if isinstance(stats, dict) else {}
+        expected_target = MARKET_RECALL_TARGETS[market]
+        published_target = stats.get("recall_target")
+        selected_size = stats.get("recall_selected_size")
+        if not isinstance(selected_size, (int, float)) or isinstance(selected_size, bool):
+            selected_size = stats.get("raw_pool_size")
+        if published_target != expected_target:
+            reasons.append(f"{market.upper()}_RECALL_TARGET_INVALID")
+        if (
+            not isinstance(selected_size, (int, float))
+            or isinstance(selected_size, bool)
+            or selected_size < expected_target
+        ):
+            reasons.append(f"{market.upper()}_POOL_TARGET_NOT_MET")
+        if market == "a_share":
+            board_counts = stats.get("board_counts")
+            if (
+                not isinstance(board_counts, dict)
+                or set(board_counts) != set(A_SHARE_BOARD_TARGETS)
+                or any(
+                    not isinstance(board_counts.get(board), (int, float))
+                    or isinstance(board_counts.get(board), bool)
+                    or board_counts.get(board) < target
+                    for board, target in A_SHARE_BOARD_TARGETS.items()
+                )
+            ):
+                reasons.append("A_SHARE_BOARD_QUOTA_PARTIAL")
         raw_pool_size = stats.get("raw_pool_size")
         scored_size = stats.get("scored_size")
         if (

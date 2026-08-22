@@ -37,9 +37,10 @@ ROOT = pathlib.Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
+MARKET_RECALL_EXPANSION_PATH = CACHE / "universes" / "market_recall_expansion_v2.json"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-08-22.1-dual-low-shadow"
+MODEL_VERSION = "smart-selector-2026-08-22.2-expanded-recall"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
@@ -50,7 +51,7 @@ SERENITY_SKILL_DIR = pathlib.Path.home() / ".agents" / "skills" / "serenity-skil
 SCHEMA_VERSION = "selector-snapshot-v2"
 SELECTOR_MODE = "legacy_active_v2_dual_low_shadow"
 V2_WEIGHTS_VERSION = "v2-rule-prior-1"
-UNIVERSE_VERSION = "recall-v2-1"
+UNIVERSE_VERSION = "recall-v2-2-diversified-300-200-300"
 DUAL_LOW_MODEL_ID = "dsa-screening-score-v1"
 DUAL_LOW_PACKAGE_VERSION = "1.0.0"
 DUAL_LOW_STRATEGY_ID = "dual_low"
@@ -60,8 +61,31 @@ DUAL_LOW_FACTOR_KEYS = ("value", "stability", "liquidity", "momentum", "activity
 NETWORK_RETRY_ATTEMPTS = 3
 NETWORK_RETRY_BASE_DELAY_SECONDS = 0.25
 NETWORK_RETRY_MAX_DELAY_SECONDS = 1.0
-A_SHARE_MIN_BROAD_POOL_COUNT = 80
+A_SHARE_RECALL_TARGET = 300
+HK_RECALL_TARGET = 200
+US_RECALL_TARGET = 300
+A_SHARE_BOARD_TARGETS = {
+    "sh_main": 90,
+    "sz_main": 75,
+    "chinext": 75,
+    "star": 60,
+}
+A_SHARE_ROUTE_TARGETS = {
+    "event": 40,
+    "momentum": 80,
+    "pullback": 65,
+    "liquidity": 85,
+    "history": 30,
+}
+A_SHARE_BOARD_ROUTE_TARGETS = {
+    "sh_main": {"event": 12, "momentum": 24, "pullback": 20, "liquidity": 25, "history": 9},
+    "sz_main": {"event": 10, "momentum": 20, "pullback": 16, "liquidity": 21, "history": 8},
+    "chinext": {"event": 10, "momentum": 20, "pullback": 16, "liquidity": 21, "history": 8},
+    "star": {"event": 8, "momentum": 16, "pullback": 13, "liquidity": 18, "history": 5},
+}
+A_SHARE_MIN_BROAD_POOL_COUNT = 240
 A_SHARE_MIN_QUOTE_COVERAGE = 0.80
+A_SHARE_DEEP_SCORE_LIMIT = 96
 
 V2_REGIME_WEIGHTS = {
     "trend_risk_on": {
@@ -707,9 +731,38 @@ def inferred_lens(item: dict, market_key: str) -> dict:
     return lens
 
 
-def normalize_universe_item(item: dict, market_key: str) -> dict:
+def load_market_recall_expansion() -> dict:
+    try:
+        payload = json.loads(MARKET_RECALL_EXPANSION_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"market recall expansion unavailable: {exc}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("markets"), dict):
+        raise ValueError("market recall expansion has an invalid schema")
+    return payload
+
+
+def canonical_market_symbol(symbol: str, market_key: str, expansion: dict | None = None) -> str:
+    normalized = str(symbol or "").strip().upper()
+    if market_key == "hk":
+        match = re.fullmatch(r"0*(\d{1,5})\.HK", normalized)
+        if not match:
+            return normalized
+        canonical = f"{int(match.group(1)):04d}.HK"
+        payload = expansion or load_market_recall_expansion()
+        aliases = ((payload.get("symbol_aliases") or {}).get("hk") or {})
+        alias = str(aliases.get(canonical) or canonical).upper()
+        alias_match = re.fullmatch(r"0*(\d{1,5})\.HK", alias)
+        return f"{int(alias_match.group(1)):04d}.HK" if alias_match else alias
+    if market_key == "us":
+        payload = expansion or load_market_recall_expansion()
+        aliases = ((payload.get("symbol_aliases") or {}).get("us") or {})
+        normalized = str(aliases.get(normalized) or normalized).upper()
+    return normalized
+
+
+def normalize_universe_item(item: dict, market_key: str, expansion: dict | None = None) -> dict:
     normalized = dict(item)
-    normalized["symbol"] = str(normalized.get("symbol") or "").upper()
+    normalized["symbol"] = canonical_market_symbol(normalized.get("symbol") or "", market_key, expansion)
     normalized.setdefault("name", normalized["symbol"])
     normalized.setdefault("role", "")
     normalized.setdefault("themes", [])
@@ -720,15 +773,21 @@ def normalize_universe_item(item: dict, market_key: str) -> dict:
 
 
 def market_universe(market_key: str) -> list[dict]:
+    expansion = load_market_recall_expansion()
     extras = {
         "hk": HK_BROAD_UNIVERSE + HK_AI_EXPANSION_UNIVERSE + rows_to_universe(HK_TECH_AI_EXTRA_ROWS),
         "us": US_BROAD_UNIVERSE + US_AI_EXPANSION_UNIVERSE + rows_to_universe(US_TECH_AI_EXTRA_ROWS),
     }.get(market_key, [])
+    expansion_rows = ((expansion.get("markets") or {}).get(market_key) or [])
+    excluded = {
+        canonical_market_symbol(symbol, market_key, expansion)
+        for symbol in (((expansion.get("excluded_symbols") or {}).get(market_key)) or [])
+    }
     merged: dict[str, dict] = {}
-    for item in SERENITY_UNIVERSES.get(market_key, []) + extras:
-        normalized = normalize_universe_item(item, market_key)
+    for item in SERENITY_UNIVERSES.get(market_key, []) + extras + expansion_rows:
+        normalized = normalize_universe_item(item, market_key, expansion)
         symbol = normalized.get("symbol")
-        if not symbol:
+        if not symbol or symbol in excluded:
             continue
         if symbol in merged:
             themes = list(dict.fromkeys((merged[symbol].get("themes") or []) + (normalized.get("themes") or [])))
@@ -736,7 +795,11 @@ def market_universe(market_key: str) -> list[dict]:
             merged[symbol]["themes"] = themes
         else:
             merged[symbol] = normalized
-    return list(merged.values())
+    rows = list(merged.values())
+    target = {"hk": HK_RECALL_TARGET, "us": US_RECALL_TARGET}.get(market_key)
+    if target is not None and len(rows) != target:
+        raise ValueError(f"{market_key} universe size {len(rows)} != target {target}")
+    return rows
 
 
 def now_cn() -> dt.datetime:
@@ -1521,11 +1584,29 @@ def parse_cn_quote_timestamp(value) -> str | None:
     return moment.isoformat(timespec="seconds")
 
 
+def a_share_board(code: str) -> str | None:
+    """Map a supported mainland A-share code to its trading board."""
+    normalized = str(code or "").strip()
+    if not re.fullmatch(r"\d{6}", normalized):
+        return None
+    if normalized.startswith(("600", "601", "603", "605")):
+        return "sh_main"
+    if normalized.startswith(("000", "001", "002", "003")):
+        return "sz_main"
+    if normalized.startswith(("300", "301")):
+        return "chinext"
+    if normalized.startswith(("688", "689")):
+        return "star"
+    return None
+
+
 def broad_recall_routes(row: dict) -> list[str]:
     """Classify an admitted broad-market row without using valuation as a gate."""
     routes = ["liquidity"]
     change_pct = safe_float(row.get("broad_change_pct", row.get("change_pct")))
     routes.append("momentum" if change_pct >= 0.8 else "pullback")
+    if safe_float(row.get("broad_turnover_pct", row.get("turnover_pct"))) >= 4.0:
+        routes.append("activity")
     return routes
 
 
@@ -1535,9 +1616,10 @@ def _route_priority(route: str) -> int:
         "momentum": 1,
         "liquidity": 2,
         "pullback": 3,
-        "history": 4,
-        "curated": 5,
-        "legacy": 6,
+        "activity": 4,
+        "history": 5,
+        "curated": 6,
+        "legacy": 7,
     }.get(route, 99)
 
 
@@ -2869,72 +2951,265 @@ def find_hot_pool(signal_day: dt.date) -> tuple[str, list[dict]]:
     return signal_day.isoformat(), []
 
 
-def load_broad_market_pool(limit: int = 300, relaxed: bool = False) -> list[dict]:
+A_SHARE_SINA_BOARD_NODES = {
+    "sh_main": "sh_a",
+    "sz_main": "sz_a",
+    "chinext": "cyb",
+    "star": "kcb",
+}
+
+A_SHARE_EASTMONEY_BOARD_FILTERS = {
+    "sh_main": "m:1+t:2",
+    "sz_main": "m:0+t:6",
+    "chinext": "m:0+t:80",
+    "star": "m:1+t:23",
+}
+
+A_SHARE_SINA_RECALL_QUERIES = {
+    "liquidity": ("amount", 0),
+    "momentum": ("changepercent", 0),
+    "activity": ("turnoverratio", 0),
+    "pullback": ("changepercent", 1),
+}
+
+
+def _broad_recall_reason(route: str, board: str) -> str:
+    board_labels = {
+        "sh_main": "沪市主板",
+        "sz_main": "深市主板",
+        "chinext": "创业板",
+        "star": "科创板",
+    }
+    route_labels = {
+        "liquidity": "高流动性",
+        "momentum": "相对动量",
+        "activity": "交易活跃度",
+        "pullback": "可控回调",
+    }
+    return f"{board_labels.get(board, board)}·{route_labels.get(route, route)}召回"
+
+
+def _admit_broad_a_share(
+    *,
+    code: str,
+    name: str,
+    price: float,
+    change_pct: float,
+    amount_yi: float,
+    turnover_pct: float,
+    route: str,
+    relaxed: bool,
+) -> bool:
+    board = a_share_board(code)
+    normalized_name = str(name or "").strip()
+    if (
+        not board
+        or "ST" in normalized_name.upper()
+        or "退" in normalized_name
+        or normalized_name.upper().startswith(("N", "C"))
+        or price <= 0
+    ):
+        return False
+    min_amount = 1.5 if relaxed else 3.0
+    max_change = 14.0 if board in {"chinext", "star"} else 8.8
+    if amount_yi < min_amount or change_pct < -4.5 or change_pct >= max_change:
+        return False
+    if turnover_pct < 0.5 or turnover_pct > 22:
+        return False
+    if route == "momentum" and change_pct < 0.8:
+        return False
+    if route == "pullback" and change_pct >= 0.8:
+        return False
+    if route == "activity" and turnover_pct < 3.0:
+        return False
+    return True
+
+
+def _sina_broad_slice(board: str, route: str, page: int, relaxed: bool) -> list[dict]:
+    sort_field, ascending = A_SHARE_SINA_RECALL_QUERIES[route]
+    response = requests_get_with_retry(
+        "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData",
+        params={
+            "num": "100",
+            "sort": sort_field,
+            "asc": str(ascending),
+            "node": A_SHARE_SINA_BOARD_NODES[board],
+            "page": str(page),
+        },
+        headers={"User-Agent": UA, "Referer": "https://finance.sina.com.cn/stock/"},
+        timeout=12,
+    )
+    payload = response.json()
+    if not isinstance(payload, list):
+        return []
+    observed_at = now_cn().isoformat(timespec="seconds")
     rows: list[dict] = []
-    page_size = 80
-    pages = max(1, min(5, math.ceil(limit / page_size)))
-    fields = "f2,f3,f6,f8,f12,f14,f20,f21,f23"
-    for page in range(1, pages + 1):
-        try:
-            data = http_get_json(
-                "https://push2.eastmoney.com/api/qt/clist/get",
-                {
-                    "pn": str(page),
-                    "pz": str(page_size),
-                    "po": "1",
-                    "np": "1",
-                    "fltt": "2",
-                    "invt": "2",
-                    "fid": "f6",
-                    "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
-                    "fields": fields,
-                },
-                timeout=12,
-            )
-        except Exception:
+    for item in payload:
+        code = str(item.get("code") or "")
+        if a_share_board(code) != board:
             continue
-        for item in (data.get("data") or {}).get("diff", []) or []:
-            code = str(item.get("f12") or "")
-            name = str(item.get("f14") or "")
-            if not code or "ST" in name.upper() or code.startswith(("8", "4", "9")):
-                continue
-            change_pct = safe_float(item.get("f3"))
-            amount_yi = safe_float(item.get("f6")) / 100000000
-            turnover_pct = safe_float(item.get("f8"))
-            price = safe_float(item.get("f2"))
-            pb = safe_float(item.get("f23"))
-            min_amount = 3 if relaxed else 5
-            if price <= 0 or amount_yi < min_amount:
-                continue
-            if change_pct < -4.5 or change_pct >= 8.8:
-                continue
-            if turnover_pct < 0.5 or turnover_pct > 22:
-                continue
-            recall_routes = broad_recall_routes({"broad_change_pct": change_pct})
-            rows.append(
-                {
-                    "code": code,
-                    "name": name,
-                    "reason": "全市场高流动性候选" + ("/动量" if "momentum" in recall_routes else "/回调"),
-                    "source": "eastmoney_broad",
-                    "recall_routes": recall_routes,
-                    "observed_at": now_cn().isoformat(timespec="seconds"),
-                    "recall_metrics": {
-                        "amount_yi": round(amount_yi, 2),
-                        "change_pct": change_pct,
-                        "turnover_pct": turnover_pct,
-                        "pb": pb,
-                    },
-                    "broad_amount_yi": round(amount_yi, 2),
-                    "broad_change_pct": change_pct,
-                    "broad_turnover_pct": turnover_pct,
-                    "pb": pb,
-                }
-            )
-            if len(rows) >= limit:
-                return rows
-        time.sleep(0.1)
+        name = str(item.get("name") or code)
+        price = safe_float(item.get("trade"))
+        change_pct = safe_float(item.get("changepercent"))
+        amount_yi = safe_float(item.get("amount")) / 100000000
+        turnover_pct = safe_float(item.get("turnoverratio"))
+        if not _admit_broad_a_share(
+            code=code,
+            name=name,
+            price=price,
+            change_pct=change_pct,
+            amount_yi=amount_yi,
+            turnover_pct=turnover_pct,
+            route=route,
+            relaxed=relaxed,
+        ):
+            continue
+        route_names = list(dict.fromkeys(["liquidity", route, *(broad_recall_routes({
+            "broad_change_pct": change_pct,
+            "broad_turnover_pct": turnover_pct,
+        }))]))
+        rows.append(
+            {
+                "code": code,
+                "name": name,
+                "reason": _broad_recall_reason(route, board),
+                "source": "sina_broad",
+                "recall_routes": route_names,
+                "observed_at": observed_at,
+                "a_share_board": board,
+                "recall_metrics": {
+                    "amount_yi": round(amount_yi, 2),
+                    "change_pct": change_pct,
+                    "turnover_pct": turnover_pct,
+                    "pb": nullable_float(item.get("pb")),
+                    "pe": nullable_float(item.get("per")),
+                },
+                "broad_amount_yi": round(amount_yi, 2),
+                "broad_change_pct": change_pct,
+                "broad_turnover_pct": turnover_pct,
+                "pb": nullable_float(item.get("pb")),
+                "pe": nullable_float(item.get("per")),
+            }
+        )
     return rows
+
+
+def load_sina_broad_market_pool(limit: int = A_SHARE_RECALL_TARGET, relaxed: bool = False) -> list[dict]:
+    jobs = [
+        (board, route, page)
+        for board in A_SHARE_SINA_BOARD_NODES
+        for route in A_SHARE_SINA_RECALL_QUERIES
+        for page in (1, 2)
+    ]
+    rows: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {
+            executor.submit(_sina_broad_slice, board, route, page, relaxed): (board, route, page)
+            for board, route, page in jobs
+        }
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                rows.extend(future.result())
+            except Exception:
+                continue
+    selected, _ = select_diversified_a_share_pool(rows, target=limit)
+    return selected
+
+
+def load_eastmoney_broad_market_pool(
+    limit: int = A_SHARE_RECALL_TARGET,
+    relaxed: bool = False,
+    boards: list[str] | None = None,
+) -> list[dict]:
+    rows: list[dict] = []
+    page_size = 100
+    pages = max(1, min(5, math.ceil(max(limit, 300) / page_size)))
+    fields = "f2,f3,f6,f8,f9,f10,f12,f14,f20,f21,f23"
+    requested_boards = [board for board in (boards or A_SHARE_EASTMONEY_BOARD_FILTERS) if board in A_SHARE_EASTMONEY_BOARD_FILTERS]
+    for requested_board in requested_boards:
+        for page in range(1, pages + 1):
+            try:
+                data = http_get_json(
+                    "https://push2.eastmoney.com/api/qt/clist/get",
+                    {
+                        "pn": str(page),
+                        "pz": str(page_size),
+                        "po": "1",
+                        "np": "1",
+                        "fltt": "2",
+                        "invt": "2",
+                        "fid": "f6",
+                        "fs": A_SHARE_EASTMONEY_BOARD_FILTERS[requested_board],
+                        "fields": fields,
+                    },
+                    timeout=12,
+                )
+            except Exception:
+                continue
+            for item in (data.get("data") or {}).get("diff", []) or []:
+                code = str(item.get("f12") or "")
+                if a_share_board(code) != requested_board:
+                    continue
+                name = str(item.get("f14") or "")
+                change_pct = safe_float(item.get("f3"))
+                amount_yi = safe_float(item.get("f6")) / 100000000
+                turnover_pct = safe_float(item.get("f8"))
+                price = safe_float(item.get("f2"))
+                if not _admit_broad_a_share(
+                    code=code,
+                    name=name,
+                    price=price,
+                    change_pct=change_pct,
+                    amount_yi=amount_yi,
+                    turnover_pct=turnover_pct,
+                    route="liquidity",
+                    relaxed=relaxed,
+                ):
+                    continue
+                board = a_share_board(code)
+                rows.append(
+                    {
+                        "code": code,
+                        "name": name,
+                        "reason": _broad_recall_reason("liquidity", str(board or "")),
+                        "source": "eastmoney_broad",
+                        "recall_routes": broad_recall_routes(
+                            {"broad_change_pct": change_pct, "broad_turnover_pct": turnover_pct}
+                        ),
+                        "observed_at": now_cn().isoformat(timespec="seconds"),
+                        "a_share_board": board,
+                        "recall_metrics": {
+                            "amount_yi": round(amount_yi, 2),
+                            "change_pct": change_pct,
+                            "turnover_pct": turnover_pct,
+                            "pb": nullable_float(item.get("f23")),
+                            "pe": nullable_float(item.get("f9")),
+                        },
+                        "broad_amount_yi": round(amount_yi, 2),
+                        "broad_change_pct": change_pct,
+                        "broad_turnover_pct": turnover_pct,
+                        "pb": nullable_float(item.get("f23")),
+                        "pe": nullable_float(item.get("f9")),
+                    }
+                )
+    selected, _ = select_diversified_a_share_pool(rows, target=limit)
+    return selected
+
+
+def load_broad_market_pool(limit: int = A_SHARE_RECALL_TARGET, relaxed: bool = False) -> list[dict]:
+    """Load a board-diversified A-share pool, using Sina with Eastmoney recovery."""
+    sina_rows = load_sina_broad_market_pool(limit=limit, relaxed=relaxed)
+    _, sina_coverage = select_diversified_a_share_pool(sina_rows, target=limit)
+    if len(sina_rows) >= limit and not sina_coverage.get("board_shortfalls"):
+        return sina_rows[:limit]
+    eastmoney_rows = load_eastmoney_broad_market_pool(
+        limit=limit,
+        relaxed=relaxed,
+        boards=list(sina_coverage.get("board_shortfalls") or A_SHARE_EASTMONEY_BOARD_FILTERS),
+    )
+    combined = merge_candidate_pools([], [*sina_rows, *eastmoney_rows])
+    selected, _ = select_diversified_a_share_pool(combined, target=limit)
+    return selected
 
 
 def merge_candidate_pools(event_rows: list[dict], broad_rows: list[dict]) -> list[dict]:
@@ -2960,6 +3235,200 @@ def merge_candidate_pools(event_rows: list[dict], broad_rows: list[dict]) -> lis
         }
         ensure_candidate_lineage(merged[code], "a_share")
     return list(merged.values())
+
+
+def _candidate_recall_priority(candidate: dict) -> tuple[float, float, float, str]:
+    lineage = ensure_candidate_lineage(candidate, "a_share")
+    routes = {str(item.get("route") or "") for item in lineage.get("recall_routes") or []}
+    route_weights = {
+        "event": 32.0,
+        "momentum": 16.0,
+        "liquidity": 14.0,
+        "activity": 10.0,
+        "pullback": 8.0,
+        "history": 5.0,
+    }
+    route_score = max((route_weights.get(route, 0.0) for route in routes), default=0.0)
+    route_score += min(6.0, max(0, len(routes) - 1) * 2.0)
+    amount_yi = max(
+        safe_float(candidate.get("broad_amount_yi")),
+        safe_float((candidate.get("recall_metrics") or {}).get("amount_yi")),
+    )
+    change_pct = safe_float(
+        candidate.get("broad_change_pct", (candidate.get("recall_metrics") or {}).get("change_pct"))
+    )
+    turnover_pct = safe_float(
+        candidate.get("broad_turnover_pct", (candidate.get("recall_metrics") or {}).get("turnover_pct"))
+    )
+    liquidity_score = min(22.0, math.log10(max(amount_yi, 0.1) + 1.0) * 10.0)
+    tradability_score = max(0.0, 7.0 - abs(change_pct - 1.8) * 0.7)
+    activity_score = min(6.0, max(0.0, turnover_pct) * 0.35)
+    score = route_score + liquidity_score + tradability_score + activity_score
+    candidate["recall_priority_score"] = round(score, 2)
+    candidate["a_share_board"] = a_share_board(str(candidate.get("code") or ""))
+    lineage["market_segment"] = candidate["a_share_board"]
+    return (score, amount_yi, -abs(change_pct - 1.8), str(candidate.get("code") or ""))
+
+
+def _a_share_route_coverage(candidates: list[dict]) -> dict[str, int]:
+    coverage: dict[str, int] = {}
+    for candidate in candidates:
+        lineage = ensure_candidate_lineage(candidate, "a_share")
+        route_names = {
+            str(item.get("route") or "legacy")
+            for item in lineage.get("recall_routes") or []
+        }
+        for route in route_names:
+            coverage[route] = coverage.get(route, 0) + 1
+    return dict(sorted(coverage.items()))
+
+
+def recall_source_counts(candidates: list[dict], market_key: str) -> dict[str, int]:
+    """Count distinct candidates touched by each recall source."""
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        lineage = ensure_candidate_lineage(candidate, market_key)
+        sources = {
+            str(route.get("source") or "").strip()
+            for route in lineage.get("recall_routes") or []
+            if str(route.get("source") or "").strip()
+        }
+        fallback = str(candidate.get("source") or "").strip()
+        if not sources and fallback:
+            sources.add(fallback)
+        for source in sources:
+            counts[source] = counts.get(source, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _selection_route_for_candidate(candidate: dict) -> str:
+    routes = {
+        str(item.get("route") or "")
+        for item in ensure_candidate_lineage(candidate, "a_share").get("recall_routes") or []
+    }
+    for route in ("event", "momentum", "pullback", "liquidity", "history"):
+        if route in routes:
+            return route
+    return "liquidity"
+
+
+def _candidate_matches_selection_route(candidate: dict, route: str) -> bool:
+    routes = {
+        str(item.get("route") or "")
+        for item in ensure_candidate_lineage(candidate, "a_share").get("recall_routes") or []
+    }
+    if route == "history":
+        live_routes = {"event", "momentum", "pullback", "liquidity", "activity"}
+        return "history" in routes and not bool(routes & live_routes)
+    return route in routes
+
+
+def select_diversified_a_share_pool(
+    rows: list[dict],
+    target: int = A_SHARE_RECALL_TARGET,
+    board_targets: dict[str, int] | None = None,
+    board_route_targets: dict[str, dict[str, int]] | None = None,
+) -> tuple[list[dict], dict]:
+    """Select a deterministic, board-diversified A-share recall pool."""
+    target = max(0, int(target))
+    configured_targets = dict(board_targets or A_SHARE_BOARD_TARGETS)
+    configured_route_matrix = {
+        board: dict(routes)
+        for board, routes in (board_route_targets or A_SHARE_BOARD_ROUTE_TARGETS).items()
+        if board in configured_targets
+    }
+    merged = merge_candidate_pools([], rows)
+    admitted = [row for row in merged if a_share_board(str(row.get("code") or ""))]
+    ranked = sorted(admitted, key=_candidate_recall_priority, reverse=True)
+    by_board = {
+        board: [row for row in ranked if row.get("a_share_board") == board]
+        for board in configured_targets
+    }
+    selected: list[dict] = []
+    selected_codes: set[str] = set()
+    backfill_count = 0
+    allocation_order = ("event", "momentum", "pullback", "liquidity", "history")
+    for board, board_quota in configured_targets.items():
+        board_selected = 0
+        route_targets = configured_route_matrix.get(board, {})
+        for route in allocation_order:
+            quota = max(0, int(route_targets.get(route, 0)))
+            matches = [
+                row
+                for row in by_board.get(board, [])
+                if str(row.get("code") or "") not in selected_codes
+                and _candidate_matches_selection_route(row, route)
+            ]
+            for row in matches[:quota]:
+                code = str(row.get("code") or "")
+                row["selection_route"] = route
+                selected.append(row)
+                selected_codes.add(code)
+                board_selected += 1
+        board_deficit = max(0, int(board_quota) - board_selected)
+        for row in by_board.get(board, []):
+            if board_deficit <= 0:
+                break
+            code = str(row.get("code") or "")
+            if code and code not in selected_codes:
+                row["selection_route"] = _selection_route_for_candidate(row)
+                selected.append(row)
+                selected_codes.add(code)
+                board_deficit -= 1
+                backfill_count += 1
+    if len(selected) < target:
+        for row in ranked:
+            code = str(row.get("code") or "")
+            if not code or code in selected_codes:
+                continue
+            row["selection_route"] = _selection_route_for_candidate(row)
+            selected.append(row)
+            selected_codes.add(code)
+            backfill_count += 1
+            if len(selected) >= target:
+                break
+    selected = selected[:target]
+    board_coverage = {
+        board: sum(1 for row in selected if row.get("a_share_board") == board)
+        for board in configured_targets
+    }
+    board_shortfalls = {
+        board: max(0, int(configured_targets[board]) - board_coverage.get(board, 0))
+        for board in configured_targets
+        if board_coverage.get(board, 0) < int(configured_targets[board])
+    }
+    selection_route_counts: dict[str, int] = {}
+    for row in selected:
+        route = str(row.get("selection_route") or _selection_route_for_candidate(row))
+        selection_route_counts[route] = selection_route_counts.get(route, 0) + 1
+    route_targets = {
+        route: sum(int(routes.get(route, 0)) for routes in configured_route_matrix.values())
+        for route in A_SHARE_ROUTE_TARGETS
+    }
+    complete_route_counts = {
+        route: selection_route_counts.get(route, 0)
+        for route in A_SHARE_ROUTE_TARGETS
+    }
+    route_shortfalls = {
+        route: max(0, expected - selection_route_counts.get(route, 0))
+        for route, expected in route_targets.items()
+        if selection_route_counts.get(route, 0) < expected
+    }
+    coverage = {
+        "target_count": target,
+        "selected_count": len(selected),
+        "shortfall_count": max(0, target - len(selected)),
+        "board_targets": configured_targets,
+        "board_coverage": board_coverage,
+        "board_shortfalls": board_shortfalls,
+        "route_targets": route_targets,
+        "route_counts": complete_route_counts,
+        "route_shortfalls": route_shortfalls,
+        "route_hit_counts": _a_share_route_coverage(selected),
+        "route_coverage": _a_share_route_coverage(selected),
+        "backfill_count": backfill_count,
+    }
+    return selected, coverage
 
 
 def cached_a_share_pool(
@@ -3397,6 +3866,25 @@ def stock_kline(code: str, limit: int = 70) -> list[dict]:
     return tencent_stock_kline(code, limit)
 
 
+def a_share_kline_map(codes: list[str], limit: int = 70) -> dict[str, list[dict]]:
+    result: dict[str, list[dict]] = {}
+    unique = list(dict.fromkeys(str(code or "") for code in codes if code))
+    if not unique:
+        return result
+    workers = min(12, max(1, len(unique)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(stock_kline, code, limit): code for code in unique}
+        for future in concurrent.futures.as_completed(futures):
+            code = futures[future]
+            try:
+                rows = future.result()
+            except Exception:
+                rows = []
+            if rows:
+                result[code] = rows
+    return result
+
+
 def cached_market_kline(market_key: str, symbol: str) -> list[dict]:
     symbol = str(symbol or "").upper()
     if not symbol:
@@ -3476,7 +3964,7 @@ def yahoo_kline_map(symbols: list[str], limit: int = 90) -> dict[str, list[dict]
     unique = list(dict.fromkeys(symbols))
     if not unique:
         return result
-    workers = min(12, max(1, len(unique)))
+    workers = min(16, max(1, len(unique)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(yahoo_chart_kline, symbol, limit): symbol for symbol in unique}
         for future in concurrent.futures.as_completed(futures):
@@ -3487,6 +3975,23 @@ def yahoo_kline_map(symbols: list[str], limit: int = 90) -> dict[str, list[dict]
                 rows = []
             if rows:
                 result[symbol] = rows
+    # Yahoo occasionally drops a small random subset under concurrency. Retry
+    # only those symbols at low concurrency so a transient miss does not turn
+    # a valid 200/300 universe into a permanently degraded snapshot.
+    for _ in range(2):
+        missing = [symbol for symbol in unique if symbol not in result]
+        if not missing:
+            break
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(missing))) as executor:
+            futures = {executor.submit(yahoo_chart_kline, symbol, limit): symbol for symbol in missing}
+            for future in concurrent.futures.as_completed(futures):
+                symbol = futures[future]
+                try:
+                    rows = future.result()
+                except Exception:
+                    rows = []
+                if rows:
+                    result[symbol] = rows
     return result
 
 
@@ -3522,14 +4027,20 @@ def yahoo_realtime_quote(symbol: str, timeout: int = 6) -> dict:
             last_volume = safe_float(volumes[idx]) if idx < len(volumes) else 0.0
             break
     regular_price = safe_float(meta.get("regularMarketPrice"))
+    regular_ts = int(safe_float(meta.get("regularMarketTime")))
+    if regular_price > 0 and regular_ts > last_ts:
+        last_price = regular_price
+        last_ts = regular_ts
+        last_volume = safe_float(meta.get("regularMarketVolume"))
     price = last_price or regular_price
     previous_close = safe_float(meta.get("chartPreviousClose") or meta.get("previousClose"))
     change_pct = pct_change(price, previous_close) if price and previous_close else 0.0
     session = yahoo_session_from_meta(meta)
     fetched_at = now_cn().isoformat(timespec="seconds")
+    source_timestamp = last_ts or int(safe_float(meta.get("regularMarketTime")))
     source_as_of = (
-        dt.datetime.fromtimestamp(last_ts, CN_TZ).isoformat(timespec="seconds")
-        if last_ts
+        dt.datetime.fromtimestamp(source_timestamp, CN_TZ).isoformat(timespec="seconds")
+        if source_timestamp
         else None
     )
     if not price:
@@ -3554,9 +4065,10 @@ def yahoo_realtime_quotes(symbols: list[str]) -> dict[str, dict]:
     result: dict[str, dict] = {}
     if not symbols:
         return result
-    workers = min(8, max(1, len(symbols)))
+    unique = list(dict.fromkeys(symbols))
+    workers = min(16, max(1, len(unique)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(yahoo_realtime_quote, symbol, 6): symbol for symbol in symbols}
+        futures = {executor.submit(yahoo_realtime_quote, symbol, 6): symbol for symbol in unique}
         for future in concurrent.futures.as_completed(futures):
             symbol = futures[future]
             try:
@@ -3565,6 +4077,20 @@ def yahoo_realtime_quotes(symbols: list[str]) -> dict[str, dict]:
                 quote = {}
             if quote:
                 result[symbol] = quote
+    for _ in range(2):
+        missing = [symbol for symbol in unique if symbol not in result]
+        if not missing:
+            break
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(missing))) as executor:
+            futures = {executor.submit(yahoo_realtime_quote, symbol, 6): symbol for symbol in missing}
+            for future in concurrent.futures.as_completed(futures):
+                symbol = futures[future]
+                try:
+                    quote = future.result()
+                except Exception:
+                    quote = {}
+                if quote:
+                    result[symbol] = quote
     return result
 
 
@@ -3907,7 +4433,7 @@ def chan_signal(kline: list[dict]) -> dict:
     if pct_5d > 18:
         score -= min(24, (pct_5d - 18) * 1.2)
         warnings.append(f"5 日累计涨幅 {pct_5d:.1f}%，短线兑现压力偏大")
-    if last_change >= 9.5:
+    if last_change >= 18.5:
         score -= 14
         warnings.append("信号日接近涨停，次日追高性价比下降")
     if upper_shadow_pct > 3.5 and close_position < 0.68:
@@ -3945,6 +4471,12 @@ def theme_score(reason: str) -> tuple[float, list[str]]:
     return min(22.0, len(hits) * 4.5), hits
 
 
+def quote_near_limit_up(quote: dict) -> bool:
+    price = safe_float(quote.get("price", quote.get("entry_price")))
+    limit_up = safe_float(quote.get("limit_up"))
+    return price > 0 and limit_up > 0 and price >= limit_up * 0.995
+
+
 def preliminary_score(hot: dict, quote: dict, dragon: dict | None) -> dict:
     reason = hot.get("reason") or ""
     t_score, tags = theme_score(reason)
@@ -3979,16 +4511,17 @@ def preliminary_score(hot: dict, quote: dict, dragon: dict | None) -> dict:
             score -= 8
 
     risk_flags = []
-    if quote["limit_up"] and abs(quote["price"] - quote["limit_up"]) < 0.02:
+    if quote_near_limit_up(quote):
         risk_flags.append("信号日涨停，次日追高风险")
         score -= 12
         if abs(quote["open"] - quote["limit_up"]) < 0.02 and abs(quote["low"] - quote["limit_up"]) < 0.02:
             risk_flags.append("一字涨停，次日可买性差")
             score -= 22
+    board = a_share_board(str(hot.get("code") or quote.get("code") or ""))
     if change_pct >= 18.5:
         risk_flags.append("20cm 大涨后，两周持有回撤风险高")
         score -= 12
-    elif change_pct >= 9.5:
+    elif board in {"sh_main", "sz_main"} and change_pct >= 9.5:
         risk_flags.append("10cm 涨停后，隔日接力不确定")
         score -= 8
     if turnover > 24:
@@ -4228,6 +4761,16 @@ def quote_from_kline(kline: list[dict]) -> dict:
     }
 
 
+def daily_bar_source_as_of(market_key: str, date_text: str | None) -> str | None:
+    """Return an explicit exchange-local close timestamp for a daily bar."""
+    try:
+        day = dt.date.fromisoformat(str(date_text or ""))
+    except ValueError:
+        return None
+    timezone = ZoneInfo("America/New_York") if market_key == "us" else ZoneInfo("Asia/Hong_Kong")
+    return dt.datetime.combine(day, dt.time(16, 0), tzinfo=timezone).isoformat(timespec="seconds")
+
+
 def compact_kline(kline: list[dict], limit: int = 32) -> list[dict]:
     rows = []
     for row in kline[-limit:]:
@@ -4308,8 +4851,19 @@ def live_stock_payload(market_key: str, code: str) -> dict:
 
 def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
     policy = SERENITY_MARKET_POLICY.get(market_key, SERENITY_MARKET_POLICY["hk"])
-    realtime_map = yahoo_realtime_quotes([item["symbol"] for item in candidates]) if market_key in ("hk", "us") else {}
-    kline_map = yahoo_kline_map([item["symbol"] for item in candidates]) if market_key in ("hk", "us") else {}
+    symbols = [item["symbol"] for item in candidates]
+    if market_key in ("hk", "us"):
+        # The two datasets are independent. Fetching them concurrently cuts a
+        # 500-name scheduled run roughly in half without increasing either
+        # endpoint's own bounded worker pool.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            realtime_future = executor.submit(yahoo_realtime_quotes, symbols)
+            kline_future = executor.submit(yahoo_kline_map, symbols)
+            realtime_map = realtime_future.result()
+            kline_map = kline_future.result()
+    else:
+        realtime_map = {}
+        kline_map = {}
     final = []
     for candidate in candidates:
         symbol = candidate["symbol"]
@@ -4325,6 +4879,8 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         realtime = (realtime_map.get(symbol) or {}) if market_key in ("hk", "us") else {}
         entry_price = safe_float(realtime.get("price")) or quote["price"]
         current_change_pct = safe_float(realtime.get("change_pct")) if realtime else quote["change_pct"]
+        fallback_source_as_of = daily_bar_source_as_of(market_key, kline[-1].get("date"))
+        fallback_fetched_at = now_cn().isoformat(timespec="seconds")
         live_quote = {
             **quote,
             "price": entry_price,
@@ -4339,9 +4895,9 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                 "session": market_session(market_key)["session"],
                 "session_label": market_session(market_key)["label"],
                 "source": "Daily kline fallback",
-                "source_as_of": None,
-                "fetched_at": now_cn().isoformat(timespec="seconds"),
-                "updated_at": now_cn().isoformat(timespec="seconds"),
+                "source_as_of": fallback_source_as_of,
+                "fetched_at": fallback_fetched_at,
+                "updated_at": fallback_source_as_of or fallback_fetched_at,
                 "volume_unit": "share",
             },
         }
@@ -4446,7 +5002,6 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                 },
             }
         )
-        time.sleep(0.08)
     final.sort(key=lambda item: (item.get("hard_risk_count", 0), -item["confidence"], -item["score"]))
     requested_count = len(candidates)
     quote_count = len(final)
@@ -4502,7 +5057,11 @@ def _remaining_in_legacy_order(candidates: list[dict], primary: dict) -> list[di
     return [candidate for candidate in candidates if candidate is not primary]
 
 
-def make_serenity_decision(candidates: list[dict], market_key: str) -> dict:
+def make_serenity_decision(
+    candidates: list[dict],
+    market_key: str,
+    quote_health: dict | None = None,
+) -> dict:
     legacy_order = list(candidates)
     if not legacy_order:
         return {
@@ -4514,6 +5073,31 @@ def make_serenity_decision(candidates: list[dict], market_key: str) -> dict:
             "data_state": "DEGRADED",
             "blocker_codes": ["NO_CANDIDATES"],
         }
+    if quote_health is not None:
+        quote_status = str(quote_health.get("status") or "").lower()
+        quote_coverage = safe_float(quote_health.get("quote_coverage"))
+        realtime_coverage = safe_float(
+            quote_health.get("realtime_coverage", quote_coverage)
+        )
+        if (
+            quote_status != "available"
+            or quote_coverage < 0.98
+            or realtime_coverage < 0.98
+        ):
+            return {
+                "action": "NO_TRADE",
+                "title": "行情覆盖不足，暂停推荐",
+                "message": (
+                    f"{market_key.upper()} 候选池有效行情覆盖 "
+                    f"{quote_coverage * 100:.1f}%、分钟行情覆盖 "
+                    f"{realtime_coverage * 100:.1f}%，未同时达到 98% 安全门槛。"
+                ),
+                "primary": None,
+                "blocked_candidate": legacy_order[0],
+                "watchlist": legacy_order[:8],
+                "data_state": "DEGRADED",
+                "blocker_codes": ["QUOTE_COVERAGE_INSUFFICIENT"],
+            }
     executable = [candidate for candidate in legacy_order if candidate_is_executable(candidate)]
     if not executable:
         return {
@@ -4614,11 +5198,13 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
     preliminary.sort(key=lambda item: item["pre_score"], reverse=True)
     dual_low_batch = run_dual_low_analysis([item["quote"] for item in preliminary])
     final = []
-    max_kline_checks = int(os.environ.get("CHAN_MAX_KLINE_CHECKS", "36"))
-    for item in preliminary[:max_kline_checks]:
+    max_kline_checks = int(os.environ.get("CHAN_MAX_KLINE_CHECKS", str(A_SHARE_DEEP_SCORE_LIMIT)))
+    deep_items = preliminary[:max_kline_checks]
+    kline_map = a_share_kline_map([item["quote"]["code"] for item in deep_items])
+    for item in deep_items:
         quote = item["quote"]
         code = quote["code"]
-        kline = stock_kline(code)
+        kline = kline_map.get(code) or []
         chan = chan_signal(kline)
         czsc = czsc_structure_score(kline)
         metrics = chan.get("metrics") or {}
@@ -4655,7 +5241,7 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
             hard_risks += 1
         if metrics.get("distance_ma10_pct", 0) > 10:
             hard_risks += 1
-        if quote["change_pct"] >= 9.5:
+        if quote_near_limit_up(quote):
             hard_risks += 1
         if quote["turnover_pct"] > 24:
             hard_risks += 1
@@ -4697,6 +5283,8 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
                 "turnover_pct": quote["turnover_pct"],
                 "vol_ratio": quote["vol_ratio"],
                 "float_mcap_yi": quote["float_mcap_yi"],
+                "limit_up": quote["limit_up"],
+                "limit_down": quote["limit_down"],
                 "fundamentals": quote.get("fundamentals") or {},
                 "analysis_projects": {
                     "dual_low": dual_low_batch["by_code"].get(
@@ -4765,6 +5353,7 @@ def a_share_pool_health(
     cached_count: int = 0,
     quote_count: int = 0,
     merged_count: int | None = None,
+    recall_coverage: dict | None = None,
     min_broad_pool_count: int = A_SHARE_MIN_BROAD_POOL_COUNT,
     min_quote_coverage: float = A_SHARE_MIN_QUOTE_COVERAGE,
 ) -> dict:
@@ -4779,8 +5368,21 @@ def a_share_pool_health(
         else 0.0
     )
     reason_codes: list[str] = []
+    recall_coverage = dict(recall_coverage or {})
+    target_value = recall_coverage.get("target_count")
+    selected_value = recall_coverage.get("selected_count")
+    target_count = int(A_SHARE_RECALL_TARGET if target_value is None else target_value)
+    selected_count = int(merged_pool_count if selected_value is None else selected_value)
+    board_shortfalls = dict(recall_coverage.get("board_shortfalls") or {})
     if broad_pool_count < min_broad_pool_count:
         reason_codes.append("BROAD_POOL_BELOW_MINIMUM")
+    if selected_count < target_count:
+        reason_codes.append("POOL_TARGET_NOT_MET")
+    if board_shortfalls:
+        reason_codes.append("BOARD_QUOTA_PARTIAL")
+        board_coverage = recall_coverage.get("board_coverage") or {}
+        if any(int(board_coverage.get(board) or 0) == 0 for board in A_SHARE_BOARD_TARGETS):
+            reason_codes.append("CORE_BOARD_MISSING")
     if merged_pool_count == 0:
         reason_codes.append("MERGED_POOL_EMPTY")
     elif quote_coverage < min_quote_coverage:
@@ -4794,6 +5396,17 @@ def a_share_pool_health(
         "quote_coverage": quote_coverage,
         "min_broad_pool_count": min_broad_pool_count,
         "min_quote_coverage": min_quote_coverage,
+        "target_count": target_count,
+        "selected_count": selected_count,
+        "recall_coverage": round(selected_count / target_count, 4) if target_count else 0.0,
+        "board_targets": recall_coverage.get("board_targets") or dict(A_SHARE_BOARD_TARGETS),
+        "board_coverage": recall_coverage.get("board_coverage") or {},
+        "board_shortfalls": board_shortfalls,
+        "route_targets": recall_coverage.get("route_targets") or dict(A_SHARE_ROUTE_TARGETS),
+        "route_counts": recall_coverage.get("route_counts") or {},
+        "route_shortfalls": recall_coverage.get("route_shortfalls") or {},
+        "route_hit_counts": recall_coverage.get("route_hit_counts") or {},
+        "backfill_count": int(recall_coverage.get("backfill_count") or 0),
     }
 
 
@@ -4851,7 +5464,7 @@ def make_decision(candidates: list[dict], market: dict, pool_health: dict | None
     if primary["amount_yi"] < 2.5:
         blockers.append("成交额不足，承接不够")
         blocker_codes.append("LIQUIDITY_INSUFFICIENT")
-    if primary["change_pct"] >= 9.5:
+    if quote_near_limit_up(primary):
         blockers.append("信号日已接近涨停，次日追高性价比不足")
         blocker_codes.append("PRICE_NEAR_LIMIT_UP")
     if primary["estimated_2w_range"]["low_pct"] <= -5.5:
@@ -4895,13 +5508,28 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
                 return cached
 
     hot_date, event_rows = find_hot_pool(signal_day)
-    broad_rows = load_broad_market_pool()
+    broad_rows = load_broad_market_pool(limit=A_SHARE_RECALL_TARGET)
     broad_mode = "multi_route"
-    if not broad_rows:
-        broad_rows = load_broad_market_pool(relaxed=True)
+    if len(broad_rows) < A_SHARE_RECALL_TARGET:
+        relaxed_rows = load_broad_market_pool(limit=A_SHARE_RECALL_TARGET, relaxed=True)
+        broad_rows, _ = select_diversified_a_share_pool(
+            merge_candidate_pools([], [*broad_rows, *relaxed_rows]),
+            target=A_SHARE_RECALL_TARGET,
+        )
         broad_mode = "multi_route_relaxed"
-    cached_rows = cached_a_share_pool(as_of=signal_day)
-    hot_rows = merge_candidate_pools(event_rows, broad_rows + cached_rows)
+    # History is a recovery route, not a quota that displaces a healthy live
+    # market row. It participates only when both live broad-source attempts
+    # still leave the 300-name pool incomplete.
+    cached_rows = (
+        cached_a_share_pool(as_of=signal_day)
+        if len(broad_rows) < A_SHARE_RECALL_TARGET
+        else []
+    )
+    discovered_rows = merge_candidate_pools(event_rows, broad_rows + cached_rows)
+    hot_rows, recall_coverage = select_diversified_a_share_pool(
+        discovered_rows,
+        target=A_SHARE_RECALL_TARGET,
+    )
     market = index_quotes()
     industries = industry_heat()
     scored = score_candidates(hot_date, hot_rows, market)
@@ -4913,6 +5541,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         cached_count=len(cached_rows),
         quote_count=int(quote_health.get("quote_count") or 0),
         merged_count=len(hot_rows),
+        recall_coverage=recall_coverage,
     )
     decision = make_decision(scored["candidates"], market, pool_health=pool_health)
     hk_universe = market_universe("hk")
@@ -4923,13 +5552,6 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
     us_market_context = market_context_from_benchmark("us")
     enrich_market_candidates(hk_scored["candidates"], "hk", hk_market_context)
     enrich_market_candidates(us_scored["candidates"], "us", us_market_context)
-    hk_decision = make_serenity_decision(hk_scored["candidates"], "hk")
-    us_decision = make_serenity_decision(us_scored["candidates"], "us")
-    trade_windows = market_trade_windows(generated_at, horizon_sessions=FORECAST_TRADE_DAYS)
-    forecast_end = max(
-        dt.date.fromisoformat(window["forecast_end_trade_date"])
-        for window in trade_windows.values()
-    )
     empty_yahoo_health = {
         "status": "unavailable",
         "source": "Yahoo Finance 1m includePrePost + daily chart",
@@ -4942,6 +5564,17 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
     }
     hk_quote_health = hk_scored.get("quote_health") or dict(empty_yahoo_health)
     us_quote_health = us_scored.get("quote_health") or dict(empty_yahoo_health)
+    hk_decision = make_serenity_decision(
+        hk_scored["candidates"], "hk", quote_health=hk_quote_health
+    )
+    us_decision = make_serenity_decision(
+        us_scored["candidates"], "us", quote_health=us_quote_health
+    )
+    trade_windows = market_trade_windows(generated_at, horizon_sessions=FORECAST_TRADE_DAYS)
+    forecast_end = max(
+        dt.date.fromisoformat(window["forecast_end_trade_date"])
+        for window in trade_windows.values()
+    )
     market_sections = {
         "a_share": {
             "key": "a_share",
@@ -4954,10 +5587,27 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "stats": {
                 "raw_pool_size": scored["raw_pool_size"],
                 "universe_size": scored["raw_pool_size"],
+                "recall_target": A_SHARE_RECALL_TARGET,
+                "recall_selected_size": len(hot_rows),
+                "recall_shortfall": recall_coverage["shortfall_count"],
+                "raw_discovery_size": len(event_rows) + len(broad_rows) + len(cached_rows),
+                "deduped_discovery_size": len(discovered_rows),
+                "board_targets": recall_coverage["board_targets"],
+                "board_counts": recall_coverage["board_coverage"],
+                "board_shortfalls": recall_coverage["board_shortfalls"],
+                "route_targets": recall_coverage["route_targets"],
+                "route_counts": recall_coverage["route_counts"],
+                "route_hit_counts": recall_coverage["route_hit_counts"],
+                "route_shortfalls": recall_coverage["route_shortfalls"],
+                "source_counts": recall_source_counts(hot_rows, "a_share"),
+                "recall_backfill_count": recall_coverage["backfill_count"],
+                "deep_score_limit": int(os.environ.get("CHAN_MAX_KLINE_CHECKS", str(A_SHARE_DEEP_SCORE_LIMIT))),
                 "event_pool_size": len(event_rows),
                 "broad_pool_size": len(broad_rows),
                 "cached_pool_size": len(cached_rows),
                 "broad_pool_mode": broad_mode,
+                "valid_quote_size": int(quote_health.get("quote_count") or 0),
+                "deep_scored_size": scored["scored_size"],
                 "scored_size": scored["scored_size"],
                 "dragon_count": scored["dragon_count"],
             },
@@ -4973,8 +5623,14 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "stats": {
                 "raw_pool_size": hk_scored["raw_pool_size"],
                 "universe_size": len(hk_universe),
+                "recall_target": HK_RECALL_TARGET,
+                "recall_selected_size": len(hk_universe),
+                "recall_shortfall": max(0, HK_RECALL_TARGET - len(hk_universe)),
+                "source_counts": recall_source_counts(hk_universe, "hk"),
                 "event_pool_size": 0,
                 "broad_pool_size": 0,
+                "valid_quote_size": int(hk_quote_health.get("quote_count") or 0),
+                "deep_scored_size": hk_scored["scored_size"],
                 "scored_size": hk_scored["scored_size"],
                 "dragon_count": 0,
             },
@@ -4990,8 +5646,14 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "stats": {
                 "raw_pool_size": us_scored["raw_pool_size"],
                 "universe_size": len(us_universe),
+                "recall_target": US_RECALL_TARGET,
+                "recall_selected_size": len(us_universe),
+                "recall_shortfall": max(0, US_RECALL_TARGET - len(us_universe)),
+                "source_counts": recall_source_counts(us_universe, "us"),
                 "event_pool_size": 0,
                 "broad_pool_size": 0,
+                "valid_quote_size": int(us_quote_health.get("quote_count") or 0),
+                "deep_scored_size": us_scored["scored_size"],
                 "scored_size": us_scored["scored_size"],
                 "dragon_count": 0,
             },

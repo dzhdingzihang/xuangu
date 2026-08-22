@@ -20,6 +20,10 @@ VALID_CANDIDATE_STATUSES = {"ranked", "rejected", "unavailable", "not_applicable
 VALID_EXECUTABLE_SCORE_KINDS = {"TEN_DAY_EXPECTED_NET_UTILITY"}
 STATE_SEVERITY = {"READY": 0, "DEGRADED": 1, "BLOCKED": 2}
 VALID_VOLUME_UNITS = {"lot", "share"}
+MARKET_RECALL_TARGETS = {"a_share": 300, "hk": 200, "us": 300}
+A_SHARE_BOARD_TARGETS = {"sh_main": 90, "sz_main": 75, "chinext": 75, "star": 60}
+A_SHARE_ROUTE_TARGETS = {"event": 40, "momentum": 80, "pullback": 65, "liquidity": 85, "history": 30}
+EXPANDED_RECALL_UNIVERSE_VERSION = "recall-v2-2-diversified-300-200-300"
 
 
 def finite_number(value) -> bool:
@@ -283,6 +287,127 @@ def validate_snapshot(snapshot: dict) -> list[str]:
             continue
         section = markets[market_key] or {}
         derived_market_states[market_key] = derive_market_coverage_state(section)
+        stats = section.get("stats") if isinstance(section.get("stats"), dict) else {}
+        expanded_recall_contract = snapshot.get("universe_version") == EXPANDED_RECALL_UNIVERSE_VERSION
+        recall_contract_present = "recall_target" in stats or "recall_selected_size" in stats
+        if expanded_recall_contract:
+            required_recall_fields = {
+                "recall_target",
+                "recall_selected_size",
+                "recall_shortfall",
+                "raw_pool_size",
+                "universe_size",
+                "valid_quote_size",
+                "deep_scored_size",
+                "scored_size",
+                "source_counts",
+            }
+            missing_fields = sorted(required_recall_fields - set(stats))
+            if missing_fields:
+                errors.append(
+                    f"markets.{market_key}.stats recall funnel fields missing: "
+                    + ",".join(missing_fields)
+                )
+        if expanded_recall_contract or recall_contract_present:
+            expected_target = MARKET_RECALL_TARGETS[market_key]
+            recall_target = stats.get("recall_target")
+            selected_size = stats.get("recall_selected_size")
+            shortfall = stats.get("recall_shortfall")
+            valid_quote_size = stats.get("valid_quote_size")
+            deep_scored_size = stats.get("deep_scored_size")
+            if recall_target != expected_target:
+                errors.append(f"markets.{market_key}.stats.recall_target must be {expected_target}")
+            if not isinstance(selected_size, int) or isinstance(selected_size, bool) or not 0 <= selected_size <= expected_target:
+                errors.append(f"markets.{market_key}.stats.recall_selected_size is invalid")
+            elif shortfall != expected_target - selected_size:
+                errors.append(f"markets.{market_key}.stats.recall_shortfall is inconsistent")
+            if (
+                not isinstance(valid_quote_size, int)
+                or isinstance(valid_quote_size, bool)
+                or valid_quote_size < 0
+                or (isinstance(selected_size, int) and valid_quote_size > selected_size)
+            ):
+                errors.append(f"markets.{market_key}.stats.valid_quote_size is invalid")
+            if (
+                not isinstance(deep_scored_size, int)
+                or isinstance(deep_scored_size, bool)
+                or deep_scored_size < 0
+                or (isinstance(valid_quote_size, int) and deep_scored_size > valid_quote_size)
+            ):
+                errors.append(f"markets.{market_key}.stats.deep_scored_size is invalid")
+            raw_pool_size = stats.get("raw_pool_size")
+            universe_size = stats.get("universe_size")
+            scored_size = stats.get("scored_size")
+            if isinstance(selected_size, int) and raw_pool_size != selected_size:
+                errors.append(f"markets.{market_key}.stats.raw_pool_size must equal selected size")
+            if isinstance(selected_size, int) and universe_size != selected_size:
+                errors.append(f"markets.{market_key}.stats.universe_size must equal selected size")
+            if isinstance(deep_scored_size, int) and scored_size != deep_scored_size:
+                errors.append(f"markets.{market_key}.stats.scored_size must equal deep scored size")
+            quote_health = section.get("quote_health") if isinstance(section.get("quote_health"), dict) else {}
+            if quote_health and quote_health.get("quote_count") != valid_quote_size:
+                errors.append(f"markets.{market_key}.stats.valid_quote_size must match quote health")
+            source_counts = stats.get("source_counts")
+            if (
+                not isinstance(source_counts, dict)
+                or not source_counts
+                or not all(
+                    isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                    for value in source_counts.values()
+                )
+            ):
+                errors.append(f"markets.{market_key}.stats.source_counts is invalid")
+            if market_key == "a_share":
+                board_targets = stats.get("board_targets")
+                board_counts = stats.get("board_counts")
+                board_shortfalls = stats.get("board_shortfalls")
+                if board_targets != A_SHARE_BOARD_TARGETS:
+                    errors.append("markets.a_share.stats.board_targets is invalid")
+                board_counts_valid = (
+                    isinstance(board_counts, dict)
+                    and set(board_counts) == set(A_SHARE_BOARD_TARGETS)
+                    and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in board_counts.values())
+                )
+                if not board_counts_valid:
+                    errors.append("markets.a_share.stats.board_counts is invalid")
+                elif isinstance(selected_size, int) and sum(board_counts.values()) != selected_size:
+                    errors.append("markets.a_share.stats.board_counts must add up to selected size")
+                if board_counts_valid:
+                    expected_shortfalls = {
+                        board: target - board_counts[board]
+                        for board, target in A_SHARE_BOARD_TARGETS.items()
+                        if board_counts[board] < target
+                    }
+                    if board_shortfalls != expected_shortfalls:
+                        errors.append("markets.a_share.stats.board_shortfalls is inconsistent")
+                route_targets = stats.get("route_targets")
+                route_counts = stats.get("route_counts")
+                route_shortfalls = stats.get("route_shortfalls")
+                if route_targets != A_SHARE_ROUTE_TARGETS:
+                    errors.append("markets.a_share.stats.route_targets is invalid")
+                route_counts_valid = (
+                    isinstance(route_counts, dict)
+                    and set(route_counts) == set(A_SHARE_ROUTE_TARGETS)
+                    and all(
+                        route in A_SHARE_ROUTE_TARGETS
+                        and isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value >= 0
+                        for route, value in route_counts.items()
+                    )
+                )
+                if not route_counts_valid:
+                    errors.append("markets.a_share.stats.route_counts is invalid")
+                elif isinstance(selected_size, int) and sum(route_counts.values()) != selected_size:
+                    errors.append("markets.a_share.stats.route_counts must add up to selected size")
+                if route_counts_valid:
+                    expected_route_shortfalls = {
+                        route: target - route_counts.get(route, 0)
+                        for route, target in A_SHARE_ROUTE_TARGETS.items()
+                        if route_counts.get(route, 0) < target
+                    }
+                    if route_shortfalls != expected_route_shortfalls:
+                        errors.append("markets.a_share.stats.route_shortfalls is inconsistent")
         trade_window = section.get("trade_window") or {}
         if trade_window.get("calendar_id") != calendar_id(market_key):
             errors.append(f"markets.{market_key}.trade_window.calendar_id is invalid")

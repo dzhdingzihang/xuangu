@@ -24,22 +24,37 @@ def load_module():
 
 
 def healthy_snapshot(generated_at: str = "2026-08-21T08:25:00+08:00") -> dict:
-    return {
+    targets = {"a_share": 300, "hk": 200, "us": 300}
+    snapshot = {
         "generated_at": generated_at,
         "markets": {
             market: {
                 "quote_health": {
                     "status": "available",
-                    "requested_count": 1,
-                    "quote_count": 1,
+                    "requested_count": targets[market],
+                    "quote_count": targets[market],
+                    "realtime_count": targets[market],
                     "quote_coverage": 1.0,
+                    "realtime_coverage": 1.0,
                     "reason_codes": [],
                 },
-                "stats": {"raw_pool_size": 1, "scored_size": 1},
+                "stats": {
+                    "raw_pool_size": targets[market],
+                    "scored_size": 1,
+                    "recall_target": targets[market],
+                    "recall_selected_size": targets[market],
+                },
             }
             for market in ("a_share", "hk", "us")
         },
     }
+    snapshot["markets"]["a_share"]["stats"]["board_counts"] = {
+        "sh_main": 90,
+        "sz_main": 75,
+        "chinext": 75,
+        "star": 60,
+    }
+    return snapshot
 
 
 class ScheduleGateTests(unittest.TestCase):
@@ -136,7 +151,12 @@ class ScheduleGateTests(unittest.TestCase):
                             "quote_coverage": 0.0,
                             "reason_codes": ["YAHOO_QUOTE_UNAVAILABLE"],
                         },
-                        "stats": {"raw_pool_size": 1, "scored_size": 0},
+                        "stats": {
+                            "raw_pool_size": 200,
+                            "scored_size": 0,
+                            "recall_target": 200,
+                            "recall_selected_size": 200,
+                        },
                     },
                 },
             },
@@ -169,7 +189,14 @@ class ScheduleGateTests(unittest.TestCase):
                     **healthy_snapshot(),
                     "markets": {
                         **healthy_snapshot()["markets"],
-                        "hk": {"stats": {"raw_pool_size": 1, "scored_size": 1}},
+                        "hk": {
+                            "stats": {
+                                "raw_pool_size": 200,
+                                "scored_size": 1,
+                                "recall_target": 200,
+                                "recall_selected_size": 200,
+                            }
+                        },
                     },
                 },
                 "HK_QUOTE_HEALTH_UNKNOWN",
@@ -227,15 +254,41 @@ class ScheduleGateTests(unittest.TestCase):
                 "a_share": {
                     "quote_health": {
                         "status": "available",
-                        "requested_count": 96,
-                        "quote_count": 96,
+                        "requested_count": 300,
+                        "quote_count": 300,
                         "quote_coverage": 1.0,
                         "reason_codes": [],
                     },
                     "pool_health": {"status": "healthy", "reason_codes": []},
+                    "stats": {
+                        "raw_pool_size": 300,
+                        "scored_size": 96,
+                        "recall_target": 300,
+                        "recall_selected_size": 300,
+                        "board_counts": {
+                            "sh_main": 90,
+                            "sz_main": 75,
+                            "chinext": 75,
+                            "star": 60,
+                        },
+                    },
                 },
-                "hk": {"stats": {"raw_pool_size": 153, "scored_size": 62}},
-                "us": {"stats": {"raw_pool_size": 258, "scored_size": 246}},
+                "hk": {
+                    "stats": {
+                        "raw_pool_size": 200,
+                        "scored_size": 62,
+                        "recall_target": 200,
+                        "recall_selected_size": 200,
+                    }
+                },
+                "us": {
+                    "stats": {
+                        "raw_pool_size": 300,
+                        "scored_size": 246,
+                        "recall_target": 300,
+                        "recall_selected_size": 300,
+                    }
+                },
             },
         }
         for market in ("hk", "us"):
@@ -243,7 +296,9 @@ class ScheduleGateTests(unittest.TestCase):
                 "status": "available",
                 "requested_count": structurally_blocked["markets"][market]["stats"]["raw_pool_size"],
                 "quote_count": structurally_blocked["markets"][market]["stats"]["raw_pool_size"],
+                "realtime_count": structurally_blocked["markets"][market]["stats"]["raw_pool_size"],
                 "quote_coverage": 1.0,
+                "realtime_coverage": 1.0,
                 "reason_codes": [],
             }
         self.assertEqual(
@@ -263,11 +318,21 @@ class ScheduleGateTests(unittest.TestCase):
                 **healthy_snapshot()["markets"],
                 "hk": {
                     "quote_health": healthy_snapshot()["markets"]["hk"]["quote_health"],
-                    "stats": {"raw_pool_size": 153, "scored_size": 0},
+                    "stats": {
+                        "raw_pool_size": 200,
+                        "scored_size": 0,
+                        "recall_target": 200,
+                        "recall_selected_size": 200,
+                    },
                 },
                 "us": {
                     "quote_health": healthy_snapshot()["markets"]["us"]["quote_health"],
-                    "stats": {"raw_pool_size": 258, "scored_size": 100},
+                    "stats": {
+                        "raw_pool_size": 300,
+                        "scored_size": 100,
+                        "recall_target": 300,
+                        "recall_selected_size": 300,
+                    },
                 },
             }
         }
@@ -276,6 +341,27 @@ class ScheduleGateTests(unittest.TestCase):
             ["HK_SCORING_EMPTY"],
         )
 
+    def test_recall_target_shortfall_forces_scheduled_recovery(self) -> None:
+        snapshot = healthy_snapshot()
+        shortfalls = {"a_share": 299, "hk": 199, "us": 299}
+        for market, selected in shortfalls.items():
+            snapshot["markets"][market]["stats"]["recall_selected_size"] = selected
+            snapshot["markets"][market]["stats"]["raw_pool_size"] = selected
+
+        reasons = self.module.snapshot_data_source_recovery_reasons(snapshot)
+
+        self.assertIn("A_SHARE_POOL_TARGET_NOT_MET", reasons)
+        self.assertIn("HK_POOL_TARGET_NOT_MET", reasons)
+        self.assertIn("US_POOL_TARGET_NOT_MET", reasons)
+
+    def test_a_share_board_quota_shortfall_forces_recovery(self) -> None:
+        snapshot = healthy_snapshot()
+        snapshot["markets"]["a_share"]["stats"]["board_counts"]["star"] = 59
+
+        reasons = self.module.snapshot_data_source_recovery_reasons(snapshot)
+
+        self.assertIn("A_SHARE_BOARD_QUOTA_PARTIAL", reasons)
+
     def test_hk_yahoo_source_failure_is_recoverable(self) -> None:
         snapshot = {
             "markets": {
@@ -283,12 +369,17 @@ class ScheduleGateTests(unittest.TestCase):
                 "hk": {
                     "quote_health": {
                         "status": "unavailable",
-                        "requested_count": 153,
+                        "requested_count": 200,
                         "quote_count": 0,
                         "quote_coverage": 0.0,
                         "reason_codes": ["YAHOO_QUOTE_UNAVAILABLE"],
                     },
-                    "stats": {"raw_pool_size": 153, "scored_size": 0},
+                    "stats": {
+                        "raw_pool_size": 200,
+                        "scored_size": 0,
+                        "recall_target": 200,
+                        "recall_selected_size": 200,
+                    },
                 }
             }
         }

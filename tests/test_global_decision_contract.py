@@ -31,8 +31,8 @@ def valid_executable_snapshot() -> dict:
         section["pool_health"] = {"state": "READY", "reason_codes": []}
         section["quote_health"] = {
             "status": "available",
-            "requested_count": 100,
-            "quote_count": 100,
+            "requested_count": 1,
+            "quote_count": 1,
             "quote_coverage": 1.0,
         }
     for market_state in snapshot["global_decision"]["market_states"].values():
@@ -80,8 +80,8 @@ def executable_builder_input() -> dict:
         section["pool_health"] = {"state": "READY", "reason_codes": []}
         section["quote_health"] = {
             "status": "available",
-            "requested_count": 100,
-            "quote_count": 100,
+            "requested_count": 1,
+            "quote_count": 1,
             "quote_coverage": 1.0,
         }
         primary = section["decision"]["primary"]

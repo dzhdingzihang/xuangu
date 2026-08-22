@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import re
 import tempfile
 import unittest
 import urllib.error
@@ -160,6 +161,206 @@ def tencent_quote_payload(code: str = "600000", name: str = "浦发银行") -> b
 
 
 class SelectorV2Tests(unittest.TestCase):
+    def test_recall_targets_and_a_share_board_classification(self) -> None:
+        self.assertEqual(server.A_SHARE_RECALL_TARGET, 300)
+        self.assertEqual(server.HK_RECALL_TARGET, 200)
+        self.assertEqual(server.US_RECALL_TARGET, 300)
+        self.assertEqual(sum(server.A_SHARE_BOARD_TARGETS.values()), 300)
+        self.assertEqual(server.a_share_board("600000"), "sh_main")
+        self.assertEqual(server.a_share_board("000001"), "sz_main")
+        self.assertEqual(server.a_share_board("300001"), "chinext")
+        self.assertEqual(server.a_share_board("688001"), "star")
+        self.assertIsNone(server.a_share_board("830001"))
+
+    def test_broad_admission_uses_board_specific_price_limit_and_name_filters(self) -> None:
+        base = {
+            "name": "正常公司",
+            "price": 20.0,
+            "amount_yi": 5.0,
+            "turnover_pct": 3.0,
+            "route": "liquidity",
+            "relaxed": False,
+        }
+        self.assertFalse(server._admit_broad_a_share(code="600001", change_pct=9.0, **base))
+        self.assertTrue(server._admit_broad_a_share(code="300001", change_pct=9.0, **base))
+        self.assertFalse(
+            server._admit_broad_a_share(
+                code="300002", name="N新股", change_pct=2.0, **{key: value for key, value in base.items() if key != "name"}
+            )
+        )
+        self.assertFalse(
+            server._admit_broad_a_share(
+                code="688001", name="退市样本", change_pct=2.0, **{key: value for key, value in base.items() if key != "name"}
+            )
+        )
+
+    def test_diversified_a_share_pool_meets_board_targets_and_deduplicates(self) -> None:
+        prefixes = {
+            "sh_main": "600",
+            "sz_main": "000",
+            "chinext": "300",
+            "star": "688",
+        }
+        rows = []
+        for board, prefix in prefixes.items():
+            for index in range(120):
+                code = f"{prefix}{index:03d}"
+                rows.append(
+                    {
+                        "code": code,
+                        "source": "eastmoney_broad",
+                        "recall_route": "liquidity" if index % 2 else "momentum",
+                        "broad_amount_yi": float(500 - index),
+                        "broad_change_pct": float(index % 8),
+                        "broad_turnover_pct": 3.0,
+                    }
+                )
+        rows.append(dict(rows[0]))
+
+        selected, coverage = server.select_diversified_a_share_pool(rows)
+
+        self.assertEqual(len(selected), 300)
+        self.assertEqual(len({row["code"] for row in selected}), 300)
+        self.assertEqual(coverage["target_count"], 300)
+        self.assertEqual(coverage["selected_count"], 300)
+        self.assertEqual(coverage["shortfall_count"], 0)
+        self.assertEqual(coverage["board_coverage"], server.A_SHARE_BOARD_TARGETS)
+        self.assertEqual(coverage["board_shortfalls"], {})
+        self.assertGreater(coverage["route_coverage"]["liquidity"], 0)
+        self.assertGreater(coverage["route_coverage"]["momentum"], 0)
+
+    def test_diversified_a_share_pool_reports_shortfall_without_padding(self) -> None:
+        rows = [
+            {
+                "code": f"600{index:03d}",
+                "source": "eastmoney_broad",
+                "recall_route": "liquidity",
+                "broad_amount_yi": float(500 - index),
+            }
+            for index in range(211)
+        ]
+
+        selected, coverage = server.select_diversified_a_share_pool(rows)
+
+        self.assertEqual(len(selected), 211)
+        self.assertEqual(coverage["shortfall_count"], 89)
+        self.assertEqual(coverage["board_shortfalls"]["sz_main"], 75)
+        self.assertEqual(coverage["board_shortfalls"]["chinext"], 75)
+        self.assertEqual(coverage["board_shortfalls"]["star"], 60)
+
+    def test_diversified_a_share_pool_meets_mutually_exclusive_route_targets(self) -> None:
+        prefixes = {
+            "sh_main": "600",
+            "sz_main": "000",
+            "chinext": "300",
+            "star": "688",
+        }
+        rows = []
+        for board, route_targets in server.A_SHARE_BOARD_ROUTE_TARGETS.items():
+            index = 0
+            for route, count in route_targets.items():
+                for _ in range(count):
+                    rows.append(
+                        {
+                            "code": f"{prefixes[board]}{index:03d}",
+                            "source": "fixture",
+                            "recall_route": route,
+                            "broad_amount_yi": float(1000 - index),
+                            "broad_change_pct": 2.0 if route == "momentum" else -1.0,
+                            "broad_turnover_pct": 3.0,
+                        }
+                    )
+                    index += 1
+
+        selected, coverage = server.select_diversified_a_share_pool(rows)
+
+        self.assertEqual(len(selected), 300)
+        self.assertEqual(coverage["board_coverage"], server.A_SHARE_BOARD_TARGETS)
+        self.assertEqual(coverage["route_targets"], server.A_SHARE_ROUTE_TARGETS)
+        self.assertEqual(coverage["route_counts"], server.A_SHARE_ROUTE_TARGETS)
+        self.assertEqual(coverage["route_shortfalls"], {})
+        self.assertEqual(coverage["backfill_count"], 0)
+        self.assertEqual(sum(coverage["route_counts"].values()), 300)
+
+    def test_route_shortfall_backfills_within_board_without_duplicates(self) -> None:
+        prefixes = {"sh_main": "600", "sz_main": "000", "chinext": "300", "star": "688"}
+        rows = []
+        expected_event_count = 0
+        missing_event_count = 0
+        for board, route_targets in server.A_SHARE_BOARD_ROUTE_TARGETS.items():
+            index = 0
+            for route, count in route_targets.items():
+                available = max(0, count - 8) if route == "event" else count
+                expected_event_count += available if route == "event" else 0
+                missing_event_count += count - available if route == "event" else 0
+                for _ in range(available):
+                    rows.append(
+                        {
+                            "code": f"{prefixes[board]}{index:03d}",
+                            "source": "fixture",
+                            "recall_route": route,
+                            "broad_amount_yi": float(1000 - index),
+                        }
+                    )
+                    index += 1
+            board_missing = route_targets["event"] - max(0, route_targets["event"] - 8)
+            for _ in range(board_missing):
+                rows.append(
+                    {
+                        "code": f"{prefixes[board]}{index:03d}",
+                        "source": "fixture",
+                        "recall_route": "liquidity",
+                        "broad_amount_yi": float(1000 - index),
+                    }
+                )
+                index += 1
+
+        selected, coverage = server.select_diversified_a_share_pool(rows)
+
+        self.assertEqual(len(selected), 300)
+        self.assertEqual(len({row["code"] for row in selected}), 300)
+        self.assertEqual(coverage["board_coverage"], server.A_SHARE_BOARD_TARGETS)
+        self.assertEqual(coverage["route_counts"]["event"], expected_event_count)
+        self.assertEqual(coverage["route_shortfalls"]["event"], missing_event_count)
+        self.assertEqual(coverage["backfill_count"], missing_event_count)
+
+    def test_curated_hk_us_universes_have_exact_unique_targets(self) -> None:
+        for market_key, target in (("hk", 200), ("us", 300)):
+            with self.subTest(market_key=market_key):
+                rows = server.market_universe(market_key)
+                symbols = [row["symbol"] for row in rows]
+                self.assertEqual(len(symbols), target)
+                self.assertEqual(len(set(symbols)), target)
+                self.assertTrue(
+                    all(
+                        row["candidate_lineage"]["universe_origin"] == "curated_static"
+                        for row in rows
+                    )
+                )
+                if market_key == "hk":
+                    self.assertTrue(all(re.fullmatch(r"\d{4}\.HK", symbol) for symbol in symbols))
+                    self.assertIn("6051.HK", symbols)
+                    self.assertIn("8111.HK", symbols)
+                    self.assertIn("2601.HK", symbols)
+                    self.assertNotIn("0011.HK", symbols)
+                    self.assertNotIn("8083.HK", symbols)
+                    self.assertNotIn("8110.HK", symbols)
+                else:
+                    self.assertNotIn("SIVE.ST", symbols)
+                    self.assertNotIn("SOI", symbols)
+                    self.assertIn("SEI", symbols)
+
+    def test_partial_hk_us_quote_coverage_blocks_market_recommendation(self) -> None:
+        candidate = decision_ready_candidate("NVDA")
+        decision = server.make_serenity_decision(
+            [candidate],
+            "us",
+            quote_health={"status": "partial", "quote_coverage": 0.97},
+        )
+        self.assertEqual(decision["action"], "NO_TRADE")
+        self.assertEqual(decision["data_state"], "DEGRADED")
+        self.assertIn("QUOTE_COVERAGE_INSUFFICIENT", decision["blocker_codes"])
+
     def test_http_get_json_retries_transient_requests_error(self) -> None:
         response = mock.Mock()
         response.raise_for_status.return_value = None
@@ -379,7 +580,7 @@ class SelectorV2Tests(unittest.TestCase):
             "broad_turnover_pct": 4.0,
             "pb": 35.0,
         }
-        self.assertEqual(server.broad_recall_routes(row), ["liquidity", "pullback"])
+        self.assertEqual(server.broad_recall_routes(row), ["liquidity", "pullback", "activity"])
 
     def test_cached_pool_expires_after_five_trade_weekdays(self) -> None:
         as_of = dt.date(2026, 8, 19)

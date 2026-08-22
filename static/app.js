@@ -53,6 +53,9 @@ const DUAL_LOW_INPUT_META = {
 const POOL_HEALTH_REASON_META = {
   POOL_COVERAGE_INSUFFICIENT: "候选池或报价覆盖未达安全阈值",
   BROAD_POOL_BELOW_MINIMUM: "全市场宽基池低于最低数量",
+  POOL_TARGET_NOT_MET: "实际召回未达到市场目标",
+  BOARD_QUOTA_PARTIAL: "A 股板块配额未完整达标",
+  CORE_BOARD_MISSING: "A 股存在整个板块未召回",
   MERGED_POOL_EMPTY: "合并候选池为空",
   QUOTE_COVERAGE_BELOW_MINIMUM: "候选报价覆盖率低于最低要求",
 };
@@ -233,6 +236,19 @@ function poolHealthState(section, decision) {
   const broadPoolSize = health.broad_pool_count ?? health.broad_pool_size ?? stats.broad_pool_size;
   const coverage = health.quote_coverage ?? health.coverage_ratio ?? health.coverage_pct;
   return { health, blockerCodes, reasonCodes, degraded, broadPoolSize, coverage };
+}
+
+function recallFunnel(section, marketKey = null) {
+  const stats = section?.stats || {};
+  const quoteHealth = section?.quote_health || {};
+  const fallbackPool = Math.max(num(stats.universe_size), num(stats.raw_pool_size));
+  const expectedTarget = { a_share: 300, hk: 200, us: 300 }[marketKey || section?.key] || fallbackPool;
+  const publishedTarget = num(stats.recall_target, NaN);
+  const target = Number.isFinite(publishedTarget) && publishedTarget > 0 ? publishedTarget : expectedTarget;
+  const selected = num(stats.recall_selected_size, fallbackPool);
+  const validQuotes = num(stats.valid_quote_size, num(quoteHealth.quote_count));
+  const deepScored = num(stats.deep_scored_size, num(stats.scored_size));
+  return { target, selected, validQuotes, deepScored };
 }
 
 function poolHealthAlert(section, decision) {
@@ -907,7 +923,7 @@ function renderLegacyMarketDecision() {
   const quoteView = candidateQuoteView(candidate);
   const objectivelyBlocked = candidate.execution_state === "BLOCKED" || (candidate.decision_gates || []).some((gate) => gate.status === "BLOCK");
   const regime = section.market_regime || candidate.v2?.regime || candidate.v2?.market_regime;
-  const pool = num(stats.raw_pool_size || stats.universe_size);
+  const funnel = recallFunnel(section, state.market);
   const shown = candidatesFor(state.snapshot, state.market).length;
   const gates = candidate.decision_gates || [];
   const passCount = gates.filter((gate) => gate.status === "PASS").length;
@@ -920,8 +936,8 @@ function renderLegacyMarketDecision() {
     </div>
     ${poolHealthAlert(section, decision)}
     ${renderKpis([
-      { icon: poolHealth.degraded ? "ph-warning-octagon" : "ph-binoculars", label: "候选池扫描", value: poolHealth.degraded ? "DEGRADED" : fmt(pool, 0), tone: poolHealth.degraded ? "warning" : "", meta: poolHealth.degraded ? "候选池降级 · 覆盖不足" : `${esc(stats.universe_origin || (state.market === "a_share" ? "动态召回" : "精选静态池"))}` },
-      { icon: "ph-funnel", label: "完成深评", value: fmt(stats.scored_size, 0), meta: `页面保留 ${shown} 只证据卡` },
+      { icon: poolHealth.degraded ? "ph-warning-octagon" : "ph-binoculars", label: "实际召回 / 目标", value: `${fmt(funnel.selected, 0)} / ${fmt(funnel.target, 0)}`, tone: poolHealth.degraded ? "warning" : "", meta: poolHealth.degraded ? "候选池降级 · 覆盖不足" : `${esc(stats.universe_origin || (state.market === "a_share" ? "动态多路召回" : "版本化策展池"))}` },
+      { icon: "ph-funnel", label: "有效行情 / 深度评分", value: `${fmt(funnel.validQuotes, 0)} / ${fmt(funnel.deepScored, 0)}`, meta: `页面保留 ${shown} 只证据卡` },
       { icon: "ph-ranking", label: "推荐度", value: `${fmt(candidateScore(candidate), 0)}`, tone: hasPrimary ? "positive" : "warning", meta: `旧逻辑实际决策 · 总分 ${fmt(candidate.score, 1)}` },
       { icon: "ph-shield-check", label: "客观门控", value: gates.length ? `${passCount}/${gates.length}` : "Legacy", meta: gates.length ? `${gates.filter((g) => g.status === "BLOCK").length} 个阻断` : "V2 快照生成后启用展示" },
     ])}
@@ -974,17 +990,14 @@ function renderDecision() {
   const marketCards = truth.markets.map((item) => {
     const meta = MARKET_META[item.market];
     const primary = item.decision.primary || item.decision.blocked_candidate || null;
-    const scored = item.stats.scored_size ?? item.stats.scored_count;
-    const poolSize = item.market === "a_share"
-      ? item.pool.broadPoolSize ?? item.stats.broad_pool_size
-      : Math.max(num(item.stats.universe_size), num(item.stats.raw_pool_size));
+    const funnel = recallFunnel(item.section, item.market);
     const stateTone = item.state === "READY" ? "positive" : item.state === "BLOCKED" ? "negative" : "warning";
     const stateLabel = item.state === "READY" ? "可评估" : item.state === "BLOCKED" ? "阻断" : "降级";
     const legacySignal = `LEGACY ${item.decision.primary ? "BUY_CANDIDATE" : String(item.decision.action || "NO_TRADE")}`;
     const reasons = item.reasons.length ? item.reasons.join("；") : "关键数据门禁已通过";
     return `<article class="market-decision-card ${stateTone}">
       <header><span>${marketBadge(item.market)}<b>${meta.label}</b></span><span class="status-pill ${stateTone}">${stateLabel}</span></header>
-      <div class="market-decision-body"><div><small>市场级 Legacy 信号</small><strong>${esc(legacySignal)}</strong></div><div><small>已深评 / 召回池</small><strong>${fmt(scored, 0)} / ${fmt(poolSize, 0)}</strong></div></div>
+      <div class="market-decision-body"><div><small>市场级 Legacy 信号</small><strong>${esc(legacySignal)}</strong></div><div><small>召回 / 目标 · 深评</small><strong>${fmt(funnel.selected, 0)} / ${fmt(funnel.target, 0)} · ${fmt(funnel.deepScored, 0)}</strong></div></div>
       <p>${primary ? `${esc(primary.name || primary.code)} · 规则推荐度 ${fmt(candidateScore(primary), 0)}` : "本轮没有保存候选"}</p>
       <footer><span>${esc(reasons)}</span><button type="button" data-action="candidate-market" data-market="${item.market}">查看候选 ${icon("ph-arrow-right")}</button></footer>
     </article>`;
@@ -1126,18 +1139,16 @@ function renderCandidates() {
   const tenDayReady = tenDayModelState().ready;
   const marketKpi = (coverage) => {
     const isA = coverage.market === "a_share";
-    const poolCount = isA
-      ? coverage.pool.broadPoolSize ?? coverage.stats.broad_pool_size
-      : Math.max(num(coverage.stats.universe_size), num(coverage.stats.raw_pool_size));
+    const funnel = recallFunnel(coverage.section, coverage.market);
     const originLabel = coverage.origin === "curated_static" ? "静态" : "召回";
     const tone = coverage.state === "READY" ? "positive" : coverage.state === "BLOCKED" ? "negative" : "warning";
     const readyMeta = coverage.origin === "curated_static" ? "精选静态池，不是全市场扫描" : "动态候选召回";
     return {
       icon: coverage.origin === "curated_static" ? "ph-path" : "ph-stack",
-      label: `${MARKET_META[coverage.market].label}${isA ? "宽基" : originLabel} / 深评`,
-      value: `${fmt(poolCount, 0)} / ${fmt(coverage.stats.scored_size, 0)}`,
+      label: `${MARKET_META[coverage.market].label}${isA ? "召回" : originLabel} / 目标`,
+      value: `${fmt(funnel.selected, 0)} / ${fmt(funnel.target, 0)}`,
       tone,
-      meta: coverage.state === "READY" ? readyMeta : coverage.reasons[0] || readyMeta,
+      meta: `${coverage.state === "READY" ? readyMeta : coverage.reasons[0] || readyMeta} · 有效行情 ${fmt(funnel.validQuotes, 0)} · 深评 ${fmt(funnel.deepScored, 0)}`,
     };
   };
   root.innerHTML = `
@@ -1499,6 +1510,9 @@ function renderModel() {
   const dualModel = snapshot.analysis_models?.dual_low || {};
   const tenDay = tenDayModelState(snapshot);
   const tenDayLive = tenDay.ready;
+  const aRecall = recallFunnel(snapshot.markets?.a_share || {}, "a_share");
+  const hkRecall = recallFunnel(snapshot.markets?.hk || {}, "hk");
+  const usRecall = recallFunnel(snapshot.markets?.us || {}, "us");
   root.innerHTML = `
     <section class="objective-formula"><div><small>核心优化目标</small><strong>最终效用 ＝ 预期 10 日净总回报 − λ × 尾部风险 − μ × 交易成本 − ν × 数据不确定性</strong><p>净总回报包含股息，并扣除手续费、税费、点差、滑点与汇兑成本；缺失任一关键项时不输出可执行股票。</p></div><span>HORIZON · 10 TRADING DAYS</span></section>
     <section class="panel model-pipeline-panel"><header class="panel-header"><div><h3 class="panel-title">7 阶段决策流水线</h3><p class="panel-subtitle">任一关键门禁失败，自动回退为 NO_VALID_PICK</p></div>${badge(snapshot.selector_mode || "legacy_active", "purple")}</header><ol class="pipeline-list pipeline-seven"><li><span>01</span><div><b>全市场召回</b><p>A / 港 / 美候选覆盖与召回来源。</p></div></li><li><span>02</span><div><b>交易与数据门禁</b><p>流动性、停牌、完整性和新鲜度。</p></div></li><li><span>03</span><div><b>因子和事件特征</b><p>Legacy、V2、双低与外部证据分开。</p></div></li><li><span>04</span><div><b>分市场 10 日模型</b><p>${tenDayLive ? "预测净总回报分布；已参与门禁。" : "预测净总回报分布；当前未上线。"}</p></div></li><li><span>05</span><div><b>概率校准</b><p>${tenDayLive ? "P(R10>0) 已校准并记录模型版本。" : "P(R10>0) 样本外校准；当前未上线。"}</p></div></li><li><span>06</span><div><b>跨市场效用排名</b><p>收益、风险、成本与不确定性统一比较。</p></div></li><li class="is-gate"><span>07</span><div><b>可执行性复核</b><p>价格、仓位、事件时点与尾部风险。</p></div></li></ol></section>
@@ -1507,7 +1521,7 @@ function renderModel() {
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">旧因子仍然保留</h3><p class="panel-subtitle">回答“之前的评分还在吗”</p></div>${badge("Active", "positive")}</header><div class="legacy-map"><div><b>初筛 pre_score</b><span>成交额、换手、量比、涨幅等</span></div><div><b>缠论近似 chan_score</b><span>均线结构、二买 / 三买、箱体回踩</span></div><div><b>CZSC 近似</b><span>中枢、趋势、箱体位置与背驰风险</span></div><div><b>UZI + 评审团</b><span>买点纪律、流动性、过热和杀猪盘门控</span></div><div><b>Serenity 先验</b><span>AI capex 上游稀缺环节与融资风险</span></div><div><b>推荐度与动作</b><span>只决定市场内 Legacy 排名与信号；能否执行由 global 严格门禁决定</span></div></div></article>
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">V2 分组权重</h3><p class="panel-subtitle">随市场状态采用规则先验；分数只作影子观察</p></div>${badge(snapshot.weights_version || "示意基准", "purple")}</header><div class="weight-list">${weights.map(([label, value]) => `<div><span>${esc(label)}</span><div class="progress-bar"><span style="width:${clamp(value)}%"></span></div><b>${fmt(value, 0)}%</b></div>`).join("")}</div><p class="fine-print">若市场基准数据不足，状态为 unknown 并保守处理；这里不声称是机器学习概率。</p></article>
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">双低七因子 · 独立影子</h3><p class="panel-subtitle">补充估值视角，不与 Legacy / V2 机械相加</p></div>${badge(dualModel.status === "available" ? "Shadow available" : "Shadow", dualModel.status === "available" ? "positive" : "warning")}</header><dl><dt>模型</dt><dd>${esc(dualModel.model_id || "dsa-screening-score-v1")}</dd><dt>市场</dt><dd>A股；港美暂不适用</dd><dt>比较池</dt><dd>${esc(dualModel.pool_scope || "a_share.merged_recall_quote_pool.pre_kline_v1")}</dd><dt>输入 / 合格</dt><dd>${dualModel.input_count === undefined ? "待新快照" : `${fmt(dualModel.input_count, 0)} / ${fmt(dualModel.eligible_count, 0)}`}</dd><dt>默认风格</dt><dd>PE≤15、PB≤2、不过热</dd><dt>决策权限</dt><dd>无；仅输出研究优先级</dd></dl><p class="fine-print">“被过滤”只表示不符合这套价值风格或数据不完整，不表示公司质量差。</p></article>
-      <article class="panel"><header class="panel-header"><div><h3 class="panel-title">候选池边界</h3><p class="panel-subtitle">扩大召回，但不承诺全市场无遗漏</p></div></header><dl><dt>A股</dt><dd>事件 + 动量 + 流动性 + 回踩 + 历史延续</dd><dt>港股</dt><dd>153 只左右精选静态清单，按快照重新取价和排序</dd><dt>美股</dt><dd>258 只左右精选静态清单，按快照重新取价和排序</dd><dt>历史延续</dt><dd>最多 5 个工作日、40 只、带衰减元数据</dd><dt>交易日</dt><dd>XSHG / XHKG / XNYS 真实交易所日历，分市场计算入场和第 10 个交易日退出</dd></dl></article>
+      <article class="panel"><header class="panel-header"><div><h3 class="panel-title">候选池边界</h3><p class="panel-subtitle">先扩大召回，再用行情和深评逐层收窄</p></div></header><dl><dt>A股</dt><dd>${fmt(aRecall.selected, 0)} / ${fmt(aRecall.target || 300, 0)}；沪主板 90、深主板 75、创业板 75、科创板 60</dd><dt>A股路由</dt><dd>事件、动量、流动性、交易活跃、可控回调；历史延续只在实时宽基不足时补位</dd><dt>港股</dt><dd>${fmt(hkRecall.selected, 0)} / ${fmt(hkRecall.target || 200, 0)} 只版本化策展池，每轮重新取价和排序</dd><dt>美股</dt><dd>${fmt(usRecall.selected, 0)} / ${fmt(usRecall.target || 300, 0)} 只版本化策展池，每轮重新取价和排序</dd><dt>四层口径</dt><dd>召回目标 → 实际召回 → 有效行情 → 深度评分，页面不再混为一个数</dd><dt>交易日</dt><dd>XSHG / XHKG / XNYS 真实交易所日历，分市场计算入场和第 10 个交易日退出</dd></dl></article>
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">运行架构</h3><p class="panel-subtitle">公开站点不依赖 Render、OpenD 或个人电脑常开</p></div>${badge("Cloudflare only", "primary")}</header><div class="architecture-list"><div>${icon("ph-github-logo")}<span><b>GitHub Actions</b><small>定时运行 Python，生成最新快照与历史文件</small></span></div><div>${icon("ph-package")}<span><b>构建时 JSON assets</b><small>数据随 Worker 部署，不使用 KV / D1 / R2</small></span></div><div>${icon("ph-cloud")}<span><b>Cloudflare Worker</b><small>提供静态页面、快照、历史与状态 API</small></span></div><div>${icon("ph-browser")}<span><b>浏览器</b><small>渲染证据、筛选与执行提示；评分与排序不在浏览器重算</small></span></div></div></article>
     </div>
     <section class="panel section-gap"><header class="panel-header"><div><h3 class="panel-title">能力状态与限制</h3><p class="panel-subtitle">不把近似规则包装成官方框架</p></div></header><div class="truth-grid"><div><span class="status-pill warning">内置近似</span><b>缠论 / CZSC</b><p>用日线均线、箱体、突破回踩和背驰风险近似，不是原生 CZSC 执行。</p></div><div><span class="status-pill warning">方法论加权</span><b>UZI</b><p>内置轻量评审和风控规则，不是外部 UZI 模型服务。</p></div><div><span class="status-pill warning">研究先验</span><b>Serenity</b><p>硬编码产业链 lens；安装 Skill 只改变元数据，不会改变分数。</p></div><div><span class="status-pill primary">纯云端快照</span><b>行情交付</b><p>页面只读取 GitHub Actions 已发布批次，不宣称盘中实时；源时间与快照生成时间分开。</p></div></div></section>`;
@@ -1521,18 +1535,22 @@ function renderHealth() {
   const primarySchedule = (status.schedule_primary_checkpoints || ["08:17", "20:17"]).join(" / ");
   const fallbackSchedule = (status.schedule_fallback_checkpoints || ["08:47", "20:47"]).join(" / ");
   const readyMarkets = truth.markets.filter((item) => item.state === "READY").length;
-  const poolSize = (market) => Math.max(num(market?.stats?.universe_size), num(market?.stats?.raw_pool_size));
+  const recallTargetsMet = truth.markets.every((market) => {
+    const funnel = recallFunnel(market.section, market.market);
+    return funnel.target > 0 && funnel.selected >= funnel.target;
+  });
   const quoteRequested = (market) => num(market?.quoteHealth?.requested_count, 0);
   const quoteCount = (market) => num(market?.quoteHealth?.quote_count, 0);
   const marketTone = (market) => market.state === "READY" ? "positive" : market.state === "BLOCKED" ? "negative" : "warning";
   const marketStateLabel = (market) => market.state === "READY" ? "可评估" : market.state === "BLOCKED" ? "阻断" : "降级";
   const marketMetrics = (market) => {
     const universeLabel = market.origin === "curated_static" ? "静态池" : "召回池";
+    const funnel = recallFunnel(market.section, market.market);
     const prefix = market.market === "a_share"
-      ? `宽基 ${fmt(market.pool.broadPoolSize ?? market.stats.broad_pool_size, 0)} · 合并 ${fmt(poolSize(market), 0)}`
-      : `${universeLabel} ${fmt(poolSize(market), 0)} · 已评分 ${fmt(market.stats.scored_size, 0)}`;
+      ? `宽基 ${fmt(market.pool.broadPoolSize ?? market.stats.broad_pool_size, 0)} · 召回 ${fmt(funnel.selected, 0)}/${fmt(funnel.target, 0)}`
+      : `${universeLabel} ${fmt(funnel.selected, 0)}/${fmt(funnel.target, 0)}`;
     return quoteRequested(market)
-      ? `${prefix} · 行情 ${fmt(quoteCount(market), 0)}/${fmt(quoteRequested(market), 0)}`
+      ? `${prefix} · 行情 ${fmt(quoteCount(market), 0)}/${fmt(quoteRequested(market), 0)} · 深评 ${fmt(funnel.deepScored, 0)}`
       : `${prefix} · 行情健康未发布`;
   };
   const row = (label, tone, stateLabel, metrics, impact) => `<div class="health-table-row"><b>${esc(label)}</b><span class="status-pill ${tone}">${esc(stateLabel)}</span><code>${esc(metrics)}</code><p>${esc(impact)}</p></div>`;
@@ -1543,7 +1561,7 @@ function renderHealth() {
     <div class="callout ${usable ? "" : "negative"} health-alert">${icon(usable ? "ph-check-circle" : "ph-warning-octagon")}<div><strong>${usable ? "跨市场候选契约完整" : "当前数据质量不足以生成跨市场买入结论"}</strong><br>${usable ? "概率、净效用、成本、尾部风险、市场覆盖和官方证据均已通过契约校验。" : esc(blockers.slice(0, 5).join("；") || "没有候选通过全部严格门禁。")}</div></div>
     ${renderKpis([
       { icon: "ph-globe", label: "可比较市场", value: `${readyMarkets} / 3`, tone: readyMarkets === 3 ? "positive" : "negative", meta: "A股、港股、美股须口径可比" },
-      { icon: "ph-binoculars", label: "全市场召回", value: readyMarkets === 3 ? "已达标" : "未达标", tone: readyMarkets === 3 ? "positive" : "warning", meta: `A股宽基 ${fmt(truth.markets[0]?.pool.broadPoolSize ?? truth.markets[0]?.stats.broad_pool_size, 0)}` },
+      { icon: "ph-binoculars", label: "三市场召回目标", value: recallTargetsMet ? "300 / 200 / 300" : "未达标", tone: recallTargetsMet ? "positive" : "warning", meta: "A股 / 港股 / 美股；行情与深评另行门控" },
       { icon: "ph-newspaper", label: "外部自动证据", value: fmt(truth.autoEvidenceCount, 0), tone: truth.autoEvidenceCount ? "positive" : "negative", meta: `模型信号 ${eventItems().filter((event) => event.event_type === "model_signal").length} 条不等于证据` },
       { icon: "ph-clock-clockwise", label: "发布状态", value: schedulerRunning ? "可访问" : "需检查", tone: schedulerRunning ? "positive" : "negative", meta: `新鲜度 ${esc(status.freshness_state || "unknown")}` },
     ])}
