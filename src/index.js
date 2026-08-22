@@ -13,21 +13,15 @@ const SECURITY_HEADERS = {
 const SHANGHAI_TIME_ZONE = "Asia/Shanghai";
 const STATUS_GRACE_MINUTES = 45;
 const WEEKDAY_CHECKPOINTS = [
-  [8, 58],
-  [9, 58],
-  [10, 58],
-  [12, 58],
-  [13, 58],
-  [14, 58],
-  [21, 28],
-  [23, 58],
+  [8, 17],
+  [20, 17],
 ];
+const FALLBACK_CHECKPOINTS = [[8, 47], [20, 47]];
+const SCHEDULED_REFRESH_CHECKPOINTS = [...WEEKDAY_CHECKPOINTS, ...FALLBACK_CHECKPOINTS]
+  .sort(([leftHour, leftMinute], [rightHour, rightMinute]) =>
+    leftHour * 60 + leftMinute - (rightHour * 60 + rightMinute));
 const LIVE_MARKETS = new Set(["a_share", "hk", "us"]);
 const LIVE_CACHE_TTL_MS = 10_000;
-const LIVE_FETCH_TIMEOUT_MS = 4_000;
-const GATEWAY_FETCH_TIMEOUT_MS = 3_000;
-const LIVE_MAX_ACTIVE_AGE_SECONDS = 120;
-const liveQuoteCache = new Map();
 
 function withSecurityHeaders(response) {
   const headers = new Headers(response.headers);
@@ -118,6 +112,35 @@ function previousBusinessDay(parts) {
   return candidate;
 }
 
+function checkpointIso(parts, checkpoint) {
+  const [hour, minute] = checkpoint;
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}T${pad(hour)}:${pad(minute)}:00+08:00`;
+}
+
+export function nextScheduledRefresh(current = new Date()) {
+  const now = current instanceof Date ? current : new Date(current);
+  if (Number.isNaN(now.getTime())) return null;
+  const local = shanghaiDateParts(now);
+  const startDate = { year: local.year, month: local.month, day: local.day };
+  for (let dayOffset = 0; dayOffset <= 8; dayOffset += 1) {
+    const checkpointDate = shiftCalendarDate(startDate, dayOffset);
+    if (!isBusinessDay(checkpointDate)) continue;
+    for (const checkpoint of SCHEDULED_REFRESH_CHECKPOINTS) {
+      const [hour, minute] = checkpoint;
+      const epoch = Date.UTC(
+        checkpointDate.year,
+        checkpointDate.month - 1,
+        checkpointDate.day,
+        hour - 8,
+        minute,
+      );
+      if (epoch > now.getTime()) return checkpointIso(checkpointDate, checkpoint);
+    }
+  }
+  return null;
+}
+
 function expectedCheckpoint(current) {
   const local = shanghaiDateParts(current);
   let checkpointDate = { year: local.year, month: local.month, day: local.day };
@@ -183,21 +206,6 @@ export function snapshotFreshness(generatedAt, current = new Date()) {
   };
 }
 
-function isoFromEpoch(value) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) return null;
-  const millis = parsed > 1_000_000_000_000 ? parsed : parsed * 1000;
-  const date = new Date(millis);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-
-function isoFromCnTimestamp(value) {
-  const match = String(value || "").match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
-  if (!match) return null;
-  const [, year, month, day, hour, minute, second] = match;
-  return `${year}-${month}-${day}T${hour}:${minute}:${second}+08:00`;
-}
-
 function normalizeLiveCode(market, value) {
   const raw = String(value || "").trim().toUpperCase();
   if (market === "a_share") {
@@ -219,108 +227,42 @@ function validIsoDate(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text;
 }
 
-function snapshotCandidateCodes(snapshot, market) {
+function snapshotCandidateRows(snapshot, market) {
   const section = snapshot?.markets?.[market]
     || (market === "a_share" ? { decision: snapshot?.decision || {} } : {});
   const decision = section?.decision || {};
-  const rows = [decision.primary, decision.blocked_candidate, ...(decision.watchlist || [])];
+  const watchlist = Array.isArray(decision.watchlist) ? decision.watchlist : [];
+  const rows = [decision.primary, decision.blocked_candidate, ...watchlist];
   for (const globalCandidate of [snapshot?.global_decision?.primary, snapshot?.global_decision?.research_priority]) {
     if (globalCandidate && globalCandidate.market === market) rows.push(globalCandidate);
   }
-  return new Set(rows.filter(Boolean).map((row) => normalizeLiveCode(market, row.code || row.symbol)).filter(Boolean));
+  return rows.filter((row) => row && typeof row === "object" && !Array.isArray(row));
 }
 
-async function fetchWithTimeout(input, init = {}, timeoutMs = LIVE_FETCH_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
+function snapshotCandidateCodes(snapshot, market) {
+  return new Set(
+    snapshotCandidateRows(snapshot, market)
+      .map((row) => normalizeLiveCode(market, row.code || row.symbol))
+      .filter(Boolean),
+  );
+}
+
+function snapshotCandidate(snapshot, market, code) {
+  return snapshotCandidateRows(snapshot, market).find(
+    (row) => normalizeLiveCode(market, row.code || row.symbol) === code,
+  ) || null;
 }
 
 function sessionLabel(session) {
   return ({ pre: "盘前", regular: "盘中", post: "盘后", overnight: "夜盘", closed: "休市", unknown: "时段未知" })[session] || "时段未知";
 }
 
-function aShareSession(current = new Date()) {
-  const parts = shanghaiDateParts(current);
-  const weekday = calendarWeekday(parts);
-  if (weekday === 0 || weekday === 6) return "closed";
-  const minute = parts.hour * 60 + parts.minute;
-  if (minute >= 9 * 60 + 15 && minute < 9 * 60 + 30) return "pre";
-  if ((minute >= 9 * 60 + 30 && minute < 11 * 60 + 30) || (minute >= 13 * 60 && minute < 15 * 60)) return "regular";
-  return "closed";
-}
-
-function yahooPeriod(meta, name) {
-  const current = meta?.currentTradingPeriod?.[name];
-  if (current && Number.isFinite(Number(current.start)) && Number.isFinite(Number(current.end))) return current;
-  const periods = meta?.tradingPeriods?.[name];
-  const first = Array.isArray(periods) ? (Array.isArray(periods[0]) ? periods[0][0] : periods[0]) : null;
-  return first && Number.isFinite(Number(first.start)) && Number.isFinite(Number(first.end)) ? first : null;
-}
-
-function yahooSession(meta, epochSeconds = Math.floor(Date.now() / 1000)) {
-  const state = String(meta?.marketState || "").toUpperCase();
-  if (["PRE", "PREPRE"].includes(state)) return "pre";
-  if (state === "REGULAR") return "regular";
-  if (["POST", "POSTPOST"].includes(state)) return "post";
-  if (state === "OVERNIGHT") return "overnight";
-  for (const name of ["pre", "regular", "post"]) {
-    const period = yahooPeriod(meta, name);
-    if (period && epochSeconds >= Number(period.start) && epochSeconds < Number(period.end)) return name;
-  }
-  return "closed";
-}
-
-function yahooPriceKind(meta, epochSeconds) {
-  for (const [name, label] of [["pre", "pre_market"], ["regular", "regular"], ["post", "after_hours"]]) {
-    const period = yahooPeriod(meta, name);
-    if (period && epochSeconds >= Number(period.start) && epochSeconds <= Number(period.end)) return label;
-  }
-  return "regular";
-}
-
-function quoteTiming(sourceAsOf, session) {
-  const parsed = Date.parse(sourceAsOf || "");
-  const latencySeconds = Number.isFinite(parsed) ? Math.max(0, Math.floor((Date.now() - parsed) / 1000)) : null;
-  const active = ["pre", "regular", "post", "overnight"].includes(session);
-  if (!Number.isFinite(parsed)) {
-    return { quote_status: "DELAYED", freshness: "stale", latency_seconds: latencySeconds, is_realtime: false, is_stale: true };
-  }
-  if (!active) {
-    return { quote_status: "LAST_CLOSE", freshness: "last_close", latency_seconds: latencySeconds, is_realtime: false, is_stale: false };
-  }
-  const fresh = latencySeconds <= LIVE_MAX_ACTIVE_AGE_SECONDS;
-  return {
-    quote_status: fresh ? "REALTIME" : "DELAYED",
-    freshness: fresh ? "fresh" : "stale",
-    latency_seconds: latencySeconds,
-    is_realtime: fresh,
-    is_stale: !fresh,
-  };
-}
-
-function liveContract(payload) {
-  const timing = quoteTiming(payload.source_as_of, payload.session);
-  return {
-    contract_version: "live-quote-v1",
-    ok: true,
-    ...payload,
-    ...timing,
-    session_label: payload.session_label || sessionLabel(payload.session),
-    fetched_at: payload.fetched_at || nowCN(),
-    updated_at: payload.source_as_of || payload.fetched_at || nowCN(),
-    cache_ttl_seconds: LIVE_CACHE_TTL_MS / 1000,
-  };
-}
-
-function liveError(error, message, market, code) {
+function liveError(error, message, market, code, extra = {}) {
   return {
     contract_version: "live-quote-v1",
     ok: false,
+    data_mode: "SCHEDULED_SNAPSHOT",
+    quote_mode: "SCHEDULED_SNAPSHOT",
     error,
     message,
     market: market || null,
@@ -332,6 +274,7 @@ function liveError(error, message, market, code) {
     volume: null,
     volume_unit: null,
     provider: null,
+    provider_class: "SCHEDULED_SNAPSHOT",
     source: null,
     session: "unknown",
     session_label: sessionLabel("unknown"),
@@ -341,88 +284,40 @@ function liveError(error, message, market, code) {
     latency_seconds: null,
     is_realtime: false,
     is_stale: true,
+    realtime_guaranteed: false,
     source_as_of: null,
     fetched_at: nowCN(),
     updated_at: null,
+    snapshot_as_of: null,
+    snapshot_generated_at: null,
+    snapshot_key: null,
+    next_refresh: nextScheduledRefresh(),
+    rate_limit_status: "not_checked",
     cache_ttl_seconds: LIVE_CACHE_TTL_MS / 1000,
+    ...extra,
   };
 }
 
-function bestEffortContract(payload, fallbackReason = null) {
+function apiAssetError() {
   return {
-    ...payload,
-    provider_class: "PUBLIC_BEST_EFFORT",
-    source_tier: "public_best_effort_1m",
-    quote_status: payload.session === "closed" ? "LAST_CLOSE" : "DELAYED",
-    freshness: payload.session === "closed" ? "last_close" : "best_effort",
-    is_realtime: false,
-    is_stale: payload.session !== "closed",
-    realtime_guaranteed: false,
-    primary_provider: "FUTU_OPEND",
-    fallback_reason: fallbackReason,
-  };
-}
-
-function futuGatewayContract(quote) {
-  const price = num(quote?.price);
-  if (!quote || price <= 0 || quote.quote_status === "UNAVAILABLE") {
-    throw new Error("Futu gateway returned no usable quote");
-  }
-  return liveContract({
-    market: quote.market,
-    code: quote.code,
-    name: quote.name || "",
-    price,
-    current_price: price,
-    realtime_price: price,
-    change_pct: num(quote.change_pct),
-    current_change_pct: num(quote.change_pct),
-    previous_close: num(quote.previous_close),
-    bid: Number.isFinite(Number(quote.bid)) ? Number(quote.bid) : null,
-    ask: Number.isFinite(Number(quote.ask)) ? Number(quote.ask) : null,
-    volume: num(quote.volume),
-    volume_unit: quote.volume_unit || "share",
-    provider: "FUTU_OPEND",
-    provider_class: "LICENSED_REALTIME",
-    source_tier: quote.source_tier || "licensed_exchange_feed",
-    session: quote.session || "unknown",
-    session_label: quote.session_label || sessionLabel(quote.session),
-    price_kind: quote.price_kind || "last_trade",
-    source: "Futu OpenD licensed quote gateway",
-    source_as_of: quote.source_as_of,
-    fetched_at: quote.fetched_at || nowCN(),
-    kline: [],
-    realtime_guaranteed: quote.is_realtime === true,
-    gateway_latency_ms: quote.gateway_latency_ms ?? null,
-  });
-}
-
-async function futuGatewayLive(env, market, code) {
-  const baseUrl = String(env?.REALTIME_GATEWAY_URL || "").replace(/\/$/, "");
-  const token = String(env?.QUOTE_GATEWAY_TOKEN || "");
-  if (!baseUrl || !token) throw new Error("gateway not configured");
-  const target = new URL(`${baseUrl}/v1/quotes`);
-  target.searchParams.set("symbols", `${market}:${code}`);
-  const response = await fetchWithTimeout(target, {
-    headers: { authorization: `Bearer ${token}`, accept: "application/json" },
-  }, GATEWAY_FETCH_TIMEOUT_MS);
-  if (!response.ok) throw new Error(`gateway ${response.status}`);
-  const payload = await response.json();
-  const quote = Array.isArray(payload?.quotes) ? payload.quotes[0] : null;
-  const contract = futuGatewayContract({ ...quote, gateway_latency_ms: payload?.gateway_latency_ms });
-  return {
-    ...contract,
-    quote_status: quote.quote_status || contract.quote_status,
-    is_realtime: quote.is_realtime === true && contract.is_realtime,
-    is_stale: quote.is_stale === true || contract.is_stale,
-    realtime_guaranteed: quote.is_realtime === true && contract.is_realtime,
+    ok: false,
+    error: "API_ASSET_UNAVAILABLE",
+    message: "已发布快照暂时无法读取，请稍后重试",
+    time: nowCN(),
+    data_mode: "scheduled_snapshot",
+    quote_delivery_mode: "scheduled_snapshot",
+    device_dependency: false,
   };
 }
 
 async function readAssetJson(env, path) {
   const response = await env.ASSETS.fetch(`https://assets.local${path}`);
   if (!response.ok) return null;
-  return response.json();
+  const payload = await response.json();
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error(`asset JSON is not an object: ${path}`);
+  }
+  return payload;
 }
 
 function summarizeDecision(decision) {
@@ -659,256 +554,131 @@ async function pickForTarget(env, targetDate) {
   return null;
 }
 
-function eastmoneySecid(code) {
-  const clean = String(code || "").replace(/\D/g, "");
-  return `${clean.startsWith("6") ? "1" : "0"}.${clean}`;
-}
-
 function num(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-async function eastmoneyJson(url, params) {
-  const target = new URL(url);
-  Object.entries(params || {}).forEach(([key, value]) => target.searchParams.set(key, value));
-  const response = await fetchWithTimeout(target, {
-    headers: {
-      "user-agent": "Mozilla/5.0",
-      referer: "https://quote.eastmoney.com/",
-    },
-  });
-  if (!response.ok) throw new Error(`Eastmoney ${response.status}`);
-  return response.json();
+function awareIsoTimestamp(value) {
+  if (typeof value !== "string" || !/(?:Z|[+-]\d{2}:\d{2})$/i.test(value.trim())) return false;
+  return Number.isFinite(Date.parse(value));
 }
 
-async function aShareKline(code, limit = 70) {
-  const payload = await eastmoneyJson("https://push2his.eastmoney.com/api/qt/stock/kline/get", {
-    secid: eastmoneySecid(code),
-    fields1: "f1,f2,f3,f4,f5,f6",
-    fields2: "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-    klt: "101",
-    fqt: "1",
-    end: "20500101",
-    lmt: String(limit),
-  });
-  const rows = ((payload.data || {}).klines || []).map((line) => {
-    const parts = String(line).split(",");
-    return {
-      date: parts[0],
-      open: num(parts[1]),
-      close: num(parts[2]),
-      high: num(parts[3]),
-      low: num(parts[4]),
-      volume: num(parts[5]),
-      amount: num(parts[6]),
-      change_pct: num(parts[8]),
-      turnover: num(parts[10]),
-    };
-  });
-  return rows.filter((row) => row.date && row.close > 0);
+function validSnapshotVolumeUnit(market, value) {
+  if (typeof value !== "string") return false;
+  const allowed = market === "a_share" ? new Set(["lot", "share", "shares"]) : new Set(["share", "shares"]);
+  return allowed.has(value);
 }
 
-function marketPrefix(code) {
-  const clean = String(code || "").replace(/\D/g, "");
-  return clean.startsWith("6") ? "sh" : "sz";
+function strictSnapshotQuote(candidate, market) {
+  const quote = candidate?.realtime;
+  if (!quote || typeof quote !== "object" || Array.isArray(quote)) {
+    throw new Error("published candidate has no realtime snapshot quote");
+  }
+  if (typeof quote.price !== "number" || !Number.isFinite(quote.price) || quote.price <= 0) {
+    throw new Error("published realtime snapshot quote has no positive price");
+  }
+  if (!awareIsoTimestamp(quote.source_as_of)) {
+    throw new Error("published realtime snapshot quote has no timezone-aware source_as_of");
+  }
+  if (!awareIsoTimestamp(quote.fetched_at)) {
+    throw new Error("published realtime snapshot quote has no timezone-aware fetched_at");
+  }
+  if (!validSnapshotVolumeUnit(market, quote.volume_unit)) {
+    throw new Error("published realtime snapshot quote has no valid volume_unit");
+  }
+  return quote;
 }
 
-async function tencentAQuote(code) {
-  const symbol = `${marketPrefix(code)}${String(code || "").replace(/\D/g, "")}`;
-  const response = await fetchWithTimeout(`https://qt.gtimg.cn/q=${symbol}`, {
-    headers: { "user-agent": "Mozilla/5.0", referer: "https://gu.qq.com/" },
-  });
-  if (!response.ok) throw new Error(`Tencent quote ${response.status}`);
-  const buffer = await response.arrayBuffer();
-  const text = new TextDecoder("gbk").decode(buffer);
-  const body = (text.split('"')[1] || "").split("~");
-  if (body.length < 53) throw new Error("Tencent quote empty");
+function snapshotLiveContract(snapshot, market, code, current = new Date()) {
+  const candidate = snapshotCandidate(snapshot, market, code);
+  if (!candidate) throw new Error("candidate is not present in the published snapshot");
+  const quote = strictSnapshotQuote(candidate, market);
+  const quotePrice = quote.price;
+  const sourceAsOf = quote.source_as_of;
+  const fetchedAt = quote.fetched_at;
+  const sourceEpoch = Date.parse(sourceAsOf || "");
+  const nowEpoch = current instanceof Date ? current.getTime() : new Date(current).getTime();
+  const latencySeconds = Number.isFinite(sourceEpoch) && Number.isFinite(nowEpoch)
+    ? Math.max(0, Math.floor((nowEpoch - sourceEpoch) / 1000))
+    : null;
+  const session = quote.session || "unknown";
+  const closed = session === "closed";
+  const changePct = typeof quote.change_pct === "number" && Number.isFinite(quote.change_pct)
+    ? quote.change_pct
+    : null;
+  const previousClose = typeof quote.previous_close === "number"
+    && Number.isFinite(quote.previous_close)
+    && quote.previous_close > 0
+    ? quote.previous_close
+    : null;
+  const volume = typeof quote.volume === "number" && Number.isFinite(quote.volume) && quote.volume >= 0
+    ? quote.volume
+    : null;
+  const snapshotState = snapshotFreshness(snapshot.generated_at, current).freshness_state;
+
   return {
-    code: String(code || ""),
-    name: body[1] || "",
-    price: num(body[3]),
-    previous_close: num(body[4]),
-    change_pct: num(body[32]),
-    high: num(body[33]),
-    low: num(body[34]),
-    volume: num(body[36]),
-    amount: num(body[37]),
-    source_as_of: isoFromCnTimestamp(body[30]),
-    source: "Tencent realtime quote",
-  };
-}
-
-async function tencentAKline(code, limit = 70) {
-  const symbol = `${marketPrefix(code)}${String(code || "").replace(/\D/g, "")}`;
-  const target = new URL("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get");
-  target.searchParams.set("param", `${symbol},day,,,${limit},qfq`);
-  const response = await fetchWithTimeout(target, {
-    headers: { "user-agent": "Mozilla/5.0", referer: "https://gu.qq.com/" },
-  });
-  if (!response.ok) throw new Error(`Tencent kline ${response.status}`);
-  const payload = await response.json();
-  const data = ((payload.data || {})[symbol] || {});
-  const rows = (data.qfqday || data.day || []).map((parts) => ({
-    date: parts[0],
-    open: num(parts[1]),
-    close: num(parts[2]),
-    high: num(parts[3]),
-    low: num(parts[4]),
-    volume: num(parts[5]),
-  }));
-  return rows.filter((row) => row.date && row.close > 0);
-}
-
-async function aShareLive(code) {
-  let data = {};
-  let kline = [];
-  let source = "Eastmoney realtime quote";
-  let sourceAsOf = null;
-  try {
-    const [quotePayload, rows] = await Promise.all([
-      eastmoneyJson("https://push2.eastmoney.com/api/qt/stock/get", {
-        secid: eastmoneySecid(code),
-        fields: "f43,f44,f45,f46,f47,f48,f57,f58,f60,f86,f168,f170",
-        fltt: "2",
-      }),
-      aShareKline(code),
-    ]);
-    data = quotePayload.data || {};
-    kline = rows;
-    sourceAsOf = isoFromEpoch(data.f86);
-  } catch {
-    const [quote, rows] = await Promise.all([tencentAQuote(code), tencentAKline(code)]);
-    data = {
-      f43: quote.price,
-      f47: quote.volume,
-      f57: quote.code,
-      f58: quote.name,
-      f60: quote.previous_close,
-      f170: quote.change_pct,
-    };
-    kline = rows;
-    source = quote.source;
-    sourceAsOf = quote.source_as_of;
-  }
-  const latest = kline[kline.length - 1] || {};
-  const price = num(data.f43) || num(latest.close);
-  if (price <= 0) throw new Error("A-share quote has no valid price");
-  const fetchedAt = nowCN();
-  const session = aShareSession();
-  return liveContract({
-    market: "a_share",
-    code: String(data.f57 || code),
-    name: data.f58 || "",
-    price,
-    current_price: price,
-    realtime_price: price,
-    change_pct: num(data.f170) || num(latest.change_pct),
-    current_change_pct: num(data.f170) || num(latest.change_pct),
-    volume: num(data.f47) || num(latest.volume),
-    volume_unit: "lot",
-    previous_close: num(data.f60),
-    provider: source === "Tencent realtime quote" ? "tencent" : "eastmoney",
-    session,
-    session_label: sessionLabel(session),
-    price_kind: session === "pre" ? "pre_market" : session === "closed" ? "last_close" : "regular",
-    source,
-    source_as_of: sourceAsOf,
-    fetched_at: fetchedAt,
-    kline,
-  });
-}
-
-async function yahooLive(symbol, market) {
-  const target = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m&includePrePost=true&events=div%2Csplits`;
-  const response = await fetchWithTimeout(target, { headers: { "user-agent": "Mozilla/5.0", accept: "application/json" } });
-  if (!response.ok) throw new Error(`Yahoo ${response.status}`);
-  const payload = await response.json();
-  const result = (((payload.chart || {}).result || [])[0]) || {};
-  const meta = result.meta || {};
-  const quote = (((result.indicators || {}).quote || [])[0]) || {};
-  const timestamps = result.timestamp || [];
-  const closes = quote.close || [];
-  const volumes = quote.volume || [];
-  let price = 0;
-  let sourceEpoch = 0;
-  let latestVolume = 0;
-  for (let index = closes.length - 1; index >= 0; index -= 1) {
-    const close = num(closes[index]);
-    const timestamp = num(timestamps[index]);
-    if (close > 0 && timestamp > 0) {
-      price = close;
-      sourceEpoch = timestamp;
-      latestVolume = num(volumes[index]);
-      break;
-    }
-  }
-  if (!price) {
-    price = num(meta.regularMarketPrice);
-    sourceEpoch = num(meta.regularMarketTime);
-  }
-  if (!price || !sourceEpoch) throw new Error("Yahoo intraday quote is empty");
-  const previous = num(meta.chartPreviousClose) || num(meta.previousClose) || num(meta.regularMarketPreviousClose);
-  const changePct = previous ? ((price - previous) / previous) * 100 : 0;
-  const sourceAsOf = isoFromEpoch(sourceEpoch);
-  const fetchedAt = nowCN();
-  const session = yahooSession(meta);
-  return liveContract({
+    contract_version: "live-quote-v1",
+    ok: true,
+    data_mode: "SCHEDULED_SNAPSHOT",
+    quote_mode: "SCHEDULED_SNAPSHOT",
     market,
-    code: symbol,
-    name: meta.shortName || meta.longName || "",
-    price,
-    current_price: price,
-    realtime_price: price,
+    code,
+    name: candidate.name || "",
+    price: quotePrice,
+    current_price: quotePrice,
+    realtime_price: quotePrice,
     change_pct: changePct,
     current_change_pct: changePct,
-    previous_close: previous,
-    volume: num(meta.regularMarketVolume) || latestVolume,
-    volume_unit: "share",
-    provider: "yahoo_finance",
-    session,
-    session_label: sessionLabel(session),
-    price_kind: yahooPriceKind(meta, sourceEpoch),
-    source: "Yahoo Finance 1m includePrePost",
+    previous_close: previousClose,
+    volume,
+    volume_unit: quote.volume_unit,
+    currency: quote.currency || candidate.currency || null,
+    provider: "github_actions_snapshot",
+    provider_class: "SCHEDULED_SNAPSHOT",
+    source_tier: "scheduled_public_snapshot",
+    primary_provider: "GITHUB_ACTIONS_SNAPSHOT",
+    source: quote.source || "Published GitHub Actions snapshot",
     source_as_of: sourceAsOf,
     fetched_at: fetchedAt,
-    kline: [],
-  });
-}
-
-async function publicFallbackLive(market, code, reason) {
-  const payload = market === "a_share"
-    ? await aShareLive(code)
-    : await yahooLive(code, market === "hk" ? "hk" : "us");
-  return bestEffortContract(payload, reason);
-}
-
-async function liveStock(env, market, code) {
-  const key = `${market}:${code}`;
-  const cached = liveQuoteCache.get(key);
-  if (cached && cached.expires_at > Date.now()) return cached.payload;
-  if (cached) liveQuoteCache.delete(key);
-  let payload;
-  try {
-    payload = await futuGatewayLive(env, market, code);
-  } catch (error) {
-    const reason = String(error?.message || "gateway unavailable").slice(0, 80);
-    payload = await publicFallbackLive(market, code, reason);
-  }
-  liveQuoteCache.set(key, { expires_at: Date.now() + LIVE_CACHE_TTL_MS, payload });
-  return payload;
+    updated_at: sourceAsOf || fetchedAt,
+    session,
+    session_label: quote.session_label || sessionLabel(session),
+    price_kind: quote.price_kind || (closed ? "last_close" : "scheduled_snapshot"),
+    quote_status: closed ? "LAST_CLOSE" : "DELAYED",
+    freshness: closed ? "last_close" : "scheduled_snapshot",
+    latency_seconds: latencySeconds,
+    is_realtime: false,
+    is_stale: quote.stale === true || snapshotState === "stale" || snapshotState === "unknown",
+    realtime_guaranteed: false,
+    fallback_reason: null,
+    snapshot_as_of: snapshot.generated_at || null,
+    snapshot_generated_at: snapshot.generated_at || null,
+    snapshot_key: snapshot.snapshot_key || null,
+    next_refresh: nextScheduledRefresh(current),
+    cache_ttl_seconds: LIVE_CACHE_TTL_MS / 1000,
+    kline: Array.isArray(candidate.kline) ? candidate.kline : [],
+  };
 }
 
 async function handleApi(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/api/status") {
     const latest = await latestPick(env);
-    const freshness = snapshotFreshness(latest ? latest.generated_at : null);
+    const currentTime = nowCN();
+    const current = new Date(currentTime);
+    const freshness = snapshotFreshness(latest ? latest.generated_at : null, current);
     return json({
       ok: true,
-      time: nowCN(),
+      time: currentTime,
       platform: "cloudflare-workers",
       snapshot_generation: "github-actions",
+      data_mode: "scheduled_snapshot",
+      quote_delivery_mode: "scheduled_snapshot",
+      device_dependency: false,
+      schedule_time_zone: SHANGHAI_TIME_ZONE,
+      schedule_primary_checkpoints: WEEKDAY_CHECKPOINTS.map(([hour, minute]) => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`),
+      schedule_fallback_checkpoints: FALLBACK_CHECKPOINTS.map(([hour, minute]) => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`),
       recompute_supported: false,
       has_latest: Boolean(latest),
       latest_path: latest ? "/data/picks/latest.json" : null,
@@ -917,10 +687,9 @@ async function handleApi(request, env) {
       model_version: latest ? latest.model_version || null : null,
       weights_version: latest ? latest.weights_version || null : null,
       universe_version: latest ? latest.universe_version || null : null,
-      realtime_gateway_configured: Boolean(env.REALTIME_GATEWAY_URL && env.QUOTE_GATEWAY_TOKEN),
-      realtime_primary_provider: "FUTU_OPEND",
-      realtime_fallback_provider_class: "PUBLIC_BEST_EFFORT",
       generated_at: latest ? latest.generated_at || null : null,
+      snapshot_as_of: latest ? latest.generated_at || null : null,
+      next_refresh: nextScheduledRefresh(current),
       snapshot_key: latest ? latest.snapshot_key || null : null,
       ...freshness,
     });
@@ -1007,30 +776,73 @@ async function handleApi(request, env) {
     if (!code) {
       return json(liveError("INVALID_CODE", "股票代码格式不合法", market, requestedCode), 400);
     }
+    let rateLimitStatus = env.LIVE_RATE_LIMITER ? "enforced" : "not_configured";
     if (env.LIVE_RATE_LIMITER) {
-      const actor = request.headers.get("cf-connecting-ip") || "anonymous";
-      const limited = await env.LIVE_RATE_LIMITER.limit({ key: `${actor}:${market}:${code}` });
-      if (!limited.success) {
-        return json(
-          liveError("RATE_LIMITED", "行情刷新过于频繁，请稍后重试", market, code),
-          429,
-          { "retry-after": "60" },
-        );
+      try {
+        const actor = request.headers.get("cf-connecting-ip") || "anonymous";
+        const limited = await env.LIVE_RATE_LIMITER.limit({ key: `${actor}:${market}:${code}` });
+        if (!limited || limited.success !== true) {
+          return json(
+            liveError("RATE_LIMITED", "行情刷新过于频繁，请稍后重试", market, code, {
+              rate_limit_status: "limited",
+            }),
+            429,
+            { "retry-after": "60" },
+          );
+        }
+      } catch {
+        rateLimitStatus = "unavailable_fail_open";
       }
     }
-    const latest = await latestPick(env);
+    let latest;
+    try {
+      latest = await latestPick(env);
+    } catch {
+      return json(
+        liveError("LATEST_SNAPSHOT_UNAVAILABLE", "无法读取当前候选池", market, code, {
+          rate_limit_status: rateLimitStatus,
+          asset_status: "unavailable",
+        }),
+        503,
+      );
+    }
     if (!latest) {
-      return json(liveError("LATEST_SNAPSHOT_UNAVAILABLE", "无法校验当前候选池", market, code), 503);
+      return json(
+        liveError("LATEST_SNAPSHOT_UNAVAILABLE", "无法校验当前候选池", market, code, {
+          rate_limit_status: rateLimitStatus,
+          asset_status: "missing",
+        }),
+        503,
+      );
     }
     if (!snapshotCandidateCodes(latest, market).has(code)) {
-      return json(liveError("LIVE_CODE_NOT_IN_CURRENT_SNAPSHOT", "仅允许查询当前快照候选股", market, code), 404);
+      return json(
+        liveError("LIVE_CODE_NOT_IN_CURRENT_SNAPSHOT", "仅允许查询当前快照候选股", market, code, {
+          rate_limit_status: rateLimitStatus,
+          snapshot_as_of: latest.generated_at || null,
+          snapshot_generated_at: latest.generated_at || null,
+          snapshot_key: latest.snapshot_key || null,
+        }),
+        404,
+      );
     }
     try {
-      const payload = await liveStock(env, market, code);
+      const payload = {
+        ...snapshotLiveContract(latest, market, code),
+        rate_limit_status: rateLimitStatus,
+      };
       return json(payload);
     } catch (error) {
-      const detail = String(error && error.name === "AbortError" ? "upstream timeout" : error && error.message ? error.message : error);
-      return json({ ...liveError("REALTIME_UNAVAILABLE", "实时行情暂不可用", market, code), detail }, 502);
+      const detail = String(error && error.message ? error.message : error);
+      return json({
+        ...liveError("SNAPSHOT_QUOTE_UNAVAILABLE", "已发布快照没有可用行情", market, code, {
+          rate_limit_status: rateLimitStatus,
+          snapshot_as_of: latest.generated_at || null,
+          snapshot_generated_at: latest.generated_at || null,
+          snapshot_key: latest.snapshot_key || null,
+        }),
+        detail,
+      }, 502);
     }
   }
 
@@ -1044,10 +856,25 @@ export default {
 
     const url = new URL(request.url);
     let response;
-    if (url.pathname.startsWith("/api/")) {
-      response = await handleApi(request, env);
-    } else {
-      response = await env.ASSETS.fetch(request);
+    try {
+      if (url.pathname.startsWith("/api/")) {
+        response = await handleApi(request, env);
+      } else {
+        response = await env.ASSETS.fetch(request);
+      }
+    } catch {
+      if (url.pathname === "/api/live") {
+        response = json(liveError("LATEST_SNAPSHOT_UNAVAILABLE", "无法读取当前候选池", null, null, {
+          asset_status: "unavailable",
+        }), 503);
+      } else if (url.pathname.startsWith("/api/")) {
+        response = json(apiAssetError(), 503);
+      } else {
+        response = new Response("Service unavailable", {
+          status: 503,
+          headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+        });
+      }
     }
     return withSecurityHeaders(response);
   },

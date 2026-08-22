@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import json
+import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
 import server
-from scripts.validate_snapshot import validate_snapshot
+from scripts.validate_snapshot import validate_snapshot, validate_snapshot_file
 from tests.test_selector_v2 import fixture_candidate
 
 
@@ -18,6 +21,13 @@ def snapshot_fixture() -> dict:
         row["symbol"] = code
         row["market_key"] = market_key
         row.pop("candidate_lineage", None)
+        row["realtime"].update(
+            {
+                "price": row["price"],
+                "source_as_of": "2026-08-19T16:00:00+08:00",
+                "volume_unit": "lot" if market_key == "a_share" else "share",
+            }
+        )
         markets[market_key] = {
             "key": market_key,
             "label": market_key,
@@ -33,6 +43,7 @@ def snapshot_fixture() -> dict:
     return {
         "model_version": "legacy-fixture",
         "generated_at": "2026-08-19T16:30:00+08:00",
+        "snapshot_key": "2026-08-19_2026-08-19_163000.json",
         "market": {"risk": "normal", "items": []},
         "markets": markets,
     }
@@ -44,7 +55,7 @@ class SnapshotContractTests(unittest.TestCase):
             server.os.environ,
             {
                 "AUTOMATION_TRIGGER": "schedule",
-                "SCHEDULED_SLOT": "2026-08-21T23:58:00+08:00",
+                "SCHEDULED_SLOT": "2026-08-21T20:17:00+08:00",
                 "GENERATION_ATTEMPT": "2",
             },
             clear=False,
@@ -54,7 +65,7 @@ class SnapshotContractTests(unittest.TestCase):
             snapshot["automation"],
             {
                 "trigger": "schedule",
-                "scheduled_slot": "2026-08-21T23:58:00+08:00",
+                "scheduled_slot": "2026-08-21T20:17:00+08:00",
                 "generation_attempt": 2,
             },
         )
@@ -183,6 +194,154 @@ class SnapshotContractTests(unittest.TestCase):
         errors = validate_snapshot(enriched)
         self.assertIn("global_decision.market_states.hk understates derived DEGRADED coverage", errors)
         self.assertIn("global_decision.market_states.hk.reason_codes are incomplete", errors)
+
+    def test_snapshot_validator_requires_realtime_price_for_published_live_candidate(self) -> None:
+        for fallback_field, fallback_value in (
+            ("current_price", "12.50"),
+            ("entry_price", 12.5),
+            ("price", 12.5),
+            ("kline", [{"close": "12.50"}]),
+        ):
+            with self.subTest(fallback_field=fallback_field):
+                enriched = server.enrich_snapshot_v2(snapshot_fixture())
+                candidate = enriched["markets"]["a_share"]["decision"]["primary"]
+                candidate.pop("realtime", None)
+                candidate[fallback_field] = fallback_value
+
+                errors = validate_snapshot(enriched)
+
+                self.assertIn(
+                    "a_share:603228 realtime quote is required for live publication",
+                    errors,
+                )
+
+    def test_snapshot_validator_rejects_live_candidate_without_a_positive_price(self) -> None:
+        for invalid in (0, -1, "12.50", True, None):
+            with self.subTest(invalid=invalid):
+                enriched = server.enrich_snapshot_v2(snapshot_fixture())
+                candidate = enriched["markets"]["a_share"]["decision"]["primary"]
+                candidate["realtime"]["price"] = invalid
+
+                errors = validate_snapshot(enriched)
+
+                self.assertIn(
+                    "a_share:603228 realtime.price must be positive",
+                    errors,
+                )
+
+    def test_snapshot_validator_checks_realtime_publication_metadata(self) -> None:
+        cases = {
+            "source_as_of": (
+                "not-a-time",
+                "a_share:603228 realtime.source_as_of must be a timezone-aware ISO datetime",
+            ),
+            "fetched_at": (
+                "2026-08-19T16:10:00",
+                "a_share:603228 realtime.fetched_at must be a timezone-aware ISO datetime",
+            ),
+            "volume_unit": (
+                "contracts",
+                "a_share:603228 realtime.volume_unit must be lot or share",
+            ),
+        }
+        for field, (invalid_value, expected_error) in cases.items():
+            with self.subTest(field=field):
+                enriched = server.enrich_snapshot_v2(snapshot_fixture())
+                candidate = enriched["markets"]["a_share"]["decision"]["primary"]
+                candidate["realtime"][field] = invalid_value
+                self.assertIn(expected_error, validate_snapshot(enriched))
+
+    def test_snapshot_validator_rejects_old_price_only_candidate_for_latest_publication(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        candidate = enriched["markets"]["a_share"]["decision"]["primary"]
+        candidate.pop("current_price", None)
+        candidate.pop("entry_price", None)
+        candidate.pop("realtime", None)
+        candidate["price"] = "12.50"
+        candidate["kline"] = []
+
+        errors = validate_snapshot(enriched)
+
+        self.assertIn("a_share:603228 realtime quote is required for live publication", errors)
+
+    def test_snapshot_validator_allows_a_market_without_live_candidates(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        decision = enriched["markets"]["us"]["decision"]
+        decision["primary"] = None
+        decision["blocked_candidate"] = None
+        decision["watchlist"] = []
+        global_decision = enriched["global_decision"]
+        for field in ("primary", "research_priority"):
+            candidate = global_decision.get(field)
+            if isinstance(candidate, dict) and candidate.get("market") == "us":
+                global_decision[field] = None
+
+        errors = validate_snapshot(enriched)
+
+        self.assertFalse(any(error.startswith("us:") and "live candidate" in error for error in errors))
+
+    def test_snapshot_validator_checks_unique_global_live_candidate(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        research = enriched["global_decision"]["research_priority"]
+        research.update(
+            {
+                "market": "us",
+                "code": "GLOBAL",
+                "calendar_id": enriched["markets"]["us"]["trade_window"]["calendar_id"],
+                "entry_trade_date": enriched["next_trade_dates"]["us"],
+                "forecast_end_trade_date": enriched["forecast_end_dates"]["us"],
+                "entry_price": 0,
+            }
+        )
+        for field in ("current_price", "price", "realtime", "kline"):
+            research.pop(field, None)
+
+        errors = validate_snapshot(enriched)
+
+        self.assertIn(
+            "us:GLOBAL realtime quote is required for live publication",
+            errors,
+        )
+
+    def test_snapshot_validator_requires_safe_snapshot_key(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        for invalid in (None, "", "latest.json", "../escape.json", "nested/file.json", "bad\\file.json"):
+            with self.subTest(invalid=invalid):
+                enriched["snapshot_key"] = invalid
+                self.assertIn(
+                    "snapshot_key must be a safe immutable JSON filename",
+                    validate_snapshot(enriched),
+                )
+
+    def test_snapshot_validator_requires_object_watchlist_rows(self) -> None:
+        cases = (
+            ({"603228": {}}, "markets.a_share.decision.watchlist must be a list"),
+            ([{"code": "603228"}, "bad-row"], "markets.a_share.decision.watchlist[1] must be an object"),
+        )
+        for watchlist, expected in cases:
+            with self.subTest(watchlist=watchlist):
+                enriched = server.enrich_snapshot_v2(snapshot_fixture())
+                enriched["markets"]["a_share"]["decision"]["watchlist"] = watchlist
+                self.assertIn(expected, validate_snapshot(enriched))
+
+    def test_snapshot_file_validator_requires_matching_immutable_file(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        encoded = json.dumps(enriched, ensure_ascii=False, indent=2) + "\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            picks = pathlib.Path(temporary)
+            latest = picks / "latest.json"
+            immutable = picks / enriched["snapshot_key"]
+            latest.write_text(encoded, encoding="utf-8")
+
+            missing_errors = validate_snapshot_file(latest)
+            self.assertIn("immutable snapshot file is missing", missing_errors)
+
+            immutable.write_text(encoded, encoding="utf-8")
+            self.assertEqual(validate_snapshot_file(latest), [])
+
+            immutable.write_text(encoded.replace("legacy-fixture", "different-model"), encoding="utf-8")
+            mismatch_errors = validate_snapshot_file(latest)
+            self.assertIn("latest snapshot and immutable snapshot bytes must match", mismatch_errors)
 
 
 if __name__ == "__main__":

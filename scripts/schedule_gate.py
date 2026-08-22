@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-import pathlib
 import sys
 import time
 import urllib.request
@@ -12,23 +11,13 @@ from zoneinfo import ZoneInfo
 
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
-SLOTS = [
-    (8, 58),
-    (9, 58),
-    (10, 58),
-    (12, 58),
-    (13, 58),
-    (14, 58),
-    (21, 28),
-    (23, 58),
-]
+SLOTS = [(8, 17), (20, 17)]
 EARLY_GRACE_SECONDS = 5 * 60
 # GitHub scheduled workflows are not precise timers. They can be delayed by
 # tens of minutes, and occasionally longer when GitHub Actions is busy. Treat a
 # delayed start as belonging to the latest intended checkpoint instead of
 # silently skipping the trading snapshot.
 MAX_DELAY_SECONDS = 4 * 60 * 60
-DEFAULT_LATEST_PATH = pathlib.Path("data/picks/latest.json")
 RECOVERABLE_SOURCE_REASON_CODES = {
     "BROAD_POOL_BELOW_MINIMUM",
     "MERGED_POOL_EMPTY",
@@ -51,7 +40,7 @@ def as_cn_time(value: dt.datetime) -> dt.datetime:
 def select_checkpoint(now: dt.datetime) -> dt.datetime | None:
     """Return the latest intended weekday checkpoint, including yesterday.
 
-    Looking back one calendar day is deliberate: the Friday 23:58 checkpoint
+    Looking back one calendar day is deliberate: the Friday 20:17 checkpoint
     may not start until early Saturday when GitHub Actions is congested.
     """
     now = as_cn_time(now)
@@ -98,19 +87,47 @@ def snapshot_data_source_recovery_reasons(snapshot: dict) -> list[str]:
         return ["SNAPSHOT_NOT_AN_OBJECT"]
 
     reasons: list[str] = []
-    markets = snapshot.get("markets") or {}
-    a_share = markets.get("a_share") or {}
-    quote_health = a_share.get("quote_health") or {}
-    pool_health = a_share.get("pool_health") or {}
-    published_codes = {str(code) for code in list(pool_health.get("reason_codes") or [])}
+    markets = snapshot.get("markets")
+    if not isinstance(markets, dict):
+        return ["MARKETS_MISSING_OR_INVALID"]
+
+    a_share = markets.get("a_share")
+    a_share = a_share if isinstance(a_share, dict) else {}
+    pool_health = a_share.get("pool_health")
+    pool_health = pool_health if isinstance(pool_health, dict) else {}
+    pool_reason_codes = pool_health.get("reason_codes")
+    published_codes = (
+        {str(code) for code in pool_reason_codes}
+        if isinstance(pool_reason_codes, list)
+        else set()
+    )
     reasons.extend(sorted(published_codes & RECOVERABLE_SOURCE_REASON_CODES))
 
     for market in ("a_share", "hk", "us"):
-        section = markets.get(market) or {}
-        quote_health = section.get("quote_health") or {}
+        section = markets.get(market)
+        if not isinstance(section, dict):
+            reasons.append(f"{market.upper()}_MARKET_MISSING_OR_INVALID")
+            continue
+        quote_health = section.get("quote_health")
+        if not isinstance(quote_health, dict) or not quote_health:
+            reasons.append(f"{market.upper()}_QUOTE_HEALTH_UNKNOWN")
+            continue
         quote_status = str(quote_health.get("status") or "").lower()
         requested_count = quote_health.get("requested_count")
         quote_coverage = quote_health.get("quote_coverage")
+        reason_codes = quote_health.get("reason_codes")
+        health_shape_known = (
+            quote_status in {"available", "partial", "unavailable", "failed"}
+            and isinstance(requested_count, (int, float))
+            and not isinstance(requested_count, bool)
+            and requested_count >= 0
+            and isinstance(quote_coverage, (int, float))
+            and not isinstance(quote_coverage, bool)
+            and 0 <= quote_coverage <= 1
+            and isinstance(reason_codes, list)
+        )
+        if not health_shape_known:
+            reasons.append(f"{market.upper()}_QUOTE_HEALTH_UNKNOWN")
         if quote_status in {"unavailable", "failed"}:
             reasons.append(f"{market.upper()}_QUOTE_{quote_status.upper()}")
         elif quote_status == "partial" and (
@@ -124,10 +141,11 @@ def snapshot_data_source_recovery_reasons(snapshot: dict) -> list[str]:
             and quote_coverage < 0.8
         ):
             reasons.append(f"{market.upper()}_QUOTE_COVERAGE_BELOW_RECOVERY_THRESHOLD")
-        quote_codes = {str(code) for code in list(quote_health.get("reason_codes") or [])}
+        quote_codes = {str(code) for code in reason_codes} if isinstance(reason_codes, list) else set()
         reasons.extend(sorted(quote_codes & RECOVERABLE_SOURCE_REASON_CODES))
 
-        stats = section.get("stats") or {}
+        stats = section.get("stats")
+        stats = stats if isinstance(stats, dict) else {}
         raw_pool_size = stats.get("raw_pool_size")
         scored_size = stats.get("scored_size")
         if (
@@ -160,26 +178,17 @@ def load_json_url(url: str) -> dict:
     return payload
 
 
-def load_json_path(path: pathlib.Path) -> dict:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("local latest snapshot must be a JSON object")
-    return payload
-
-
 def published_checkpoint_source(
     slot: dt.datetime,
     *,
     status_url: str | None,
-    latest_path: pathlib.Path | None,
     url_loader: Callable[[str], dict] = load_json_url,
-    path_loader: Callable[[pathlib.Path], dict] = load_json_path,
 ) -> str | None:
-    """Return the first source proving a slot has already been generated.
+    """Return live only when production proves a healthy slot is published.
 
-    The live endpoint is authoritative. The checked-out latest snapshot is a
-    fallback for a temporary status-endpoint outage and also protects manual
-    reruns before a previous archival commit is visible.
+    A checked-out latest file only proves that data reached the repository. It
+    does not prove that the corresponding deployment succeeded, so local data
+    must never suppress a scheduled recovery run.
     """
     if status_url:
         try:
@@ -194,20 +203,6 @@ def published_checkpoint_source(
                 )
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             print(f"Live checkpoint check unavailable: {exc}")
-
-    if latest_path:
-        try:
-            local_snapshot = path_loader(latest_path)
-            if snapshot_covers_checkpoint(local_snapshot, slot):
-                reasons = snapshot_data_source_recovery_reasons(local_snapshot)
-                if not reasons:
-                    return "local"
-                print(
-                    "Local snapshot covers the checkpoint but needs source recovery: "
-                    + ",".join(reasons)
-                )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            print(f"Local checkpoint check unavailable: {exc}")
     return None
 
 
@@ -263,12 +258,9 @@ def main() -> int:
     delta = (now - nearest).total_seconds()
     if checkpoint_is_within_window(now, nearest):
         status_url = os.environ.get("SCHEDULE_GATE_STATUS_URL") or None
-        latest_path_value = os.environ.get("SCHEDULE_GATE_LATEST_PATH", str(DEFAULT_LATEST_PATH))
-        latest_path = pathlib.Path(latest_path_value) if latest_path_value else None
         published_source = published_checkpoint_source(
             nearest,
             status_url=status_url,
-            latest_path=latest_path,
         )
         if published_source:
             write_output(

@@ -4,14 +4,11 @@ on:
   push:
     branches: [main]
   schedule:
-    # Beijing primary checkpoints:
-    # 08:58, 09:58, 10:58, 12:58, 13:58, 14:58, 21:28, 23:58.
-    - cron: "58 0,1,2,4,5,6,15 * * 1-5"
-    - cron: "28 13 * * 1-5"
-    # Thirty-minute fallbacks. The final 00:28 fallback intentionally runs on
-    # UTC Friday so schedule_gate can associate it with Friday 23:58 Beijing.
-    - cron: "28 1,2,3,5,6,7,16 * * 1-5"
-    - cron: "58 13 * * 1-5"
+    # Beijing 08:17 and 20:17 primary checkpoints (UTC+8).
+    - cron: "17 0,12 * * 1-5"
+    # Thirty-minute fallback invocations. schedule_gate skips a fallback when
+    # the corresponding primary snapshot is already healthy and published.
+    - cron: "47 0,12 * * 1-5"
   workflow_dispatch:
 
 permissions: {}
@@ -45,10 +42,9 @@ jobs:
         if: github.event_name == 'schedule'
         run: python scripts/schedule_gate.py
         env:
-          # The full latest payload carries quote/pool health. A timestamp-only
-          # status response cannot tell a fallback to retry a degraded source.
+          # Only deployed production state may suppress a recovery run. A
+          # checked-out latest.json is not proof that deployment succeeded.
           SCHEDULE_GATE_STATUS_URL: https://xuangu.alixjd.com/api/latest
-          SCHEDULE_GATE_LATEST_PATH: data/picks/latest.json
 
       - uses: actions/setup-node@v4
         if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
@@ -204,7 +200,63 @@ jobs:
         if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: npm run build
 
+      - name: Capture exact production rollback target
+        id: rollback_target
+        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          npx --no-install wrangler deployments status --name xuangu --json \
+            > "${RUNNER_TEMP}/rollback-target-deployment.json"
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import urllib.request
+          import uuid
+
+          runner_temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          deployment_path = runner_temp / "rollback-target-deployment.json"
+          deployment = json.loads(deployment_path.read_text(encoding="utf-8"))
+          versions = deployment.get("versions")
+          if not isinstance(versions, list):
+              raise SystemExit("production deployment does not expose a versions list")
+          if (
+              len(versions) != 1
+              or not isinstance(versions[0], dict)
+              or not isinstance(versions[0].get("percentage"), (int, float))
+              or float(versions[0]["percentage"]) != 100.0
+          ):
+              raise SystemExit("refusing deploy without one exact 100% rollback version")
+          version_id = str(versions[0].get("version_id") or "")
+          try:
+              uuid.UUID(version_id)
+          except (ValueError, AttributeError):
+              raise SystemExit(f"invalid rollback version id: {version_id!r}")
+
+          request = urllib.request.Request(
+              "https://xuangu.alixjd.com/api/latest",
+              headers={
+                  "Accept": "application/json",
+                  "Cache-Control": "no-cache",
+                  "User-Agent": "xuangu-deploy-rollback-capture/1.0",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=15) as response:
+              snapshot = json.loads(response.read().decode("utf-8"))
+          if not isinstance(snapshot, dict) or not snapshot.get("snapshot_key"):
+              raise SystemExit("production rollback snapshot is unavailable")
+          (runner_temp / "rollback-target-latest.json").write_text(
+              json.dumps(snapshot, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+              encoding="utf-8",
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version_id={version_id}\n")
+          PY
+
       - name: Deploy Worker
+        id: deploy_worker
         if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: >-
           npx wrangler deploy
@@ -213,6 +265,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Verify complete deployed contract
+        id: verify_deployment
         if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: >-
           python scripts/verify_deployment.py public/data/picks/latest.json
@@ -220,6 +273,69 @@ jobs:
           --attempts 8
           --delay-seconds 8
           --timeout-seconds 15
+
+      - name: Roll back failed deployment verification
+        if: ${{ failure() && steps.deploy_worker.outcome == 'success' && steps.verify_deployment.outcome == 'failure' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          EXPECTED_ROLLBACK_VERSION: ${{ steps.rollback_target.outputs.version_id }}
+        run: |
+          set -euo pipefail
+          npx --no-install wrangler rollback "${EXPECTED_ROLLBACK_VERSION}" \
+            --name xuangu \
+            --yes \
+            --message "rollback failed github:${{ github.sha }} run:${{ github.run_id }}"
+          npx --no-install wrangler deployments status --name xuangu --json \
+            > "${RUNNER_TEMP}/rollback-result-deployment.json"
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import time
+          from scripts.verify_deployment import fetch_json, snapshot_sha256
+
+          deployment = json.loads(
+              (pathlib.Path(os.environ["RUNNER_TEMP"]) / "rollback-result-deployment.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          versions = deployment.get("versions")
+          expected = os.environ["EXPECTED_ROLLBACK_VERSION"]
+          if (
+              not isinstance(versions, list)
+              or len(versions) != 1
+              or not isinstance(versions[0], dict)
+              or versions[0].get("version_id") != expected
+              or not isinstance(versions[0].get("percentage"), (int, float))
+              or float(versions[0]["percentage"]) != 100.0
+          ):
+              raise SystemExit("rollback did not restore the exact previous version at 100%")
+
+          expected_snapshot = json.loads(
+              (pathlib.Path(os.environ["RUNNER_TEMP"]) / "rollback-target-latest.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          expected_digest = snapshot_sha256(expected_snapshot)
+          last_error = "rollback endpoint did not converge"
+          for attempt in range(1, 9):
+              try:
+                  live = fetch_json("https://xuangu.alixjd.com/api/latest", timeout=15)
+                  if (
+                      live.get("snapshot_key") == expected_snapshot.get("snapshot_key")
+                      and live.get("generated_at") == expected_snapshot.get("generated_at")
+                      and snapshot_sha256(live) == expected_digest
+                  ):
+                      print("Rollback restored the exact previous snapshot identity.")
+                      break
+                  last_error = "snapshot identity or digest differs from rollback target"
+              except (OSError, ValueError, TypeError) as exc:
+                  last_error = str(exc)
+              if attempt < 8:
+                  time.sleep(8)
+          else:
+              raise SystemExit(f"rollback snapshot identity verification failed: {last_error}")
+          PY
 
   archive:
     needs: deploy

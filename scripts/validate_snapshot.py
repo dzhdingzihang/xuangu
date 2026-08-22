@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import math
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -17,6 +19,7 @@ VALID_MODEL_STATUSES = {"available", "unavailable"}
 VALID_CANDIDATE_STATUSES = {"ranked", "rejected", "unavailable", "not_applicable"}
 VALID_EXECUTABLE_SCORE_KINDS = {"TEN_DAY_EXPECTED_NET_UTILITY"}
 STATE_SEVERITY = {"READY": 0, "DEGRADED": 1, "BLOCKED": 2}
+VALID_VOLUME_UNITS = {"lot", "share"}
 
 
 def finite_number(value) -> bool:
@@ -31,8 +34,118 @@ def strict_boolean(value) -> bool:
     return type(value) is bool
 
 
+def positive_number(value) -> bool:
+    """Match the Worker's strict JSON-number quote contract."""
+
+    return finite_number(value) and value > 0
+
+
+def timezone_aware_iso_datetime(value) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def safe_snapshot_key(value) -> bool:
+    if not isinstance(value, str) or not value or value == "latest.json":
+        return False
+    return (
+        value.endswith(".json")
+        and pathlib.PurePosixPath(value).name == value
+        and "/" not in value
+        and "\\" not in value
+    )
+
+
+def normalize_live_code(market_key: str, value) -> str | None:
+    """Normalize exactly the code shapes accepted by the snapshot-backed API."""
+
+    raw = str(value or "").strip().upper()
+    if market_key == "a_share":
+        clean = re.sub(r"^(?:SH|SZ)\.", "", raw)
+        return clean if re.fullmatch(r"\d{6}", clean) else None
+    if market_key == "hk":
+        match = re.fullmatch(r"(\d{1,5})\.HK", raw)
+        return f"{match.group(1).zfill(4)}.HK" if match else None
+    if market_key == "us":
+        return raw if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", raw) else None
+    return None
+
+
+def live_snapshot_candidates(snapshot: dict, market_key: str) -> list[tuple[str, dict]]:
+    """Return effective allow-listed candidates in Worker lookup order.
+
+    The first row for a normalized code wins, matching `/api/live`.  This also
+    prevents a compact duplicate global decision row from being required to
+    repeat every field already present on the market decision candidate.
+    """
+
+    markets = snapshot.get("markets") if isinstance(snapshot.get("markets"), dict) else {}
+    section = markets.get(market_key)
+    if not isinstance(section, dict) and market_key == "a_share":
+        section = {"decision": snapshot.get("decision") or {}}
+    decision = section.get("decision") if isinstance(section, dict) else {}
+    decision = decision if isinstance(decision, dict) else {}
+    watchlist = decision.get("watchlist")
+    rows = [
+        decision.get("primary"),
+        decision.get("blocked_candidate"),
+        *(watchlist if isinstance(watchlist, list) else []),
+    ]
+    global_decision = snapshot.get("global_decision")
+    if isinstance(global_decision, dict):
+        for field in ("primary", "research_priority"):
+            candidate = global_decision.get(field)
+            if isinstance(candidate, dict) and candidate.get("market") == market_key:
+                rows.append(candidate)
+
+    result: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    for candidate in rows:
+        if not isinstance(candidate, dict):
+            continue
+        code = normalize_live_code(market_key, candidate.get("code") or candidate.get("symbol"))
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        result.append((code, candidate))
+    return result
+
+
+def validate_live_candidate_publication(snapshot: dict) -> list[str]:
+    errors: list[str] = []
+    for market_key in ("a_share", "hk", "us"):
+        for code, candidate in live_snapshot_candidates(snapshot, market_key):
+            realtime = candidate.get("realtime")
+            if not isinstance(realtime, dict):
+                errors.append(f"{market_key}:{code} realtime quote is required for live publication")
+                continue
+            if not positive_number(realtime.get("price")):
+                errors.append(f"{market_key}:{code} realtime.price must be positive")
+            for field in ("source_as_of", "fetched_at"):
+                if not timezone_aware_iso_datetime(realtime.get(field)):
+                    errors.append(
+                        f"{market_key}:{code} realtime.{field} must be a timezone-aware ISO datetime"
+                    )
+            if realtime.get("volume_unit") not in VALID_VOLUME_UNITS:
+                errors.append(f"{market_key}:{code} realtime.volume_unit must be lot or share")
+    return errors
+
+
 def decision_candidates(decision: dict) -> list[dict]:
-    rows = [decision.get("primary"), decision.get("blocked_candidate"), *(decision.get("watchlist") or [])]
+    watchlist = decision.get("watchlist")
+    rows = [
+        decision.get("primary"),
+        decision.get("blocked_candidate"),
+        *(watchlist if isinstance(watchlist, list) else []),
+    ]
     result = []
     seen = set()
     for row in rows:
@@ -86,6 +199,8 @@ def derive_market_coverage_state(section: dict) -> tuple[str, list[str]]:
 
 def validate_snapshot(snapshot: dict) -> list[str]:
     errors: list[str] = []
+    if not safe_snapshot_key(snapshot.get("snapshot_key")):
+        errors.append("snapshot_key must be a safe immutable JSON filename")
     if snapshot.get("schema_version") != "selector-snapshot-v2":
         errors.append("schema_version must be selector-snapshot-v2")
     if snapshot.get("selector_mode") != "legacy_active_v2_dual_low_shadow":
@@ -184,7 +299,15 @@ def validate_snapshot(snapshot: dict) -> list[str]:
             errors.append(f"markets.{market_key}.trade_window entry does not match next_trade_dates")
         if trade_window.get("forecast_end_trade_date") != forecast_end_dates.get(market_key):
             errors.append(f"markets.{market_key}.trade_window end does not match forecast_end_dates")
-        for candidate in decision_candidates((markets[market_key] or {}).get("decision") or {}):
+        decision = (markets[market_key] or {}).get("decision") or {}
+        watchlist = decision.get("watchlist") if isinstance(decision, dict) else None
+        if not isinstance(watchlist, list):
+            errors.append(f"markets.{market_key}.decision.watchlist must be a list")
+        else:
+            for index, row in enumerate(watchlist):
+                if not isinstance(row, dict):
+                    errors.append(f"markets.{market_key}.decision.watchlist[{index}] must be an object")
+        for candidate in decision_candidates(decision if isinstance(decision, dict) else {}):
             code = candidate.get("code") or candidate.get("symbol")
             range_2d = candidate.get("estimated_2d_range")
             range_10d = candidate.get("estimated_10d_range")
@@ -358,6 +481,39 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                     errors.append(f"global_decision.market_states.{market_key}.reason_codes are incomplete")
                 if action == "REVIEW_EXECUTABLE_PICK" and published_state != "READY":
                     errors.append(f"REVIEW_EXECUTABLE_PICK requires market_states.{market_key}=READY")
+    errors.extend(validate_live_candidate_publication(snapshot))
+    return errors
+
+
+def validate_snapshot_file(path: pathlib.Path) -> list[str]:
+    """Validate both the snapshot payload and its immutable publication pair."""
+
+    try:
+        latest_bytes = path.read_bytes()
+    except OSError as exc:
+        return [f"latest snapshot file is unreadable: {exc}"]
+    try:
+        snapshot = json.loads(latest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return [f"latest snapshot JSON is invalid: {exc}"]
+    if not isinstance(snapshot, dict):
+        return ["latest snapshot JSON must be an object"]
+
+    errors = validate_snapshot(snapshot)
+    snapshot_key = snapshot.get("snapshot_key")
+    if not safe_snapshot_key(snapshot_key):
+        return errors
+    immutable_path = path.parent / snapshot_key
+    if not immutable_path.is_file():
+        errors.append("immutable snapshot file is missing")
+        return errors
+    try:
+        immutable_bytes = immutable_path.read_bytes()
+    except OSError as exc:
+        errors.append(f"immutable snapshot file is unreadable: {exc}")
+        return errors
+    if immutable_bytes != latest_bytes:
+        errors.append("latest snapshot and immutable snapshot bytes must match")
     return errors
 
 
@@ -366,10 +522,10 @@ def main() -> None:
     parser.add_argument("path", nargs="?", default="data/picks/latest.json")
     args = parser.parse_args()
     path = pathlib.Path(args.path)
-    snapshot = json.loads(path.read_text(encoding="utf-8"))
-    errors = validate_snapshot(snapshot)
+    errors = validate_snapshot_file(path)
     if errors:
         raise SystemExit("Snapshot validation failed:\n- " + "\n- ".join(errors))
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
     model = snapshot["analysis_models"]["dual_low"]
     print(
         f"Snapshot valid: {path} | dual_low={model.get('status')} "

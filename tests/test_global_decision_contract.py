@@ -157,7 +157,7 @@ class GlobalDecisionContractTests(unittest.TestCase):
 
     def test_builder_prediction_id_is_stable_for_the_same_slot(self) -> None:
         snapshot = executable_builder_input()
-        snapshot["automation"] = {"scheduled_slot": "2026-08-22T08:58:00+08:00"}
+        snapshot["automation"] = {"scheduled_slot": "2026-08-21T08:17:00+08:00"}
         first = server.build_global_ten_day_decision(copy.deepcopy(snapshot))["primary"]["prediction_id"]
         snapshot["generated_at"] = "2026-08-22T09:03:00+08:00"
         second = server.build_global_ten_day_decision(copy.deepcopy(snapshot))["primary"]["prediction_id"]
@@ -165,7 +165,7 @@ class GlobalDecisionContractTests(unittest.TestCase):
 
     def test_research_priority_has_stable_shadow_prediction_contract(self) -> None:
         snapshot = valid_no_pick_snapshot()
-        snapshot["automation"] = {"scheduled_slot": "2026-08-22T08:58:00+08:00"}
+        snapshot["automation"] = {"scheduled_slot": "2026-08-21T08:17:00+08:00"}
         first = server.build_global_ten_day_decision(copy.deepcopy(snapshot))["research_priority"]
         snapshot["generated_at"] = "2026-08-22T09:03:00+08:00"
         second = server.build_global_ten_day_decision(copy.deepcopy(snapshot))["research_priority"]

@@ -22,28 +22,33 @@ class FrontendContractTests(unittest.TestCase):
             self.assertIn(f'data-tab="{tab}"', self.html)
         self.assertEqual(self.html.count('role="tabpanel"'), 6)
 
-    def test_frontend_uses_published_snapshot_and_live_overlay_only(self) -> None:
+    def test_frontend_uses_published_cloud_snapshot_only(self) -> None:
         self.assertIn('getJson("/api/latest")', self.js)
-        self.assertIn('/api/live?market=', self.js)
+        self.assertNotIn('/api/live?market=', self.js)
+        self.assertNotIn("LIVE_POLL_INTERVAL_MS", self.js)
+        self.assertNotIn("pollVisibleLive", self.js)
+        self.assertNotIn("state.live", self.js)
         self.assertNotIn("force=1", self.js)
         self.assertNotIn("localStorage", self.js)
-        self.assertIn("评分和排序不会随之重算", self.js)
+        self.assertIn("评分与排序不在浏览器重算", self.js)
         self.assertIn('candidate.execution_state === "BLOCKED"', self.js)
 
-    def test_live_overlay_is_monotonic_and_visible_candidate_refreshes_every_fifteen_seconds(self) -> None:
-        self.assertIn("const LIVE_POLL_INTERVAL_MS = 15 * 1000", self.js)
-        self.assertRegex(self.js, r"function shouldApplyLiveQuote\(")
-        self.assertIn("payload.source_as_of", self.js)
-        self.assertIn("candidate?.realtime?.source_as_of", self.js)
-        self.assertRegex(self.js, r"sourceEpoch\s*<\s*baselineEpoch")
-        self.assertIn("if (document.hidden)", self.js)
-        self.assertIn('state.tab === "decision"', self.js)
-        self.assertIn('state.tab === "candidates"', self.js)
-        self.assertIn("window.setInterval(pollVisibleLive, LIVE_POLL_INTERVAL_MS)", self.js)
-        self.assertIn('document.addEventListener("visibilitychange"', self.js)
-        for field in ("provider", "session_label", "latency_seconds", "quote_status"):
-            self.assertIn(field, self.js)
-        self.assertIn("实时源较旧，未覆盖快照价", self.js)
+    def test_cloud_snapshot_timing_is_visible(self) -> None:
+        self.assertIn('id="snapshotAsOf"', self.html)
+        self.assertIn('id="nextRefreshTime"', self.html)
+        self.assertIn("snapshot_as_of", self.js)
+        self.assertIn("next_refresh", self.js)
+        self.assertIn("下次计划检查点（含健康补跑）", self.html + self.js)
+
+    def test_missing_quote_provenance_is_not_presented_as_market_data(self) -> None:
+        self.assertRegex(self.js, r"function candidateQuoteView\(")
+        self.assertIn("行情未记录", self.js)
+        self.assertIn("计划价（非行情）", self.js)
+        self.assertIn("源时间未记录", self.js)
+        self.assertNotIn(
+            "quote.source_as_of || state.status?.snapshot_as_of || state.snapshot?.generated_at",
+            self.js,
+        )
 
     def test_shadow_research_outcomes_are_reported_outside_executable_performance(self) -> None:
         self.assertRegex(self.js, r"function shadowLedgerStats\(")
@@ -89,12 +94,14 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("独立分析项目 · 双低七因子", self.js)
         self.assertIn("A股双低独立榜单", self.js)
         self.assertIn("analysis_projects?.dual_low", self.js)
-        self.assertIn("评分和排序不会随之重算", self.js)
+        self.assertIn("评分与排序不在浏览器重算", self.js)
 
     def test_freshness_polling_reloads_only_when_snapshot_changes(self) -> None:
         self.assertIn("const STATUS_POLL_INTERVAL_MS = 5 * 60 * 1000", self.js)
         self.assertRegex(self.js, r"async function pollStatus\(")
         self.assertIn('getJson("/api/status")', self.js)
+        self.assertIn("snapshot_as_of", self.js)
+        self.assertIn("next_refresh", self.js)
         self.assertIn("status.generated_at !== previousGeneratedAt", self.js)
         self.assertIn("!state.snapshot ||", self.js)
         self.assertIn('getJson("/api/latest")', self.js)

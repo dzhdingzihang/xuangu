@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://unpkg.com" />
     <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css" />
     <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260822-history-integrity" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260822-scheduled-snapshot" />
   </head>
   <body>
     <a class="skip-link" href="#mainContent">跳到主内容</a>
@@ -58,11 +58,12 @@
           </div>
           <div class="freshness-bar" aria-label="数据状态">
             <span><i class="ph ph-clock" aria-hidden="true"></i><b>当前时间</b><time id="currentTime">--</time></span>
-            <span><b>数据截止</b><time id="snapshotTime">--</time></span>
+            <span><b>快照生成</b><time id="snapshotAsOf">--</time></span>
+            <span><b>下次计划检查点（含健康补跑）</b><time id="nextRefreshTime">--</time></span>
             <span id="healthBadge" class="health-badge is-loading"><i class="ph-fill ph-circle" aria-hidden="true"></i>读取中</span>
             <span id="qualityBadge" class="health-badge is-degraded" hidden><i class="ph ph-warning-octagon" aria-hidden="true"></i>数据受限</span>
-            <button id="refreshBtn" class="icon-button" type="button" aria-label="刷新快照与当前行情" title="刷新快照与当前行情">
-              <i class="ph ph-arrows-clockwise" aria-hidden="true"></i><span>刷新</span>
+            <button id="refreshBtn" class="icon-button" type="button" aria-label="刷新已发布快照" title="刷新已发布快照">
+              <i class="ph ph-arrows-clockwise" aria-hidden="true"></i><span>刷新快照</span>
             </button>
           </div>
         </header>
@@ -108,6 +109,6 @@
     </div>
 
     <div id="toastRegion" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
-    <script src="/static/app.js?v=20260822-history-integrity"></script>
+    <script src="/static/app.js?v=20260822-scheduled-snapshot"></script>
   </body>
 </html>

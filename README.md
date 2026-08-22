@@ -135,38 +135,23 @@ V2 根据 `trend_risk_on / range / risk_off / high_vol / unknown` 使用可解�
 
 Shadow 胜率和收益只能描述这条研究优先规则的历史，不得混入 `global_decision.primary` 的生产绩效，也不得用来声称已有校准概率。页面历史 Tab 会单独展示 Shadow 的 PENDING/SETTLED 状态；没有合法样本时显示无样本，不填造 0 胜率。
 
-## 实时行情链路
+## 云端定时快照与数据源
 
-网页和 API 由 Cloudflare Worker 提供，实时行情使用“授权源优先、公开源明确降级”的链路：
+生产站使用纯云端批次快照，不依赖 Render、Futu OpenD、个人电脑、Docker 或 Tunnel 常驻。GitHub Actions 在计划检查点获取公开数据、重算候选池和全部评分，验证通过后由 Cloudflare Worker 发布不可变快照。电脑关机不会影响下一次云端任务。
 
-```text
-浏览器（只轮询当前可见候选，15 秒）
-  → Cloudflare Worker /api/live
-    → Futu OpenD 本地只读网关（Bearer 鉴权）
-      → Cloudflare Tunnel: xuangu-quotes.alixjd.com
-    → 失败时回退 PUBLIC_BEST_EFFORT
-       A 股：东方财富，整组失败再到腾讯
-       港股/美股：Yahoo Finance 1m/chart
-```
+快照生成时使用的主要数据口径为：
 
-Worker 对每个 `IP + market + code` 限制为 60 秒 90 次，只允许查询当前快照中的候选代码，并使用 10 秒内存缓存；本地网关使用 5 秒缓存、单次最多 50 个 symbol，只暴露只读 `/health` 和鉴权 `/v1/quotes`。网页只在页面可见时刷新当前选中股票，并拒绝用更旧的行情时间覆盖快照中的较新值。
+- A 股宽基召回与部分横截面字段来自东方财富公开接口；报价和 K 线使用腾讯财经与东方财富的有界重试/回退链路。
+- A 股龙虎榜数据来自东方财富数据中心公开接口。
+- 港股和美股候选的价格与日线主要来自 Yahoo Finance chart 数据；候选边界仍是版本化策展静态池。
+- 事件、公告、新闻和人工待入库证据在快照中分类标记；只有保存来源 URL、发布/生效时间并通过合同校验的自动证据才能参与严格门禁。
+- XSHG / XHKG / XNYS 交易窗口由版本化 `exchange-calendars` 计算。
 
-实时状态必须按 API 字段解释：
-
-| `quote_status` | 含义 | `is_realtime` |
-|---|---|---:|
-| `REALTIME` | 授权行情源、交易时段活跃且源时间满足新鲜度阈值 | `true` |
-| `DELAYED` | 有价格但源时间延迟，或公开 best-effort 盘中回退 | `false` |
-| `LAST_CLOSE` | 市场已收盘，返回最近收盘/盘后结束价格 | `false` |
-| `UNAVAILABLE` | 没有可用价格 | `false` |
-
-`provider_class=LICENSED_REALTIME` 表示来自 Futu OpenD 授权链路；`provider_class=PUBLIC_BEST_EFFORT` 表示公开回退。公开回退即使价格很新，也不会伪装成 `REALTIME`，只发布 `DELAYED` 或 `LAST_CLOSE`。收盘时看到 `LAST_CLOSE` 是正常状态，不是实时链路故障。
-
-真实盘中 `REALTIME` 依赖运行 Futu OpenD 的 Mac、OpenD 登录与行情权限、本地 LaunchAgent、Docker 和 cloudflared Tunnel 持续在线。GitHub Actions 与 Cloudflare Worker 无法替代这台行情网关；主链路中断时网站仍可用，但会明确降级到公开 best-effort。
+这些是公开 best-effort 数据源，没有交易所级 SLA。页面显示的价格、涨跌和 K 线都属于已发布快照，不是浏览器盘中实时行情。顶栏的 `snapshot_as_of` 表示快照生成时间，`next_refresh` 表示下一个计划检查点，不是数据供应商或 GitHub 的准点保证。
 
 ## 生产架构
 
-静态页面、选股快照和 API 都在 Cloudflare Workers，Render 不再是生产依赖。
+静态页面、选股快照和 API 都在 Cloudflare Workers。Render、OpenD 和个人设备都不是生产依赖。
 
 ```text
 GitHub Actions（定时 / 手动）
@@ -181,34 +166,36 @@ GitHub Actions（定时 / 手动）
 
 Cloudflare Worker（请求时）
   → 提供页面、快照、历史与状态 API
-  → 通过 Tunnel 查询 Futu OpenD 实时行情
-  → 主行情链路异常时使用公开 best-effort 回退
+  → 只读 GitHub Actions 已生成并经验证的静态 assets
+  → 不在请求时获取行情，也不重算选股
 ```
 
-Python 选股程序不会在 Worker 请求中重算。`/api/live` 只更新当前候选的价格、会话和延迟状态，不改变 Legacy/V2/双低分数、全局排序或门禁结论。`GET /api/pick?force=1` 固定返回 `409 RECOMPUTE_NOT_SUPPORTED`，需要重算时应手动运行 GitHub Actions。
+Python 选股程序不会在 Worker 或浏览器请求中重算。页面只读 `/api/latest` 与历史快照；刷新页面不改变 Legacy、V2、双低分数、全局排序或门禁结论。`GET /api/pick?force=1` 固定返回 `409 RECOMPUTE_NOT_SUPPORTED`，需要重算时应手动触发 GitHub Actions。
 
 ## 数据更新时序与可靠性
 
-北京时间主检查点：
+工作日北京时间（`Asia/Shanghai`）计划：
 
 ```text
-工作日 08:58 / 09:58 / 10:58 / 12:58 / 13:58 / 14:58 / 21:28 / 23:58
+主跑：08:17 / 20:17
+健康补跑：08:47 / 20:47
 ```
 
-每个主检查点设置 30 分钟后的补跑。`schedule_gate.py` 会检查线上完整 `/api/latest` 与仓库 `latest.json`：同一检查点已经生成且数据源健康时跳过；已生成但行情或候选池处于可恢复降级时，补跑仍会重试。GitHub 排队延迟在 4 小时窗口内仍归属最近检查点，周五 23:58 延迟到周六凌晨也可继续处理。
+每个主跑后 30 分钟有一次健康补跑。`schedule_gate.py` 只用线上完整 `/api/latest` 作为“已成功发布”证据：对应主跑已发布健康快照时跳过补跑；线上不可达、主跑缺失/失败，或行情/候选池处于可恢复降级时，补跑继续尝试。仓库里的 `latest.json` 不能单独抑制补跑，因为它不证明 Cloudflare 已经切换成功。
 
-一次生成与 outcome 结算各最多尝试 3 次。部署前执行单元测试、JavaScript 语法检查和 snapshot schema 校验；部署后必须验证线上 `generated_at`、`snapshot_key`、schema、模型版本、历史、不可变快照和三市场 live contract。成功部署的恢复包保留 30 天，归档 Git 冲突使用有界重试，归档失败会让 Workflow 标红而不会掩盖问题。
+一次生成与 outcome 结算各最多尝试 3 次。部署前执行单元测试、JavaScript 语法检查、snapshot schema 校验和 immutable 快照一致性检查；部署后验证线上 `generated_at`、`snapshot_as_of`、`next_refresh`、`snapshot_key`、schema、模型版本、历史和不可变快照。生成、测试或部署前校验失败时不会切换生产版。部署前还会记录当前唯一 100% 生效的 Cloudflare Worker Version 和快照摘要；若部署后完整验收失败，Workflow 会标红并自动回滚到该精确版本，再核对旧快照身份与摘要。这是自动恢复，不是零暴露发布：新版在部署后验证窗口内可能短暂在线；回滚本身若失败也会继续标红，需要人工处理。定时或手动成功生成快照后，恢复包保留 30 天，归档失败也会显式标红。
 
-网页每 5 分钟检查一次新快照，只有 `generated_at` 变化才重载快照和历史；可见候选行情每 15 秒刷新。快照健康与实时行情健康是两套独立状态：快照 `fresh` 不代表每个行情源都完整，实时网关降级也不会删除最后一份已验证快照。
+浏览器每 5 分钟读取一次 `/api/status`，只有 `generated_at` 变化才重载快照和历史。它不会轮询盘中行情，也不在前端重算评分与排序。快照 `fresh` 只表示它满足发布时效合同，不等于所有公开数据源绝对完整。
 
-GitHub scheduled workflow 不是精确计时器，公开数据源也没有 SLA，因此系统提供的是“目标检查点 + 补跑 + 可观测降级”，不是 100% 准点保证。真实交易日历负责预测窗口与结算；GitHub cron 仍以工作日检查点启动，交易所休市时应由快照市场状态和门禁阻止不当执行。
+GitHub scheduled workflow 不是精确计时器，可能因平台排队延后。公开数据源也没有 SLA，因此系统提供的是“目标检查点 + 健康补跑 + 可观测降级”，不是 100% 准点保证。交易所休市、任务排队或数据源失败时，`next_refresh` 也只是下一个计划检查点（含健康补跑）。
 
 ## 故障降级
 
 | 故障 | 系统行为 |
 |---|---|
-| Futu/OpenD/Tunnel 不可用 | `/api/live` 转公开 best-effort，并发布 `provider_class`、`fallback_reason` 与非实时状态 |
-| 所有实时来源不可用 | 返回 `502` 和 `quote_status=UNAVAILABLE`，不复用旧价冒充实时 |
+| 定时生成、测试或部署前校验失败 | 不切换线上 assets；继续提供当前版本，并让 Workflow 标红 |
+| 部署后完整验收失败 | 自动回滚到部署前精确 Worker Version，核对旧快照摘要；验收窗口内新版可能短暂在线 |
+| 主跑快照缺失或数据源可恢复降级 | 30 分钟后健康补跑继续尝试；已有健康快照时跳过 |
 | 候选池或行情覆盖不足 | 保留研究数据，但门控正式动作并发布稳定 reason codes |
 | 自动事件管线无合格证据 | 发布真实 0 条状态，不伪造事件；正式门禁不通过 |
 | 模型未校准 | `probability_status=UNAVAILABLE`，只输出 `RULE_PRIORITY` 研究优先项 |
@@ -227,6 +214,7 @@ GET /api/history?view=daily&limit=120
 GET /api/history?view=raw&limit=120
 GET /api/pick?date=2026-08-24
 GET /api/pick?snapshot=<snapshot_key>.json
+# 旧客户端兼容路由：只返回已发布快照，不获取实时行情
 GET /api/live?market=a_share&code=603228
 GET /api/live?market=hk&code=01882.HK
 GET /api/live?market=us&code=PWR
@@ -234,12 +222,12 @@ GET /api/live?market=us&code=PWR
 
 契约要点：
 
-- `/api/status` 返回快照版本、新鲜度、生成方式，以及实时网关是否配置；它不是行情本身。
+- `/api/status` 返回快照版本、新鲜度、`snapshot_as_of`、`next_refresh`、主跑/健康补跑检查点、`data_mode=scheduled_snapshot` 和 `device_dependency=false`。
 - `/api/latest` 返回完整快照；`/api/latest-summary` 返回轻量摘要。
 - `/api/history` 默认 `view=daily`，按 `target_date` 合并盘中重复运行，同类保留最后一次；`view=raw` 返回不可变原始运行。绩效和 Shadow 账本另按 `prediction_id` 去重。
 - `/api/pick?snapshot=` 是最精确的历史寻址方式；同一天可能有多次快照。
 - `/api/pick?date=` 只返回该日期匹配项；非法日期 400、不存在 404，绝不静默返回 latest。
-- `/api/live` 仅支持 `a_share / hk / us` 和当前快照候选，返回 `live-quote-v1`，包含 `provider`、`provider_class`、`source_as_of`、`fetched_at`、`latency_seconds`、`session`、`quote_status`、`is_realtime`、`is_stale` 与 `volume_unit`。
+- `/api/live` 只是保留 URL 的 scheduled-snapshot 兼容接口，浏览器不调用它。它只返回当前已发布快照中同时保存了正价格、`source_as_of`、`fetched_at` 和成交量单位的可追溯行情；缺少这些来源字段时返回 `SNAPSHOT_QUOTE_UNAVAILABLE`，不会把计划价或 K 线收盘价冒充行情。成功响应固定发布 `data_mode=SCHEDULED_SNAPSHOT`、`provider_class=SCHEDULED_SNAPSHOT`、`is_realtime=false` 和 `realtime_guaranteed=false`；接口名中的 `live` 不代表盘中实时。
 - API JSON 使用 `Cache-Control: no-store`；静态资产由 Cloudflare 边缘提供。
 - `signal_date` 是信号形成日，`generated_at` 是快照生成时间；每个市场的 `entry_trade_date` 和 `forecast_end_trade_date` 由真实交易日历生成。
 - `NO_VALID_PICK` 是主动放弃，不是一笔买入预测，也不能记成亏损样本。
@@ -247,11 +235,11 @@ GET /api/live?market=us&code=PWR
 ## 页面 Tab
 
 1. **今日答案**：展示 global 正式动作、研究优先项、市场状态、风险和 10 交易日窗口。
-2. **候选池**：展示三市场候选、Legacy/V2/双低边界、来源链、行情健康与单股详情。
+2. **候选池**：展示三市场候选、Legacy/V2/双低边界、来源链、快照行情质量与单股详情。
 3. **事件证据**：区分自动证据、人工待入库与模型信号，并展示扫描状态。
 4. **历史检验**：区分 Legacy 历史、global 合同和 `SHADOW_RESEARCH` 结果；数据异常不会降级成 0 胜率。
 5. **模型逻辑**：解释候选召回、因子、去重评分、global 门禁、版本与约两周标签。
-6. **数据健康**：分别监控任务、快照、市场覆盖、事件管线、实时源与结论可用性。
+6. **数据健康**：分别监控云端调度、快照时效、市场覆盖、事件管线、数据源完整度与结论可用性。
 
 ## 本地开发
 
@@ -283,33 +271,12 @@ python3 scripts/validate_snapshot.py data/picks/latest.json
 npm run dev
 ```
 
-### 本地 Futu 行情网关
-
-网关必须和 Futu OpenD 位于同一台机器，默认读取 `127.0.0.1:11111`，自身只监听 `127.0.0.1:8789`。
-
-```bash
-python3 -m pip install -r requirements-gateway.txt
-export QUOTE_GATEWAY_TOKEN='<至少 24 位随机值>'
-python3 scripts/realtime_gateway.py
-
-curl -fsS http://127.0.0.1:8789/health
-```
-
-macOS 生产运行通过 `scripts/launch_realtime_gateway.py` 从 Keychain 服务 `com.alixjd.xuangu.quote-gateway`、账户 `xuangu` 读取 token，再由 LaunchAgent 守护。不要把 bearer token 写入仓库、plist、日志或命令历史。Cloudflare Worker 中的 `QUOTE_GATEWAY_TOKEN` Secret 必须与 Keychain 值一致。
-
-Cloudflare Tunnel 应把 `xuangu-quotes.alixjd.com` 代理到本机 `http://127.0.0.1:8789`（Docker cloudflared 场景使用 `host.docker.internal:8789`）。外网 `/health` 可用于可用性检查，`/v1/quotes` 必须携带 Bearer token。
-
 ## 部署与运维
 
 ### GitHub / Cloudflare Secrets
 
 - `CLOUDFLARE_API_TOKEN`：Worker 部署权限。
-- `CLOUDFLARE_DNS_API_TOKEN`：推荐使用只具备 `alixjd.com` DNS Edit 的独立 token；未设置时 DNS workflow 会尝试使用前者。
-- `QUOTE_GATEWAY_TOKEN`：不是 GitHub Secret，而是 Cloudflare Worker Secret；通过 Wrangler 写入。
-
-```bash
-printf '%s' "$QUOTE_GATEWAY_TOKEN" | npx wrangler secret put QUOTE_GATEWAY_TOKEN
-```
+- 定时选股不需要 OpenD、Tunnel、Render 或个人设备密钥。
 
 ### 部署 Worker
 
@@ -328,29 +295,18 @@ npm run build
 npx wrangler deploy
 ```
 
-### 一次性配置实时域名 DNS
-
-命名 Tunnel 创建完成后，运行幂等 workflow：
-
-```bash
-gh workflow run configure-realtime-dns.yml --repo dzhdingzihang/xuangu --ref main
-```
-
-它只会创建或修正预期的 `xuangu-quotes.alixjd.com` CNAME 和代理状态；如果同名位置已有无关记录，会拒绝覆盖。随后会验证公开 `/health`。该 workflow 不是日常定时任务，DNS 正常后无需重复运行。
-
 ### 线上验收
 
 ```bash
 curl -fsS https://xuangu.alixjd.com/api/status
 curl -fsS https://xuangu.alixjd.com/api/latest-summary
 curl -fsS 'https://xuangu.alixjd.com/api/history?view=daily&limit=5'
-curl -fsS https://xuangu-quotes.alixjd.com/health
 curl -fsSI https://xuangu.alixjd.com/
 ```
 
-对 `/api/live` 的验收应选当前快照中真实存在的候选，并同时检查 `provider_class`、`quote_status`、`source_as_of` 和 `is_realtime`，不能只看 `price`。市场收盘时预期是 `LAST_CLOSE`；交易时段只有授权链路新鲜时才预期 `REALTIME`。
+验收 `/api/status` 时应确认 `snapshot_generation=github-actions`、`data_mode=scheduled_snapshot`、`device_dependency=false`、`snapshot_as_of` 和 `next_refresh`。如果检查 `/api/live` 兼容路由，预期 `provider_class=SCHEDULED_SNAPSHOT` 与 `is_realtime=false`，不应期待 `REALTIME`。
 
-Render 配置已经从仓库移除，`xuangu.alixjd.com` 不依赖 Render。如果旧 `chan-stock-selector.onrender.com` 服务仍存在，应在 Render 控制台 Suspend 并关闭 Auto-Deploy；删除仓库文件不会自动停止外部服务。
+`xuangu.alixjd.com` 的生产页面、API 和定时更新均不依赖 Render、OpenD 或个人电脑。
 
 ## 生产边界与下一步
 
@@ -363,4 +319,4 @@ Render 配置已经从仓库移除，`xuangu.alixjd.com` 不依赖 Render。如�
 - 概率校准、Brier/ECE、Rank IC、分位收益与漂移监控；
 - 足够长的 Shadow 账本样本，并通过版本化晋级门槛。
 
-在这些条件完成前，页面会继续保留所有旧因子、给出 `RULE_PRIORITY` 研究排序、展示实时行情质量，并让 `global` 严格门禁阻止假精确和伪实时。
+在这些条件完成前，页面会继续保留所有 Legacy 因子、V2 去重影子评分与 A 股双低七因子，给出 `RULE_PRIORITY` 研究排序，展示快照行情质量，并让十日 `global` 严格门禁阻止假精确。定时任务、规则分、研究优先项和历史 Shadow 结果均不构成收益保证。

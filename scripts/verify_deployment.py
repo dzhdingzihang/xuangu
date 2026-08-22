@@ -5,14 +5,17 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import pathlib
+import re
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
+from zoneinfo import ZoneInfo
 
 
 IDENTITY_FIELDS = (
@@ -30,6 +33,8 @@ DECISION_IDENTITY_FIELDS = (
 )
 ALLOWED_GLOBAL_ACTIONS = {"NO_VALID_PICK", "REVIEW_EXECUTABLE_PICK"}
 DEFAULT_BASE_URL = "https://xuangu.alixjd.com"
+SHANGHAI_TIME_ZONE = ZoneInfo("Asia/Shanghai")
+SCHEDULED_REFRESH_CHECKPOINTS = ((8, 17), (8, 47), (20, 17), (20, 47))
 ResponsePayload = tuple[int, Mapping[str, str], bytes]
 
 
@@ -114,6 +119,27 @@ def _parse_moment(value: object) -> dt.datetime:
     if parsed.tzinfo is None:
         raise ValueError(f"timestamp is missing a timezone: {value!r}")
     return parsed
+
+
+def next_scheduled_refresh(value: object) -> dt.datetime:
+    """Independently calculate the next primary or health-fallback invocation."""
+    current = value if isinstance(value, dt.datetime) else _parse_moment(value)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("current time must be timezone-aware")
+    local = current.astimezone(SHANGHAI_TIME_ZONE)
+    for day_offset in range(9):
+        day = local.date() + dt.timedelta(days=day_offset)
+        if day.weekday() >= 5:
+            continue
+        for hour, minute in SCHEDULED_REFRESH_CHECKPOINTS:
+            checkpoint = dt.datetime.combine(
+                day,
+                dt.time(hour, minute),
+                tzinfo=SHANGHAI_TIME_ZONE,
+            )
+            if checkpoint > local:
+                return checkpoint
+    raise ValueError("unable to find next scheduled refresh")
 
 
 def _validate_snapshot_key(value: object) -> str:
@@ -254,6 +280,41 @@ def deployment_mismatches(local: dict, status: dict, latest: dict) -> list[str]:
     return errors
 
 
+def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
+    """Require the deployed Worker to advertise the device-free snapshot mode."""
+    errors: list[str] = []
+    required_values = {
+        "data_mode": "scheduled_snapshot",
+        "quote_delivery_mode": "scheduled_snapshot",
+        "device_dependency": False,
+        "schedule_time_zone": "Asia/Shanghai",
+        "schedule_primary_checkpoints": ["08:17", "20:17"],
+        "schedule_fallback_checkpoints": ["08:47", "20:47"],
+        "snapshot_as_of": local.get("generated_at"),
+    }
+    for field, expected in required_values.items():
+        actual = status.get(field)
+        if actual != expected:
+            errors.append(f"status.{field}: expected {expected!r}, got {actual!r}")
+
+    parsed: dict[str, dt.datetime] = {}
+    for field in ("time", "next_refresh"):
+        try:
+            parsed[field] = _parse_moment(status.get(field))
+        except (TypeError, ValueError):
+            errors.append(f"status.{field} is not a timezone-aware timestamp")
+    if all(field in parsed for field in ("time", "next_refresh")):
+        if parsed["next_refresh"].utcoffset() != dt.timedelta(hours=8):
+            errors.append("status.next_refresh is not expressed in Asia/Shanghai (+08:00)")
+        expected = next_scheduled_refresh(parsed["time"])
+        if parsed["next_refresh"] != expected:
+            errors.append(
+                f"status.next_refresh: expected {expected.isoformat()}, "
+                f"got {status.get('next_refresh')!r}"
+            )
+    return errors
+
+
 def _header(headers: Mapping[str, str], name: str) -> str:
     target = name.lower()
     for key, value in headers.items():
@@ -262,17 +323,56 @@ def _header(headers: Mapping[str, str], name: str) -> str:
     return ""
 
 
+def _normalize_live_code(market: str, value: object) -> str | None:
+    raw = str(value or "").strip().upper()
+    if market == "a_share":
+        clean = re.sub(r"^(?:SH|SZ)\.", "", raw)
+        return clean if re.fullmatch(r"\d{6}", clean) else None
+    if market == "hk":
+        match = re.fullmatch(r"(\d{1,5})\.HK", raw)
+        return f"{match.group(1).zfill(4)}.HK" if match else None
+    if market == "us":
+        return raw if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", raw) else None
+    return None
+
+
+def _live_candidates(snapshot: dict, market: str) -> list[tuple[str, dict]]:
+    markets = snapshot.get("markets") if isinstance(snapshot.get("markets"), dict) else {}
+    section = markets.get(market)
+    if not isinstance(section, dict) and market == "a_share":
+        section = {"decision": snapshot.get("decision") or {}}
+    decision = section.get("decision") if isinstance(section, dict) else {}
+    decision = decision if isinstance(decision, dict) else {}
+    watchlist = decision.get("watchlist")
+    rows = [
+        decision.get("primary"),
+        decision.get("blocked_candidate"),
+        *(watchlist if isinstance(watchlist, list) else []),
+    ]
+    global_decision = snapshot.get("global_decision")
+    if isinstance(global_decision, dict):
+        for field in ("primary", "research_priority"):
+            candidate = global_decision.get(field)
+            if isinstance(candidate, dict) and candidate.get("market") == market:
+                rows.append(candidate)
+
+    result: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    for candidate in rows:
+        if not isinstance(candidate, dict):
+            continue
+        code = _normalize_live_code(market, candidate.get("code") or candidate.get("symbol"))
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        result.append((code, candidate))
+    return result
+
+
 def _candidate_code(snapshot: dict, market: str) -> str | None:
-    section = ((snapshot.get("markets") or {}).get(market) or {})
-    decision = section.get("decision") or {}
-    candidate = decision.get("primary") or decision.get("blocked_candidate")
-    if not isinstance(candidate, dict):
-        rows = decision.get("watchlist") or []
-        candidate = rows[0] if rows and isinstance(rows[0], dict) else None
-    if not candidate:
-        return None
-    code = candidate.get("code") or candidate.get("symbol")
-    return str(code) if code else None
+    """Backward-compatible first-candidate helper for external test imports."""
+    candidates = _live_candidates(snapshot, market)
+    return candidates[0][0] if candidates else None
 
 
 def history_contract_errors(local: dict, history_payload: dict) -> list[str]:
@@ -355,76 +455,128 @@ def live_contract_errors(
     fetcher: Callable[[str], dict],
 ) -> list[str]:
     errors: list[str] = []
-    # Public A-share feeds report lots while a licensed gateway may report
-    # shares.  The unit must be explicit; both truthful representations are
-    # accepted rather than silently assuming one.
     expected_volume_units = {
         "a_share": {"lot", "share", "shares"},
         "hk": {"share", "shares"},
         "us": {"share", "shares"},
     }
     for market in ("a_share", "hk", "us"):
-        code = _candidate_code(local, market)
-        if not code:
-            errors.append(f"live.{market}: no candidate code available for smoke test")
-            continue
-        query = urllib.parse.urlencode({"market": market, "code": code})
-        payload = fetcher(endpoint_url(base_url, f"/api/live?{query}"))
-        prefix = f"live.{market}.{code}"
-        if payload.get("contract_version") != "live-quote-v1":
-            errors.append(f"{prefix}.contract_version is not 'live-quote-v1'")
-        if payload.get("ok") is not True:
-            errors.append(f"{prefix}.ok is not true")
-        if payload.get("market") != market:
-            errors.append(f"{prefix}.market: got {payload.get('market')!r}")
-        if str(payload.get("code") or "").upper() != code.upper():
-            errors.append(f"{prefix}.code: got {payload.get('code')!r}")
-        price = payload.get("price")
-        if not isinstance(price, (int, float)) or isinstance(price, bool) or price <= 0:
-            errors.append(f"{prefix}.price is not positive")
-        for field in (
-            "provider",
-            "provider_class",
-            "source",
-            "source_as_of",
-            "fetched_at",
-            "volume_unit",
-            "session",
-            "session_label",
-            "price_kind",
-            "quote_status",
-            "freshness",
-        ):
-            if not isinstance(payload.get(field), str) or not payload.get(field):
-                errors.append(f"{prefix}.{field} is missing")
-        if payload.get("volume_unit") not in expected_volume_units[market]:
-            errors.append(
-                f"{prefix}.volume_unit: expected one of {sorted(expected_volume_units[market])!r}, "
-                f"got {payload.get('volume_unit')!r}"
-            )
-        if payload.get("quote_status") not in {"REALTIME", "DELAYED", "LAST_CLOSE"}:
-            errors.append(f"{prefix}.quote_status is invalid")
-        for field in ("is_realtime", "is_stale", "realtime_guaranteed"):
-            if type(payload.get(field)) is not bool:
-                errors.append(f"{prefix}.{field} is not a boolean")
-        if payload.get("is_realtime") is True and payload.get("quote_status") != "REALTIME":
-            errors.append(f"{prefix}.is_realtime conflicts with quote_status")
-        cache_ttl = payload.get("cache_ttl_seconds")
-        if not isinstance(cache_ttl, (int, float)) or isinstance(cache_ttl, bool) or not 0 < cache_ttl <= 30:
-            errors.append(f"{prefix}.cache_ttl_seconds is outside (0, 30]")
-        parsed_times: dict[str, dt.datetime] = {}
-        for field in ("source_as_of", "fetched_at"):
-            try:
-                parsed_times[field] = _parse_moment(payload.get(field))
-            except (TypeError, ValueError):
-                errors.append(f"{prefix}.{field} is not a timezone-aware timestamp")
-        if all(field in parsed_times for field in ("source_as_of", "fetched_at")):
-            if parsed_times["source_as_of"] > parsed_times["fetched_at"] + dt.timedelta(minutes=5):
-                errors.append(f"{prefix}.source_as_of is implausibly after fetched_at")
-        # The licensed quote gateway intentionally returns an empty kline; the
-        # live overlay contract guarantees the array type, not chart history.
-        if not isinstance(payload.get("kline"), list):
-            errors.append(f"{prefix}.kline is not an array")
+        for code, candidate in _live_candidates(local, market):
+            prefix = f"live.{market}.{code}"
+            quote = candidate.get("realtime")
+            if not isinstance(quote, dict):
+                errors.append(f"{prefix}.realtime snapshot quote is missing")
+                continue
+            expected_price = quote.get("price")
+            if (
+                not isinstance(expected_price, (int, float))
+                or isinstance(expected_price, bool)
+                or not math.isfinite(expected_price)
+                or expected_price <= 0
+            ):
+                errors.append(f"{prefix}.realtime.price is not positive")
+                continue
+            local_quote_valid = True
+            for field in ("source_as_of", "fetched_at"):
+                try:
+                    _parse_moment(quote.get(field))
+                except (TypeError, ValueError):
+                    errors.append(f"{prefix}.realtime.{field} is not a timezone-aware timestamp")
+                    local_quote_valid = False
+            if quote.get("volume_unit") not in expected_volume_units[market]:
+                errors.append(
+                    f"{prefix}.realtime.volume_unit: expected one of "
+                    f"{sorted(expected_volume_units[market])!r}, got {quote.get('volume_unit')!r}"
+                )
+                local_quote_valid = False
+            if not local_quote_valid:
+                continue
+
+            query = urllib.parse.urlencode({"market": market, "code": code})
+            payload = fetcher(endpoint_url(base_url, f"/api/live?{query}"))
+            if payload.get("contract_version") != "live-quote-v1":
+                errors.append(f"{prefix}.contract_version is not 'live-quote-v1'")
+            if payload.get("ok") is not True:
+                errors.append(f"{prefix}.ok is not true")
+            if payload.get("market") != market:
+                errors.append(f"{prefix}.market: got {payload.get('market')!r}")
+            if str(payload.get("code") or "").upper() != code.upper():
+                errors.append(f"{prefix}.code: got {payload.get('code')!r}")
+            for field in ("data_mode", "quote_mode", "provider_class"):
+                if payload.get(field) != "SCHEDULED_SNAPSHOT":
+                    errors.append(f"{prefix}.{field} is not 'SCHEDULED_SNAPSHOT'")
+            if payload.get("snapshot_as_of") != local.get("generated_at"):
+                errors.append(
+                    f"{prefix}.snapshot_as_of: expected {local.get('generated_at')!r}, "
+                    f"got {payload.get('snapshot_as_of')!r}"
+                )
+            if payload.get("snapshot_key") != local.get("snapshot_key"):
+                errors.append(
+                    f"{prefix}.snapshot_key: expected {local.get('snapshot_key')!r}, "
+                    f"got {payload.get('snapshot_key')!r}"
+                )
+            price = payload.get("price")
+            if (
+                not isinstance(price, (int, float))
+                or isinstance(price, bool)
+                or not math.isfinite(price)
+                or price <= 0
+            ):
+                errors.append(f"{prefix}.price is not positive")
+            elif price != expected_price:
+                errors.append(f"{prefix}.price: expected realtime.price {expected_price!r}, got {price!r}")
+            for field in (
+                "provider",
+                "provider_class",
+                "source",
+                "source_as_of",
+                "fetched_at",
+                "volume_unit",
+                "session",
+                "session_label",
+                "price_kind",
+                "quote_status",
+                "freshness",
+                "rate_limit_status",
+            ):
+                if not isinstance(payload.get(field), str) or not payload.get(field):
+                    errors.append(f"{prefix}.{field} is missing")
+            for field in ("source_as_of", "fetched_at", "volume_unit"):
+                if payload.get(field) != quote.get(field):
+                    errors.append(
+                        f"{prefix}.{field}: expected realtime.{field} {quote.get(field)!r}, "
+                        f"got {payload.get(field)!r}"
+                    )
+            if payload.get("quote_status") not in {"DELAYED", "LAST_CLOSE"}:
+                errors.append(
+                    f"{prefix}.quote_status {payload.get('quote_status')!r} is invalid "
+                    "for scheduled snapshot mode; REALTIME is forbidden"
+                )
+            for field in ("is_realtime", "is_stale", "realtime_guaranteed"):
+                if type(payload.get(field)) is not bool:
+                    errors.append(f"{prefix}.{field} is not a boolean")
+            if payload.get("is_realtime") is not False:
+                errors.append(f"{prefix}.is_realtime must be false in scheduled snapshot mode")
+            if payload.get("realtime_guaranteed") is not False:
+                errors.append(f"{prefix}.realtime_guaranteed must be false in scheduled snapshot mode")
+            cache_ttl = payload.get("cache_ttl_seconds")
+            if (
+                not isinstance(cache_ttl, (int, float))
+                or isinstance(cache_ttl, bool)
+                or not 0 < cache_ttl <= 30
+            ):
+                errors.append(f"{prefix}.cache_ttl_seconds is outside (0, 30]")
+            parsed_times: dict[str, dt.datetime] = {}
+            for field in ("source_as_of", "fetched_at"):
+                try:
+                    parsed_times[field] = _parse_moment(payload.get(field))
+                except (TypeError, ValueError):
+                    errors.append(f"{prefix}.{field} is not a timezone-aware timestamp")
+            if all(field in parsed_times for field in ("source_as_of", "fetched_at")):
+                if parsed_times["source_as_of"] > parsed_times["fetched_at"] + dt.timedelta(minutes=5):
+                    errors.append(f"{prefix}.source_as_of is implausibly after fetched_at")
+            if not isinstance(payload.get("kline"), list):
+                errors.append(f"{prefix}.kline is not an array")
     return errors
 
 
@@ -438,6 +590,7 @@ def full_deployment_errors(
     status = json_fetcher(endpoint_url(base_url, "/api/status"))
     latest = json_fetcher(endpoint_url(base_url, "/api/latest"))
     errors = deployment_mismatches(local, status, latest)
+    errors.extend(scheduled_snapshot_status_errors(local, status))
 
     snapshot_key = _validate_snapshot_key(local.get("snapshot_key"))
     snapshot_query = urllib.parse.urlencode({"snapshot": snapshot_key})

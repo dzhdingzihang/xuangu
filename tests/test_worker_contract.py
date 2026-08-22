@@ -40,15 +40,12 @@ def run_node(script: str) -> None:
 
 
 class WorkerApiContractTests(unittest.TestCase):
-    def test_worker_prefers_authenticated_futu_gateway_and_labels_public_fallback(self) -> None:
+    def test_worker_declares_scheduled_snapshot_delivery_without_device_dependency(self) -> None:
         source = (ROOT / "src" / "index.js").read_text(encoding="utf-8")
         for token in (
-            "REALTIME_GATEWAY_URL",
-            "QUOTE_GATEWAY_TOKEN",
-            "FUTU_OPEND",
-            "LICENSED_REALTIME",
-            "PUBLIC_BEST_EFFORT",
-            "public_best_effort_1m",
+            "scheduled_snapshot",
+            "SCHEDULED_SNAPSHOT",
+            "device_dependency",
             "realtime_guaranteed",
             "LIVE_RATE_LIMITER",
             "RATE_LIMITED",
@@ -56,12 +53,15 @@ class WorkerApiContractTests(unittest.TestCase):
             "INVALID_DATE",
         ):
             self.assertIn(token, source)
+        for retired_token in ("REALTIME_GATEWAY_URL", "QUOTE_GATEWAY_TOKEN", "FUTU_OPEND", "LICENSED_REALTIME"):
+            self.assertNotIn(retired_token, source)
 
     def test_status_force_https_and_security_contract(self) -> None:
         run_node(
             f"""
             import assert from "node:assert/strict";
-            const worker = (await import({json.dumps(WORKER_URI)})).default;
+            const module = await import({json.dumps(WORKER_URI)});
+            const worker = module.default;
             const latest = {{
               schema_version: "selector-snapshot-v2",
               selector_mode: "legacy_active_v2_shadow",
@@ -98,6 +98,14 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(status.schema_version, latest.schema_version);
             assert.equal(status.model_version, latest.model_version);
             assert.equal(status.generated_at, latest.generated_at);
+            assert.equal(status.data_mode, "scheduled_snapshot");
+            assert.equal(status.quote_delivery_mode, "scheduled_snapshot");
+            assert.equal(status.device_dependency, false);
+            assert.equal(status.schedule_time_zone, "Asia/Shanghai");
+            assert.deepEqual(status.schedule_primary_checkpoints, ["08:17", "20:17"]);
+            assert.deepEqual(status.schedule_fallback_checkpoints, ["08:47", "20:47"]);
+            assert.equal(status.snapshot_as_of, latest.generated_at);
+            assert.equal(status.next_refresh, module.nextScheduledRefresh(new Date(status.time)));
             assert.equal(statusResponse.headers.get("x-content-type-options"), "nosniff");
             assert.match(statusResponse.headers.get("strict-transport-security"), /max-age=/);
             assert.match(statusResponse.headers.get("permissions-policy"), /camera=\(\)/);
@@ -130,56 +138,79 @@ class WorkerApiContractTests(unittest.TestCase):
             """
         )
 
-    def test_live_quotes_declare_source_time_fetch_time_and_volume_unit(self) -> None:
+    def test_live_quotes_are_served_only_from_the_published_snapshot(self) -> None:
         run_node(
             f"""
             import assert from "node:assert/strict";
             const worker = (await import({json.dumps(WORKER_URI)} + "?live-contract")).default;
             const latest = {{
+              generated_at: "2026-08-22T08:20:00+08:00",
+              snapshot_key: "2026-08-25_2026-08-22_082000.json",
               markets: {{
-                a_share: {{ decision: {{ watchlist: [{{ code: "603228" }}] }} }},
-                hk: {{ decision: {{ watchlist: [{{ code: "0700.HK" }}] }} }},
-                us: {{ decision: {{ watchlist: [{{ code: "AAPL" }}] }} }},
+                a_share: {{ decision: {{ watchlist: [{{
+                    code: "603228",
+                    name: "测试A股",
+                    kline: [{{ date: "2026-08-21", open: 12, close: 12.34, high: 12.5, low: 11.9 }}],
+                    realtime: {{
+                      price: 12.34,
+                      change_pct: 1.8,
+                      previous_close: 12.12,
+                      volume: 1234,
+                      volume_unit: "lot",
+                      session: "closed",
+                      session_label: "休市",
+                      source: "Tencent scheduled quote",
+                      source_as_of: "2026-08-21T16:14:46+08:00",
+                      fetched_at: "2026-08-22T08:18:10+08:00",
+                    }},
+                  }}
+                ] }} }},
+                hk: {{ decision: {{ watchlist: [{{
+                    code: "0700.HK",
+                    name: "腾讯控股",
+                    kline: [],
+                    realtime: {{
+                      price: 380.2,
+                      change_pct: 0.7,
+                      previous_close: 377.6,
+                      volume: 880000,
+                      volume_unit: "share",
+                      session: "closed",
+                      session_label: "非交易时段",
+                      source: "Yahoo scheduled quote",
+                      source_as_of: "2026-08-21T16:08:00+08:00",
+                      fetched_at: "2026-08-22T08:18:20+08:00",
+                    }},
+                  }}
+                ] }} }},
+                us: {{ decision: {{ watchlist: [{{
+                    code: "AAPL",
+                    name: "Apple",
+                    kline: [],
+                    realtime: {{
+                      price: 213,
+                      change_pct: 3.9,
+                      previous_close: 205,
+                      volume: 120000,
+                      volume_unit: "share",
+                      session: "closed",
+                      session_label: "非交易时段",
+                      source: "Yahoo scheduled quote",
+                      source_as_of: "2026-08-22T07:59:00+08:00",
+                      fetched_at: "2026-08-22T08:18:30+08:00",
+                    }},
+                  }}
+                ] }} }},
               }},
             }};
             const jsonResponse = (payload) => new Response(JSON.stringify(payload), {{
               status: 200,
               headers: {{ "content-type": "application/json" }},
             }});
-            globalThis.fetch = async (input) => {{
-              const target = input instanceof URL ? input : (typeof input === "string" ? input : input.url);
-              const url = new URL(target);
-              if (url.hostname === "push2.eastmoney.com") {{
-                return jsonResponse({{ data: {{
-                  f43: 12.34, f47: 1234, f57: "603228", f58: "测试A股",
-                  f86: 1787148000, f170: 1.8,
-                }} }});
-              }}
-              if (url.hostname === "push2his.eastmoney.com") {{
-                return jsonResponse({{ data: {{ klines: [
-                  "2026-08-19,12.00,12.34,12.50,11.90,1234,1500000,0,1.8,0,2.1"
-                ] }} }});
-              }}
-              if (url.hostname === "query1.finance.yahoo.com") {{
-                return jsonResponse({{ chart: {{ result: [{{
-                  meta: {{
-                    regularMarketPrice: 210,
-                    chartPreviousClose: 205,
-                    regularMarketVolume: 120000,
-                    regularMarketTime: 1787148000,
-                    currentTradingPeriod: {{
-                      pre: {{ start: 1787112000, end: 1787131800 }},
-                      regular: {{ start: 1787131800, end: 1787148000 }},
-                      post: {{ start: 1787148000, end: 1787162400 }},
-                    }},
-                  }},
-                  timestamp: [1787148000, 1787162340],
-                  indicators: {{ quote: [{{
-                    open: [206, 211], high: [212, 214], low: [204, 210], close: [210, 213], volume: [120000, 800],
-                  }}] }},
-                }}] }} }});
-              }}
-              throw new Error(`Unexpected URL: ${{url}}`);
+            let upstreamCalls = 0;
+            globalThis.fetch = async () => {{
+              upstreamCalls += 1;
+              throw new Error("Worker must not fetch a request-time quote upstream");
             }};
             const env = {{ ASSETS: {{ fetch: async (input) => {{
               const url = new URL(typeof input === "string" ? input : input.url);
@@ -196,13 +227,18 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(aShare.volume, 1234);
             assert.equal(aShare.volume_unit, "lot");
             assert.equal(aShare.contract_version, "live-quote-v1");
-            assert.ok(aShare.source_as_of);
-            assert.match(aShare.fetched_at, /\+08:00$/);
-            assert.equal(aShare.provider, "eastmoney");
-            assert.ok(["REALTIME", "DELAYED", "LAST_CLOSE"].includes(aShare.quote_status));
-            assert.ok(["fresh", "stale", "last_close"].includes(aShare.freshness));
+            assert.equal(aShare.provider_class, "SCHEDULED_SNAPSHOT");
+            assert.equal(aShare.source_as_of, "2026-08-21T16:14:46+08:00");
+            assert.equal(aShare.fetched_at, "2026-08-22T08:18:10+08:00");
+            assert.equal(aShare.quote_status, "LAST_CLOSE");
+            assert.notEqual(aShare.quote_status, "REALTIME");
+            assert.equal(aShare.is_realtime, false);
+            assert.equal(aShare.realtime_guaranteed, false);
+            assert.equal(aShare.snapshot_as_of, latest.generated_at);
+            assert.equal(aShare.snapshot_key, latest.snapshot_key);
             assert.equal(typeof aShare.latency_seconds, "number");
-            assert.ok(aShare.session);
+            assert.equal(aShare.session, "closed");
+            assert.equal(aShare.kline.length, 1);
 
             const usResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
@@ -212,12 +248,11 @@ class WorkerApiContractTests(unittest.TestCase):
             const us = await usResponse.json();
             assert.equal(us.volume, 120000);
             assert.equal(us.volume_unit, "share");
-            assert.ok(us.source_as_of);
-            assert.match(us.fetched_at, /\+08:00$/);
+            assert.equal(us.source_as_of, "2026-08-22T07:59:00+08:00");
+            assert.equal(us.fetched_at, "2026-08-22T08:18:30+08:00");
             assert.equal(us.price, 213);
-            assert.equal(us.provider, "yahoo_finance");
-            assert.equal(us.price_kind, "after_hours");
-            assert.match(us.source, /1m includePrePost/);
+            assert.equal(us.provider_class, "SCHEDULED_SNAPSHOT");
+            assert.equal(us.is_realtime, false);
 
             const hkResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/live?market=hk&code=0700.HK"),
@@ -227,21 +262,41 @@ class WorkerApiContractTests(unittest.TestCase):
             const hk = await hkResponse.json();
             assert.equal(hk.market, "hk");
             assert.equal(hk.volume_unit, "share");
-            assert.equal(hk.price, 213);
-            assert.equal(hk.source_as_of, us.source_as_of);
+            assert.equal(hk.price, 380.2);
+            assert.equal(hk.provider_class, "SCHEDULED_SNAPSHOT");
+            assert.equal(hk.is_realtime, false);
+            assert.equal(upstreamCalls, 0);
             """
         )
 
-    def test_live_api_validates_market_code_whitelist_and_uses_ten_second_cache(self) -> None:
+    def test_live_api_keeps_validation_whitelist_rate_limit_and_compatibility_contract(self) -> None:
         run_node(
             f"""
             import assert from "node:assert/strict";
-            const worker = (await import({json.dumps(WORKER_URI)} + "?live-validation-cache")).default;
+            const worker = (await import({json.dumps(WORKER_URI)} + "?live-validation-snapshot")).default;
             const latest = {{
+              generated_at: "2026-08-22T08:20:00+08:00",
+              snapshot_key: "2026-08-25_2026-08-22_082000.json",
               markets: {{
                 a_share: {{ decision: {{ watchlist: [{{ code: "603228" }}] }} }},
                 hk: {{ decision: {{ watchlist: [{{ code: "0700.HK" }}] }} }},
-                us: {{ decision: {{ watchlist: [{{ code: "AAPL" }}] }} }},
+                us: {{ decision: {{ watchlist: [{{
+                  code: "AAPL",
+                  name: "Apple",
+                  kline: [],
+                  realtime: {{
+                    price: 210,
+                    change_pct: 2.4,
+                    previous_close: 205,
+                    volume: 120000,
+                    volume_unit: "share",
+                    session: "closed",
+                    session_label: "非交易时段",
+                    source: "Yahoo scheduled quote",
+                    source_as_of: "2026-08-22T07:59:00+08:00",
+                    fetched_at: "2026-08-22T08:18:30+08:00",
+                  }},
+                }}] }} }},
               }},
             }};
             const jsonResponse = (payload) => new Response(JSON.stringify(payload), {{
@@ -249,18 +304,9 @@ class WorkerApiContractTests(unittest.TestCase):
               headers: {{ "content-type": "application/json" }},
             }});
             let upstreamCalls = 0;
-            globalThis.fetch = async (input) => {{
+            globalThis.fetch = async () => {{
               upstreamCalls += 1;
-              const timestamp = Math.floor(Date.now() / 1000) - 20;
-              return jsonResponse({{ chart: {{ result: [{{
-                meta: {{
-                  chartPreviousClose: 205,
-                  regularMarketVolume: 120000,
-                  marketState: "REGULAR",
-                }},
-                timestamp: [timestamp],
-                indicators: {{ quote: [{{ close: [210], volume: [120000] }}] }},
-              }}] }} }});
+              throw new Error("Worker must not fetch a request-time quote upstream");
             }};
             const env = {{ ASSETS: {{ fetch: async (input) => {{
               const url = new URL(typeof input === "string" ? input : input.url);
@@ -275,7 +321,7 @@ class WorkerApiContractTests(unittest.TestCase):
             const invalidMarketPayload = await invalidMarket.json();
             assert.equal(invalidMarketPayload.error, "INVALID_MARKET");
             assert.equal(invalidMarketPayload.contract_version, "live-quote-v1");
-            for (const field of ["provider", "session", "session_label", "latency_seconds", "quote_status", "fetched_at"]) {{
+            for (const field of ["provider", "provider_class", "data_mode", "session", "session_label", "latency_seconds", "quote_status", "fetched_at", "realtime_guaranteed"]) {{
               assert.ok(Object.hasOwn(invalidMarketPayload, field), `missing unified error field: ${{field}}`);
             }}
 
@@ -299,12 +345,161 @@ class WorkerApiContractTests(unittest.TestCase):
             );
             assert.equal(first.status, 200);
             assert.equal(second.status, 200);
-            assert.equal(upstreamCalls, 1);
+            assert.equal(upstreamCalls, 0);
             const firstPayload = await first.json();
             const secondPayload = await second.json();
             assert.equal(firstPayload.code, "AAPL");
             assert.equal(secondPayload.source_as_of, firstPayload.source_as_of);
             assert.equal(firstPayload.cache_ttl_seconds, 10);
+            assert.equal(firstPayload.contract_version, "live-quote-v1");
+            assert.equal(firstPayload.provider_class, "SCHEDULED_SNAPSHOT");
+            assert.equal(firstPayload.is_realtime, false);
+            assert.equal(firstPayload.realtime_guaranteed, false);
+            assert.equal(firstPayload.snapshot_as_of, latest.generated_at);
+            assert.equal(firstPayload.snapshot_key, latest.snapshot_key);
+            assert.notEqual(firstPayload.quote_status, "REALTIME");
+
+            let limiterCalls = 0;
+            const limitedEnv = {{
+              ...env,
+              LIVE_RATE_LIMITER: {{
+                async limit({{ key }}) {{
+                  limiterCalls += 1;
+                  assert.match(key, /:us:AAPL$/);
+                  return {{ success: false }};
+                }},
+              }},
+            }};
+            const limited = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL", {{
+                headers: {{ "cf-connecting-ip": "203.0.113.8" }},
+              }}),
+              limitedEnv,
+            );
+            assert.equal(limited.status, 429);
+            assert.equal(limited.headers.get("retry-after"), "60");
+            const limitedPayload = await limited.json();
+            assert.equal(limitedPayload.contract_version, "live-quote-v1");
+            assert.equal(limitedPayload.error, "RATE_LIMITED");
+            assert.equal(limitedPayload.quote_status, "UNAVAILABLE");
+            assert.equal(limitedPayload.provider_class, "SCHEDULED_SNAPSHOT");
+            assert.equal(limitedPayload.data_mode, "SCHEDULED_SNAPSHOT");
+            assert.equal(limitedPayload.realtime_guaranteed, false);
+            assert.equal(limiterCalls, 1);
+            assert.equal(upstreamCalls, 0);
+            """
+        )
+
+    def test_live_api_rejects_reference_prices_without_complete_snapshot_quote_provenance(self) -> None:
+        run_node(
+            f"""
+            import assert from "node:assert/strict";
+            const worker = (await import({json.dumps(WORKER_URI)} + "?strict-snapshot-provenance")).default;
+            const latest = {{
+              generated_at: "2026-08-22T08:20:00+08:00",
+              snapshot_key: "2026-08-25_2026-08-22_082000.json",
+              markets: {{ us: {{ decision: {{ watchlist: [
+                {{ code: "AAPL", entry_price: 210, price: 211, kline: [{{ close: 212 }}] }},
+                {{ code: "MSFT", realtime: {{ price: 500, fetched_at: "2026-08-22T08:18:30+08:00", volume_unit: "share" }} }},
+                {{ code: "GOOG", realtime: {{ price: 190, source_as_of: "2026-08-22T07:59:00+08:00", fetched_at: "2026-08-22T08:18:30+08:00" }} }},
+                {{ code: "AMZN", realtime: {{ price: 0, source_as_of: "2026-08-22T07:59:00+08:00", fetched_at: "2026-08-22T08:18:30+08:00", volume_unit: "share" }} }},
+              ] }} }} }},
+            }};
+            let upstreamCalls = 0;
+            globalThis.fetch = async () => {{ upstreamCalls += 1; throw new Error("unexpected upstream"); }};
+            const env = {{ ASSETS: {{ async fetch(input) {{
+              const url = new URL(typeof input === "string" ? input : input.url);
+              return url.pathname === "/data/picks/latest.json"
+                ? new Response(JSON.stringify(latest), {{ headers: {{ "content-type": "application/json" }} }})
+                : new Response("missing", {{ status: 404 }});
+            }} }} }};
+
+            for (const code of ["AAPL", "MSFT", "GOOG", "AMZN"]) {{
+              const response = await worker.fetch(
+                new Request(`https://xuangu.alixjd.com/api/live?market=us&code=${{code}}`),
+                env,
+              );
+              assert.equal(response.status, 502, code);
+              const payload = await response.json();
+              assert.equal(payload.contract_version, "live-quote-v1");
+              assert.equal(payload.error, "SNAPSHOT_QUOTE_UNAVAILABLE");
+              assert.equal(payload.data_mode, "SCHEDULED_SNAPSHOT");
+              assert.equal(payload.provider_class, "SCHEDULED_SNAPSHOT");
+              assert.equal(payload.is_realtime, false);
+              assert.equal(payload.realtime_guaranteed, false);
+              assert.equal(payload.price, null);
+            }}
+            assert.equal(upstreamCalls, 0);
+            """
+        )
+
+    def test_live_api_fails_open_on_limiter_binding_error_and_structures_asset_failures(self) -> None:
+        run_node(
+            f"""
+            import assert from "node:assert/strict";
+            const worker = (await import({json.dumps(WORKER_URI)} + "?live-failure-contracts")).default;
+            const latest = {{
+              generated_at: "2026-08-22T08:20:00+08:00",
+              snapshot_key: "2026-08-25_2026-08-22_082000.json",
+              markets: {{ us: {{ decision: {{ primary: {{
+                code: "AAPL",
+                realtime: {{
+                  price: 210,
+                  change_pct: 2.4,
+                  previous_close: 205,
+                  volume: 120000,
+                  volume_unit: "share",
+                  session: "closed",
+                  source: "Yahoo scheduled quote",
+                  source_as_of: "2026-08-22T07:59:00+08:00",
+                  fetched_at: "2026-08-22T08:18:30+08:00",
+                }},
+              }} }} }} }},
+            }};
+            const validAssets = {{ async fetch() {{
+              return new Response(JSON.stringify(latest), {{ headers: {{ "content-type": "application/json" }} }});
+            }} }};
+            const limiterFailure = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
+              {{
+                ASSETS: validAssets,
+                LIVE_RATE_LIMITER: {{ async limit() {{ throw new Error("binding unavailable"); }} }},
+              }},
+            );
+            assert.equal(limiterFailure.status, 200);
+            const limiterPayload = await limiterFailure.json();
+            assert.equal(limiterPayload.ok, true);
+            assert.equal(limiterPayload.rate_limit_status, "unavailable_fail_open");
+            assert.equal(limiterPayload.provider_class, "SCHEDULED_SNAPSHOT");
+
+            for (const assets of [
+              {{ async fetch() {{ throw new Error("asset binding unavailable"); }} }},
+              {{ async fetch() {{ return new Response("{{broken-json", {{ status: 200 }}); }} }},
+              {{ async fetch() {{ return new Response("[]", {{ status: 200 }}); }} }},
+            ]) {{
+              const response = await worker.fetch(
+                new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
+                {{ ASSETS: assets }},
+              );
+              assert.equal(response.status, 503);
+              const payload = await response.json();
+              assert.equal(payload.contract_version, "live-quote-v1");
+              assert.equal(payload.error, "LATEST_SNAPSHOT_UNAVAILABLE");
+              assert.equal(payload.data_mode, "SCHEDULED_SNAPSHOT");
+              assert.equal(payload.provider_class, "SCHEDULED_SNAPSHOT");
+              assert.equal(payload.is_realtime, false);
+            }}
+
+            const statusFailure = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/status"),
+              {{ ASSETS: {{ async fetch() {{ return new Response("not-json"); }} }} }},
+            );
+            assert.equal(statusFailure.status, 503);
+            const statusPayload = await statusFailure.json();
+            assert.equal(statusPayload.ok, false);
+            assert.equal(statusPayload.error, "API_ASSET_UNAVAILABLE");
+            assert.equal(statusPayload.data_mode, "scheduled_snapshot");
+            assert.equal(statusPayload.device_dependency, false);
             """
         )
 
