@@ -172,6 +172,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertIn('rglob(pattern)', workflow)
         self.assertIn("actions/upload-artifact@v4", workflow)
         self.assertIn("actions/download-artifact@v4", workflow)
+        self.assertIn("Install archive validation dependencies", workflow)
         self.assertIn("git worktree add --detach", workflow)
         self.assertIn('rebase origin/main', workflow)
         self.assertIn("Archive push attempt ${attempt}/3", workflow)

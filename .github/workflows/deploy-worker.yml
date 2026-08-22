@@ -354,6 +354,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install archive validation dependencies
+        run: pip install -r requirements.txt
+
       - name: Download verified recovery bundle
         uses: actions/download-artifact@v4
         with:
