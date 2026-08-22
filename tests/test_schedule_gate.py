@@ -106,6 +106,108 @@ class ScheduleGateTests(unittest.TestCase):
         )
         self.assertEqual(source, "local")
 
+    def test_fallback_retries_snapshot_with_recoverable_a_share_source_failure(self) -> None:
+        slot = dt.datetime.fromisoformat("2026-08-21T14:58:00+08:00")
+        degraded = {
+            "generated_at": "2026-08-21T15:03:00+08:00",
+            "markets": {
+                "a_share": {
+                    "quote_health": {
+                        "status": "unavailable",
+                        "requested_count": 96,
+                        "quote_count": 0,
+                        "quote_coverage": 0.0,
+                        "reason_codes": ["TENCENT_QUOTE_UNAVAILABLE"],
+                    },
+                    "pool_health": {
+                        "status": "degraded",
+                        "reason_codes": ["QUOTE_COVERAGE_BELOW_MINIMUM"],
+                    },
+                }
+            },
+        }
+        self.assertIn(
+            "TENCENT_QUOTE_UNAVAILABLE",
+            self.module.snapshot_data_source_recovery_reasons(degraded),
+        )
+        source = self.module.published_checkpoint_source(
+            slot,
+            status_url="https://example.test/api/latest",
+            latest_path=pathlib.Path("data/picks/latest.json"),
+            url_loader=lambda _url: degraded,
+            path_loader=lambda _path: degraded,
+        )
+        self.assertIsNone(source)
+
+    def test_structural_model_blockers_do_not_cause_endless_fallback(self) -> None:
+        slot = dt.datetime.fromisoformat("2026-08-21T14:58:00+08:00")
+        structurally_blocked = {
+            "generated_at": "2026-08-21T15:03:00+08:00",
+            "data_health": {
+                "blocker_codes": [
+                    "TEN_DAY_PROBABILITY_UNCALIBRATED",
+                    "EXTERNAL_EVIDENCE_MISSING",
+                ]
+            },
+            "markets": {
+                "a_share": {
+                    "quote_health": {
+                        "status": "available",
+                        "requested_count": 96,
+                        "quote_count": 96,
+                        "quote_coverage": 1.0,
+                        "reason_codes": [],
+                    },
+                    "pool_health": {"status": "healthy", "reason_codes": []},
+                },
+                "hk": {"stats": {"raw_pool_size": 153, "scored_size": 62}},
+                "us": {"stats": {"raw_pool_size": 258, "scored_size": 246}},
+            },
+        }
+        self.assertEqual(
+            self.module.snapshot_data_source_recovery_reasons(structurally_blocked),
+            [],
+        )
+        source = self.module.published_checkpoint_source(
+            slot,
+            status_url="https://example.test/api/latest",
+            latest_path=None,
+            url_loader=lambda _url: structurally_blocked,
+        )
+        self.assertEqual(source, "live")
+
+    def test_hk_or_us_empty_scoring_is_recoverable(self) -> None:
+        snapshot = {
+            "markets": {
+                "hk": {"stats": {"raw_pool_size": 153, "scored_size": 0}},
+                "us": {"stats": {"raw_pool_size": 258, "scored_size": 100}},
+            }
+        }
+        self.assertEqual(
+            self.module.snapshot_data_source_recovery_reasons(snapshot),
+            ["HK_SCORING_EMPTY"],
+        )
+
+    def test_hk_yahoo_source_failure_is_recoverable(self) -> None:
+        snapshot = {
+            "markets": {
+                "hk": {
+                    "quote_health": {
+                        "status": "unavailable",
+                        "requested_count": 153,
+                        "quote_count": 0,
+                        "quote_coverage": 0.0,
+                        "reason_codes": ["YAHOO_QUOTE_UNAVAILABLE"],
+                    },
+                    "stats": {"raw_pool_size": 153, "scored_size": 0},
+                }
+            }
+        }
+        reasons = self.module.snapshot_data_source_recovery_reasons(snapshot)
+        self.assertIn("HK_QUOTE_UNAVAILABLE", reasons)
+        self.assertIn("YAHOO_QUOTE_UNAVAILABLE", reasons)
+        self.assertIn("HK_SCORING_EMPTY", reasons)
+
     def test_main_emits_machine_readable_scheduled_slot(self) -> None:
         output = io.StringIO()
         with (

@@ -1,0 +1,76 @@
+name: Configure realtime gateway DNS
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  configure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Create idempotent Tunnel CNAME
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DNS_API_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          ZONE_ID: da94cf7b8432c94ab8e6ccc5242406f5
+          HOSTNAME: xuangu-quotes.alixjd.com
+          TUNNEL_ID: b7bf3e02-940e-491e-953a-11e695a7f511
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+
+          token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+          if not token:
+              raise SystemExit("CLOUDFLARE_API_TOKEN is missing")
+          zone_id = os.environ["ZONE_ID"]
+          hostname = os.environ["HOSTNAME"]
+          target = f"{os.environ['TUNNEL_ID']}.cfargotunnel.com"
+          base = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/json",
+              "Content-Type": "application/json",
+          }
+
+          def request(method, url, payload=None):
+              body = json.dumps(payload).encode() if payload is not None else None
+              req = urllib.request.Request(url, data=body, headers=headers, method=method)
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  result = json.load(response)
+              if not result.get("success"):
+                  raise SystemExit("Cloudflare DNS operation failed")
+              return result.get("result")
+
+          query = urllib.parse.urlencode({"name": hostname})
+          records = request("GET", f"{base}?{query}")
+          desired = {"type": "CNAME", "name": hostname, "content": target, "proxied": True, "ttl": 1}
+          if not records:
+              request("POST", base, desired)
+              print(f"Created {hostname} -> {target}")
+          elif (
+              len(records) == 1
+              and records[0].get("type") == "CNAME"
+              and str(records[0].get("content") or "").lower().rstrip(".") == target.lower().rstrip(".")
+          ):
+              if records[0].get("proxied") is True and records[0].get("ttl") == 1:
+                  print(f"Already configured {hostname} -> {target}")
+              else:
+                  request("PATCH", f"{base}/{records[0]['id']}", {"proxied": True, "ttl": 1})
+                  print(f"Updated proxy settings for {hostname}")
+          else:
+              raise SystemExit(f"Refusing to overwrite unrelated DNS record at {hostname}")
+          PY
+
+      - name: Verify public Tunnel health
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error --max-time 10 https://xuangu-quotes.alixjd.com/health; then
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1

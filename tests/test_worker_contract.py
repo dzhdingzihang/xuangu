@@ -40,6 +40,23 @@ def run_node(script: str) -> None:
 
 
 class WorkerApiContractTests(unittest.TestCase):
+    def test_worker_prefers_authenticated_futu_gateway_and_labels_public_fallback(self) -> None:
+        source = (ROOT / "src" / "index.js").read_text(encoding="utf-8")
+        for token in (
+            "REALTIME_GATEWAY_URL",
+            "QUOTE_GATEWAY_TOKEN",
+            "FUTU_OPEND",
+            "LICENSED_REALTIME",
+            "PUBLIC_BEST_EFFORT",
+            "public_best_effort_1m",
+            "realtime_guaranteed",
+            "LIVE_RATE_LIMITER",
+            "RATE_LIMITED",
+            "PICK_NOT_FOUND",
+            "INVALID_DATE",
+        ):
+            self.assertIn(token, source)
+
     def test_status_force_https_and_security_contract(self) -> None:
         run_node(
             f"""
@@ -118,6 +135,13 @@ class WorkerApiContractTests(unittest.TestCase):
             f"""
             import assert from "node:assert/strict";
             const worker = (await import({json.dumps(WORKER_URI)} + "?live-contract")).default;
+            const latest = {{
+              markets: {{
+                a_share: {{ decision: {{ watchlist: [{{ code: "603228" }}] }} }},
+                hk: {{ decision: {{ watchlist: [{{ code: "0700.HK" }}] }} }},
+                us: {{ decision: {{ watchlist: [{{ code: "AAPL" }}] }} }},
+              }},
+            }};
             const jsonResponse = (payload) => new Response(JSON.stringify(payload), {{
               status: 200,
               headers: {{ "content-type": "application/json" }},
@@ -140,20 +164,28 @@ class WorkerApiContractTests(unittest.TestCase):
                 return jsonResponse({{ chart: {{ result: [{{
                   meta: {{
                     regularMarketPrice: 210,
-                    previousClose: 205,
+                    chartPreviousClose: 205,
                     regularMarketVolume: 120000,
                     regularMarketTime: 1787148000,
-                    marketState: "REGULAR",
+                    currentTradingPeriod: {{
+                      pre: {{ start: 1787112000, end: 1787131800 }},
+                      regular: {{ start: 1787131800, end: 1787148000 }},
+                      post: {{ start: 1787148000, end: 1787162400 }},
+                    }},
                   }},
-                  timestamp: [1787148000],
+                  timestamp: [1787148000, 1787162340],
                   indicators: {{ quote: [{{
-                    open: [206], high: [212], low: [204], close: [210], volume: [120000],
+                    open: [206, 211], high: [212, 214], low: [204, 210], close: [210, 213], volume: [120000, 800],
                   }}] }},
                 }}] }} }});
               }}
               throw new Error(`Unexpected URL: ${{url}}`);
             }};
-            const env = {{ ASSETS: {{ fetch: async () => new Response("not used") }} }};
+            const env = {{ ASSETS: {{ fetch: async (input) => {{
+              const url = new URL(typeof input === "string" ? input : input.url);
+              if (url.pathname === "/data/picks/latest.json") return jsonResponse(latest);
+              return new Response("missing", {{ status: 404 }});
+            }} }} }};
 
             const aResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/live?market=a_share&code=603228"),
@@ -163,8 +195,14 @@ class WorkerApiContractTests(unittest.TestCase):
             const aShare = await aResponse.json();
             assert.equal(aShare.volume, 1234);
             assert.equal(aShare.volume_unit, "lot");
+            assert.equal(aShare.contract_version, "live-quote-v1");
             assert.ok(aShare.source_as_of);
             assert.match(aShare.fetched_at, /\+08:00$/);
+            assert.equal(aShare.provider, "eastmoney");
+            assert.ok(["REALTIME", "DELAYED", "LAST_CLOSE"].includes(aShare.quote_status));
+            assert.ok(["fresh", "stale", "last_close"].includes(aShare.freshness));
+            assert.equal(typeof aShare.latency_seconds, "number");
+            assert.ok(aShare.session);
 
             const usResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
@@ -176,6 +214,10 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(us.volume_unit, "share");
             assert.ok(us.source_as_of);
             assert.match(us.fetched_at, /\+08:00$/);
+            assert.equal(us.price, 213);
+            assert.equal(us.provider, "yahoo_finance");
+            assert.equal(us.price_kind, "after_hours");
+            assert.match(us.source, /1m includePrePost/);
 
             const hkResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/live?market=hk&code=0700.HK"),
@@ -185,6 +227,84 @@ class WorkerApiContractTests(unittest.TestCase):
             const hk = await hkResponse.json();
             assert.equal(hk.market, "hk");
             assert.equal(hk.volume_unit, "share");
+            assert.equal(hk.price, 213);
+            assert.equal(hk.source_as_of, us.source_as_of);
+            """
+        )
+
+    def test_live_api_validates_market_code_whitelist_and_uses_ten_second_cache(self) -> None:
+        run_node(
+            f"""
+            import assert from "node:assert/strict";
+            const worker = (await import({json.dumps(WORKER_URI)} + "?live-validation-cache")).default;
+            const latest = {{
+              markets: {{
+                a_share: {{ decision: {{ watchlist: [{{ code: "603228" }}] }} }},
+                hk: {{ decision: {{ watchlist: [{{ code: "0700.HK" }}] }} }},
+                us: {{ decision: {{ watchlist: [{{ code: "AAPL" }}] }} }},
+              }},
+            }};
+            const jsonResponse = (payload) => new Response(JSON.stringify(payload), {{
+              status: 200,
+              headers: {{ "content-type": "application/json" }},
+            }});
+            let upstreamCalls = 0;
+            globalThis.fetch = async (input) => {{
+              upstreamCalls += 1;
+              const timestamp = Math.floor(Date.now() / 1000) - 20;
+              return jsonResponse({{ chart: {{ result: [{{
+                meta: {{
+                  chartPreviousClose: 205,
+                  regularMarketVolume: 120000,
+                  marketState: "REGULAR",
+                }},
+                timestamp: [timestamp],
+                indicators: {{ quote: [{{ close: [210], volume: [120000] }}] }},
+              }}] }} }});
+            }};
+            const env = {{ ASSETS: {{ fetch: async (input) => {{
+              const url = new URL(typeof input === "string" ? input : input.url);
+              if (url.pathname === "/data/picks/latest.json") return jsonResponse(latest);
+              return new Response("missing", {{ status: 404 }});
+            }} }} }};
+
+            const invalidMarket = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=crypto&code=AAPL"), env,
+            );
+            assert.equal(invalidMarket.status, 400);
+            const invalidMarketPayload = await invalidMarket.json();
+            assert.equal(invalidMarketPayload.error, "INVALID_MARKET");
+            assert.equal(invalidMarketPayload.contract_version, "live-quote-v1");
+            for (const field of ["provider", "session", "session_label", "latency_seconds", "quote_status", "fetched_at"]) {{
+              assert.ok(Object.hasOwn(invalidMarketPayload, field), `missing unified error field: ${{field}}`);
+            }}
+
+            const invalidCode = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=../AAPL"), env,
+            );
+            assert.equal(invalidCode.status, 400);
+            assert.equal((await invalidCode.json()).error, "INVALID_CODE");
+
+            const outsideSnapshot = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=MSFT"), env,
+            );
+            assert.equal(outsideSnapshot.status, 404);
+            assert.equal((await outsideSnapshot.json()).error, "LIVE_CODE_NOT_IN_CURRENT_SNAPSHOT");
+
+            const first = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=aapl"), env,
+            );
+            const second = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"), env,
+            );
+            assert.equal(first.status, 200);
+            assert.equal(second.status, 200);
+            assert.equal(upstreamCalls, 1);
+            const firstPayload = await first.json();
+            const secondPayload = await second.json();
+            assert.equal(firstPayload.code, "AAPL");
+            assert.equal(secondPayload.source_as_of, firstPayload.source_as_of);
+            assert.equal(firstPayload.cache_ttl_seconds, 10);
             """
         )
 

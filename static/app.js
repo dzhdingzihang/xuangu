@@ -72,6 +72,7 @@ const GLOBAL_BLOCKER_META = {
   QUOTE_HEALTH_INCOMPLETE: "行情覆盖率或源时间不完整",
 };
 const STATUS_POLL_INTERVAL_MS = 5 * 60 * 1000;
+const LIVE_POLL_INTERVAL_MS = 15 * 1000;
 const HISTORY_LIMIT = 1000;
 const FRESHNESS_META = {
   fresh: { label: "数据正常", icon: "ph-check-circle", className: "is-fresh" },
@@ -514,6 +515,31 @@ function candidatePrice(candidate) {
   return num(live?.price || live?.current_price || candidate?.current_price || candidate?.realtime?.price || candidate?.entry_price || candidate?.price, NaN);
 }
 
+function liveSourceEpoch(value) {
+  const parsed = Date.parse(value || "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function shouldApplyLiveQuote(candidate, payload, existing = null) {
+  const quotedPrice = num(payload?.price ?? payload?.current_price, NaN);
+  if (payload?.ok !== true || payload?.quote_status === "UNAVAILABLE" || !Number.isFinite(quotedPrice) || quotedPrice <= 0) return false;
+  const sourceEpoch = liveSourceEpoch(payload.source_as_of);
+  const snapshotEpoch = liveSourceEpoch(candidate?.realtime?.source_as_of);
+  const existingEpoch = liveSourceEpoch(existing?.source_as_of);
+  const baselineEpoch = Math.max(snapshotEpoch, existingEpoch);
+  if (!sourceEpoch || sourceEpoch < baselineEpoch) return false;
+  return true;
+}
+
+function liveQuoteLabel(candidate, market) {
+  const live = state.live.get(candidateId(candidate, market));
+  if (!live) return "";
+  const provider = live.provider || live.source || "unknown";
+  const session = live.session_label || live.session || "时段未知";
+  const latency = Number.isFinite(Number(live.latency_seconds)) ? `${fmt(live.latency_seconds, 0)} 秒延迟` : "延迟未知";
+  return `${provider} · ${session} · ${latency} · ${live.quote_status || "UNKNOWN"}`;
+}
+
 function liveMerged(candidate, market) {
   const live = state.live.get(candidateId(candidate, market));
   if (!live) return candidate;
@@ -608,11 +634,11 @@ function showToast(message, type = "info") {
   window.setTimeout(() => toast.remove(), 3600);
 }
 
-async function getJson(url) {
-  const response = await fetch(url, { cache: "no-store", headers: { accept: "application/json" } });
+async function getJson(url, options = {}) {
+  const response = await fetch(url, { cache: "no-store", headers: { accept: "application/json" }, ...options });
   let payload;
   try { payload = await response.json(); } catch { payload = {}; }
-  if (!response.ok) throw new Error(payload.error || `请求失败 ${response.status}`);
+  if (!response.ok) throw new Error(payload.message || payload.error || `请求失败 ${response.status}`);
   return payload;
 }
 
@@ -699,6 +725,7 @@ function switchTab(tab, writeHash = true) {
   if (writeHash && location.hash !== `#${tab}`) history.replaceState(null, "", `#${tab}`);
   updateTopbar();
   renderActiveTab();
+  window.setTimeout(pollVisibleLive, 0);
 }
 
 function renderKpis(items) {
@@ -909,7 +936,7 @@ function renderLegacyMarketDecision() {
               <div><small>目标参考</small><strong>${price(candidate.take_profit_reference)}</strong><span>${esc(range.text || "--")}</span></div>
               <div class="${advice.tone}"><small>当前执行状态</small><strong>${esc(advice.label)}</strong><span>${advice.deviation === null ? "实时偏离 --" : `实时偏离 ${pct(advice.deviation)}`}</span></div>
             </div>
-            <div class="callout ${advice.tone === "negative" ? "negative" : advice.tone === "warning" ? "warning" : ""}">${icon(advice.tone === "positive" ? "ph-check-circle" : "ph-warning-circle")}<div><strong>${esc(advice.label)}</strong><br>${esc(advice.text)} ${live ? `行情源：${esc(live.source || "--")}；源时间：${esc(dateTime(live.source_as_of))}。` : "点击“刷新当前行情”可更新价格；评分和排序不会随之重算。"}</div></div>
+            <div class="callout ${advice.tone === "negative" ? "negative" : advice.tone === "warning" ? "warning" : ""}">${icon(advice.tone === "positive" ? "ph-check-circle" : "ph-warning-circle")}<div><strong>${esc(advice.label)}</strong><br>${esc(advice.text)} ${live ? `行情：${esc(liveQuoteLabel(baseCandidate, state.market))}；源时间：${esc(dateTime(live.source_as_of))}。` : "点击“刷新当前行情”可更新价格；评分和排序不会随之重算。"}</div></div>
           </div>
         </article>
         <article class="chart-card"><header class="chart-header"><div><h3 class="chart-title">价格结构与计划位</h3><p class="chart-subtitle">日 K · MA5 / MA10 / MA20 · 当前行情只覆盖图表和执行提示</p></div>${badge(`${(candidate.kline || []).length} 根K线`)}</header><div class="chart-shell"><canvas id="decisionChart" aria-label="${esc(candidate.name)}日K线图"></canvas></div></article>
@@ -931,8 +958,9 @@ function renderDecision() {
   const research = truth.research;
   const executableMode = truth.action === "REVIEW_EXECUTABLE_PICK" && Boolean(truth.executable);
   const selected = executableMode ? truth.executable : research;
-  const candidate = selected?.candidate || null;
   const selectedMarket = selected?.market || "";
+  const baseCandidate = selected?.candidate || null;
+  const candidate = baseCandidate ? liveMerged(baseCandidate, selectedMarket) : null;
   const selectedKey = candidate ? candidateId(candidate, selectedMarket) : "";
   const selectedEvent = candidate ? (executableMode ? automaticExternalEvents() : manualEvidenceForSnapshot()).find((event) => {
     const symbol = String(candidate.code || candidate.symbol || "").toLowerCase();
@@ -983,6 +1011,7 @@ function renderDecision() {
             ? `<div class="research-metrics"><div><small>预期净效用</small><b>${pct(num(executablePrimary.expected_net_utility) * 100, 2)}</b></div><div><small>交易成本</small><b>${ratioPct(executablePrimary.transaction_cost, 2)}</b></div><div><small>尾部风险</small><b>${ratioPct(executablePrimary.tail_risk, 2)}</b></div></div>`
             : `<div class="research-metrics"><div><small>Legacy</small><b>#${selected.legacyRank}</b></div><div><small>V2 结构</small><b>${candidate.v2?.rank ? `#${candidate.v2.rank}/${candidate.v2.rank_universe_size || "--"}` : "--"}</b></div><div><small>上涨概率</small><b>未校准</b></div></div>`}
           <div class="research-evidence"><span>${icon("ph-calendar-dots")}<b>${executableMode ? "已准入官方证据" : "下一可核验事件"}</b></span><p>${esc(selectedEvent?.title || "自动事件证据尚未入库")}</p><small>${selectedEvent ? `${executableMode ? "自动核验入库" : "人工核验"} · ${dateTime(selectedEvent.effective_at)} · ${executableMode ? `模型 ${executablePrimary.model_id}` : "不参与自动门禁"}` : "请在事件证据页补齐官方来源"}</small></div>
+          <div class="research-evidence"><span>${icon("ph-waveform")}<b>当前行情</b></span><p>${price(candidatePrice(candidate))}</p><small>${esc(liveQuoteLabel(baseCandidate, selectedMarket) || "等待 15 秒可见页行情刷新；快照价继续保留")}</small></div>
           <button class="primary-button" type="button" data-action="open-candidate" data-key="${esc(selectedKey)}">${executableMode ? "复核执行计划" : "查看完整评分与风险"} ${icon("ph-arrow-right")}</button>` : `<div class="empty-state">${icon("ph-binoculars")}<h3>暂无研究优先项</h3><p>本轮快照未保留任何跨市场候选。</p></div>`}
       </article>
     </section>
@@ -1052,9 +1081,12 @@ function candidateDetail(row) {
   const dualLow = dualLowAnalysis(candidate);
   const coverage = marketCoverageState(market);
   const marketGate = coverage.state === "READY" ? "" : `<div class="callout ${coverage.state === "BLOCKED" ? "negative" : "warning"}">${icon(coverage.state === "BLOCKED" ? "ph-warning-octagon" : "ph-warning-circle")}<div><strong>市场级门禁：${coverage.state}</strong><br>${esc(coverage.reasons.join("；") || "市场覆盖尚未达到跨市场可执行标准")}。单股门控通过也不能绕过市场级阻断。</div></div>`;
+  const live = state.live.get(candidateId(raw, market));
+  const liveStatus = live ? `<div class="callout info">${icon("ph-waveform")}<div><strong>当前行情：${esc(liveQuoteLabel(raw, market))}</strong><br>源时间 ${esc(dateTime(live.source_as_of))}；抓取时间 ${esc(dateTime(live.fetched_at))}。实时价只覆盖展示和执行提示，不重算快照评分。</div></div>` : "";
   return `<article class="detail-panel candidate-detail">
     <header class="detail-header"><div><div class="eyebrow">${marketBadge(market)} ${esc(MARKET_META[market].label)} · ${esc(candidate.code || candidate.symbol)}</div><h2 class="detail-title">${esc(candidate.name)}</h2><p class="detail-subtitle">${esc(candidate.role || candidate.reason_tags || "综合候选")}</p></div><div class="detail-actions">${badge(`Legacy #${row.legacyRank}`, "primary")}${candidate.v2?.rank ? badge(`V2 #${candidate.v2.rank}/${candidate.v2.rank_universe_size}`, "purple") : ""}${dualLow?.status === "ranked" ? badge(`双低 #${dualLow.rank}/${dualLow.rank_universe_size}`, "positive") : dualLow ? badge(dualLowLabel(dualLow), dualLowTone(dualLow)) : ""}</div></header>
     ${marketGate}
+    ${liveStatus}
     ${scoreLensCards(candidate, market)}
     ${scoreDivergence(candidate, market)}
     <div class="detail-section"><div class="section-heading"><h3>来源链</h3><span>${esc(lineage.universe_origin || (market === "a_share" ? "dynamic_snapshot" : "curated_static"))}</span></div>${routes.length ? `<ul class="event-list">${routes.map((route) => `<li><h4>${esc(route.route || "legacy")} · ${esc(route.source || "来源未保存")}</h4><p>${esc(route.reason || "该路径召回")}</p><div class="event-meta"><span>${esc(route.published_at || route.observed_at || "时间未保存")}</span>${route.decay_weight !== undefined ? `<span>延续权重 ${fmt(route.decay_weight, 2)}</span>` : ""}</div></li>`).join("")}</ul>` : `<div class="callout">${icon("ph-info")}<div>旧快照没有结构化召回来源；这不会影响旧评分，但 V2 事件组不据此加分。</div></div>`}</div>
@@ -1288,6 +1320,28 @@ function historyTargetLabel(item, compact = false) {
   return compact ? "归档" : "Legacy 归档日";
 }
 
+function shadowOutcomeStatus(item) {
+  const status = String(item?.shadow_outcome?.status || "").toUpperCase();
+  return status === "PENDING" || status === "SETTLED" ? status : "";
+}
+
+function shadowLedgerStats(items = state.history) {
+  return items.reduce((counts, item) => {
+    const status = shadowOutcomeStatus(item);
+    if (status === "PENDING") counts.shadow_pending += 1;
+    if (status === "SETTLED") counts.shadow_settled += 1;
+    return counts;
+  }, { shadow_pending: 0, shadow_settled: 0 });
+}
+
+function shadowOutcomeTag(item) {
+  const status = shadowOutcomeStatus(item);
+  if (!status) return "";
+  const label = status === "PENDING" ? "研究跟踪 PENDING" : "研究跟踪 SETTLED";
+  const title = "影子研究台账；不计入可执行绩效、胜率或收益";
+  return `<span class="status-pill ${status === "SETTLED" ? "primary" : "warning"}" title="${title}">${label}</span>`;
+}
+
 function filteredHistory() {
   const needle = state.historyQuery.trim().toLowerCase();
   return state.history.filter((item) => {
@@ -1317,10 +1371,13 @@ function historyDetail(item) {
   const rangeNote = summary.estimated_2w_range ? "Legacy 两周规则估计" : summary.estimated_2d_range ? "旧版两日规则估计" : "未保存";
   const globalContract = historyKind(item) === "global_10d_v1";
   const globalPrimary = globalContract ? item.global_decision?.primary : null;
+  const shadowStatus = shadowOutcomeStatus(item);
+  const shadowEvidence = shadowStatus ? `<div class="callout info">${icon("ph-flask")}<div><strong>${shadowStatus === "PENDING" ? "研究跟踪 PENDING" : "研究跟踪 SETTLED"}</strong><br>这是 research_priority 的影子研究台账，仅用于验证研究排序；不计入可执行绩效、胜率或收益。${item.shadow_outcome?.prediction_id ? ` Prediction ID：${esc(item.shadow_outcome.prediction_id)}。` : ""}</div></div>` : "";
   const officialEvidence = globalPrimary ? `<div class="detail-section"><div class="section-heading"><h3>正式十日预测</h3><span>${esc(item.outcome?.status || "MISSING_OUTCOME")}</span></div><div class="detail-score-grid"><div><small>全局首选</small><strong>${esc(globalPrimary.name || "--")}</strong><span>${esc(globalPrimary.market || "--")} · ${esc(globalPrimary.code || globalPrimary.symbol || "--")}</span></div><div><small>P(R10 &gt; 0)</small><strong>${globalPrimary.probability == null ? "--" : `${fmt(num(globalPrimary.probability) * 100, 1)}%`}</strong><span>已校准模型概率</span></div><div><small>Prediction ID</small><strong class="mono">${esc(globalPrimary.prediction_id || "--")}</strong><span>${esc(globalPrimary.model_id || "--")}</span></div><div><small>Label</small><strong>${esc(globalPrimary.label_version || "--")}</strong><span>结算必须完全匹配</span></div></div></div>` : "";
   const archiveBadge = `LEGACY ${summary.has_primary ? "BUY" : "NO TRADE"}`;
   return `<article class="detail-panel history-detail"><header class="detail-header"><div><div class="eyebrow">${historyKindLabel(item)} 档案 · ${esc(itemKey || "--")}</div><h2 class="detail-title">${MARKET_META[state.historyMarket].label} · ${esc(summary.name || "本轮无 Legacy 首选")}</h2><p class="detail-subtitle">信号日 ${esc(item.signal_date || "--")} · ${historyTargetLabel(item)} ${esc(item.target_date || "--")} · 生成 ${esc(dateTime(item.generated_at))}</p></div>${badge(archiveBadge, summary.has_primary ? "warning" : "muted")}</header>
     ${officialEvidence}
+    ${shadowEvidence}
     <div class="detail-score-grid"><div><small>标的</small><strong>${esc(summary.name || "无")}</strong><span>${esc(summary.code || "--")}</span></div><div><small>Legacy 推荐度</small><strong>${fmt(summary.recommendation_degree ?? summary.confidence, 0)}</strong><span>规则分，非概率</span></div><div><small>参考价</small><strong>${price(summary.entry_price)}</strong><span>当时快照，不代表成交</span></div><div><small>${rangeLabel}</small><strong>${esc(summary.estimated_2w_range || summary.estimated_2d_range || "--")}</strong><span>${rangeNote}</span></div></div>
     <div class="callout warning">${icon("ph-warning-circle")}<div><strong>${globalContract ? `同日全局动作：${esc(item.global_decision?.action || "--")}；下方为独立 Legacy 市场档案` : "Legacy 规则档案，不属于 global-10d-v1 绩效样本"}</strong><br>快照不含可复现成交、复权退出价、费用与滑点结算，因此不展示“命中率”或伪造收益。</div></div>
     ${candidate ? `<div class="detail-section"><div class="section-heading"><h3>完整快照证据</h3><span>已载入</span></div>${factorCards(candidate)}<ul class="evidence-list">${(candidate.reasons || []).slice(0, 5).map((reason) => `<li><h4>${esc(reason)}</h4></li>`).join("")}</ul></div>` : `<div class="detail-section"><button class="primary-button" type="button" data-action="load-history" data-key="${esc(item.snapshot_key || item.cache_key)}">${icon("ph-download-simple")}载入完整快照证据</button></div>`}
@@ -1373,6 +1430,7 @@ function renderHistory() {
   const noValidPickDays = num(meta.no_valid_pick_day_count);
   const pending = num(meta.pending_settlement_count);
   const settled = num(meta.settled_sample_count);
+  const { shadow_pending, shadow_settled } = shadowLedgerStats(state.history);
   const missingOutcome = num(meta.missing_outcome_count);
   const returned = num(meta.returned_count, state.history.length);
   const hasMore = meta.has_more === true;
@@ -1388,7 +1446,7 @@ function renderHistory() {
   ];
   const coverageSentence = `${fmt(rawRuns, 0)} 次原始运行已合并为 ${fmt(decisionDays, 0)} 个决策日；${fmt(contractDays, 0)} 日属于 global-10d-v1，${fmt(legacyDays, 0)} 日仅为 Legacy 档案。`;
   root.innerHTML = `
-    <div class="principle-strip"><span><b>评估原则</b> 原始运行、每日决策、Legacy 档案和 global-10d 预测分开计数；只有合法结算样本才进入收益指标。</span><small class="${settled ? "positive" : "negative"}">当前：${fmt(settled, 0)} 个已结算样本</small></div>
+    <div class="principle-strip"><span><b>评估原则</b> 原始运行、每日决策、Legacy 档案、shadow research ledger 和 global-10d 预测分开计数；只有合法可执行结算样本才进入收益指标。</span><small class="${settled ? "positive" : "negative"}">当前：${fmt(settled, 0)} 个可执行已结算样本</small></div>
     <section class="evaluation-not-ready">
       <div><span class="status-pill ${settled ? "positive" : "negative"}">${settled ? "SETTLED COHORT" : "NO_SETTLED_SAMPLE · 0"}</span><h2>${settled ? "已有可核验的十日预测结算样本" : "暂无已结算的可执行预测样本"}</h2><p>${esc(coverageSentence)}</p><strong>${executable ? `${fmt(executable, 0)} 个可执行预测中，待结算 ${fmt(pending, 0)} 个、缺结算字段 ${fmt(missingOutcome, 0)} 个。` : `${fmt(contractDays, 0)} 个正式合同决策日中，NO_VALID_PICK 为 ${fmt(noValidPickDays, 0)} 日，因此没有买入预测可结算。`}</strong></div>
       <aside><h3>为什么当前不算收益</h3><ol><li>Legacy 快照不是十日模型预测</li><li>NO_VALID_PICK 是放弃，不是亏损样本</li><li>研究优先项不进入买入分母</li><li>结算必须包含成交、费用与复权口径</li><li>只有 outcome.status = SETTLED 才进入指标</li></ol></aside>
@@ -1401,6 +1459,8 @@ function renderHistory() {
       { icon: "ph-crosshair", label: "可执行预测", value: fmt(executable, 0), meta: "研究优先项不计入" },
       { icon: "ph-hourglass", label: "待结算", value: fmt(pending, 0), meta: "明确标记 PENDING" },
       { icon: "ph-check-circle", label: "已结算样本", value: fmt(settled, 0), tone: settled ? "positive" : "negative", meta: "完整 outcome 合同" },
+      { icon: "ph-flask", label: "研究跟踪 PENDING", value: fmt(shadow_pending, 0), tone: "warning", meta: "影子研究台账，不进入绩效" },
+      { icon: "ph-test-tube", label: "研究跟踪 SETTLED", value: fmt(shadow_settled, 0), tone: shadow_settled ? "primary" : "", meta: "不计入可执行绩效、胜率或收益" },
       { icon: "ph-prohibit", label: "真实放弃日", value: fmt(noValidPickDays, 0), meta: "NO_VALID_PICK 不算亏损" },
     ])}
     <div class="evaluation-tabs" aria-label="评估维度"><button class="is-active" type="button">10日表现</button><button type="button" disabled>概率校准</button><button type="button" disabled>分市场表现</button><button type="button" disabled>版本对比</button><button type="button" disabled>失效分析</button><span>不展示胜率或模拟收益 · 指标只读取合法 SETTLED outcome</span></div>
@@ -1409,7 +1469,7 @@ function renderHistory() {
     <details class="history-archive" ${state.historyArchiveOpen ? "open" : ""}><summary>${icon("ph-archive")} 查看每日决策快照（${hasMore ? `已载入 ${fmt(returned, 0)} / ` : ""}${fmt(decisionDays, 0)} 个决策日）</summary><div class="history-archive-body">
       <div class="callout info">${icon("ph-info")}<div><strong>${fmt(rawRuns, 0)} 次原始运行 → ${fmt(decisionDays, 0)} 个每日代表快照</strong><br>同一 target_date 优先展示正式 global-10d 合同，同类保留最后一次运行；绩效样本另按不可变 prediction_id 去重。</div></div>
       <div class="filter-strip"><div class="filter-group"><span>市场</span><div class="segmented-button">${MARKET_ORDER.map((market) => `<button data-action="history-market" data-market="${market}" aria-pressed="${state.historyMarket === market}">${MARKET_META[market].label}</button>`).join("")}</div></div><label>动作<select id="historyAction"><option value="all">全部</option><option value="buy">有 Legacy 首选</option><option value="no_trade">不交易</option></select></label><label class="search-field">${icon("ph-magnifying-glass")}<input id="historySearch" type="search" value="${esc(state.historyQuery)}" placeholder="搜索日期 / 公司 / 代码" aria-label="搜索历史"></label></div>
-      <div class="master-detail history-master-detail"><section class="panel"><header class="panel-header"><div><h3 class="panel-title">每日档案列表</h3><p class="panel-subtitle">明确区分信号日、Legacy 归档日、计划执行日和 global 合同</p></div></header>${rows.length ? `<div class="snapshot-list">${rows.map((item) => { const summary = historyMarketSummary(item); const official = item.global_decision?.primary; const key = item.snapshot_key || item.cache_key; const displayName = official?.name || summary.name || "本轮无 Legacy 首选"; const displayCode = official?.code || official?.symbol || summary.code || summary.message || "无首选"; const displayScore = official ? `${fmt(num(official.probability) * 100, 0)}%` : summary.has_primary ? fmt(summary.recommendation_degree ?? summary.confidence, 0) : "NO"; return `<button class="snapshot-row ${key === state.historyKey ? "is-selected" : ""}" type="button" data-action="select-history" data-key="${esc(key)}"><time>${historyTargetLabel(item, true)} ${esc(item.target_date || "--")}<small>信号 ${esc(item.signal_date || "--")} · ${esc(dateTime(item.generated_at, false))}</small></time><span><b>${esc(displayName)}</b><small>${esc(historyKindLabel(item))} · ${esc(displayCode)}</small></span><strong>${displayScore}</strong>${icon("ph-caret-right")}</button>`; }).join("")}</div>` : `<div class="empty-state">${icon("ph-funnel-x")}<h3>没有匹配快照</h3></div>`}</section><div>${historyDetail(selected)}</div></div>
+      <div class="master-detail history-master-detail"><section class="panel"><header class="panel-header"><div><h3 class="panel-title">每日档案列表</h3><p class="panel-subtitle">明确区分信号日、Legacy 归档日、计划执行日、研究跟踪和 global 合同</p></div></header>${rows.length ? `<div class="snapshot-list">${rows.map((item) => { const summary = historyMarketSummary(item); const official = item.global_decision?.primary; const key = item.snapshot_key || item.cache_key; const displayName = official?.name || summary.name || "本轮无 Legacy 首选"; const displayCode = official?.code || official?.symbol || summary.code || summary.message || "无首选"; const displayScore = official ? `${fmt(num(official.probability) * 100, 0)}%` : summary.has_primary ? fmt(summary.recommendation_degree ?? summary.confidence, 0) : "NO"; return `<button class="snapshot-row ${key === state.historyKey ? "is-selected" : ""}" type="button" data-action="select-history" data-key="${esc(key)}"><time>${historyTargetLabel(item, true)} ${esc(item.target_date || "--")}<small>信号 ${esc(item.signal_date || "--")} · ${esc(dateTime(item.generated_at, false))}</small></time><span><b>${esc(displayName)}</b><small>${esc(historyKindLabel(item))} · ${esc(displayCode)} ${shadowOutcomeTag(item)}</small></span><strong>${displayScore}</strong>${icon("ph-caret-right")}</button>`; }).join("")}</div>` : `<div class="empty-state">${icon("ph-funnel-x")}<h3>没有匹配快照</h3></div>`}</section><div>${historyDetail(selected)}</div></div>
     </div></details>`;
   const actionSelect = $("#historyAction");
   if (actionSelect) actionSelect.value = state.historyAction;
@@ -1579,10 +1639,18 @@ async function loadLive(candidate, market, notify = true) {
   if (!candidate) return;
   const key = candidateId(candidate, market);
   if (state.liveLoading.has(key)) return;
+  const requestGeneration = snapshotLoadGeneration;
+  const snapshotGeneratedAt = state.snapshot?.generated_at || "";
   state.liveLoading.add(key);
   try {
     const code = candidate.code || candidate.symbol;
     const payload = await getJson(`/api/live?market=${encodeURIComponent(market)}&code=${encodeURIComponent(code)}`);
+    if (requestGeneration !== snapshotLoadGeneration || snapshotGeneratedAt !== (state.snapshot?.generated_at || "")) return;
+    const existing = state.live.get(key);
+    if (!shouldApplyLiveQuote(candidate, payload, existing)) {
+      if (notify) showToast("实时源较旧，未覆盖快照价", "error");
+      return;
+    }
     state.live.set(key, payload);
     if (notify) showToast(`${candidate.name} 当前行情已更新；评分与排序保持快照值。`, "success");
     renderActiveTab();
@@ -1591,6 +1659,26 @@ async function loadLive(candidate, market, notify = true) {
   } finally {
     state.liveLoading.delete(key);
   }
+}
+
+function visibleLiveCandidate() {
+  if (!state.snapshot) return null;
+  if (state.tab === "decision") {
+    const truth = globalDecisionTruth();
+    const selected = truth.action === "REVIEW_EXECUTABLE_PICK" && truth.executable ? truth.executable : truth.research;
+    return selected?.candidate ? { candidate: selected.candidate, market: selected.market } : null;
+  }
+  if (state.tab === "candidates") {
+    const rows = filteredCandidates();
+    return rows.find((row) => candidateId(row.candidate, row.market) === state.candidateKey) || rows[0] || null;
+  }
+  return null;
+}
+
+async function pollVisibleLive() {
+  if (document.hidden) return;
+  const row = visibleLiveCandidate();
+  if (row) await loadLive(row.candidate, row.market, false);
 }
 
 async function loadHistorySnapshot(key) {
@@ -1704,6 +1792,7 @@ function handleClick(event) {
   if (action === "select-candidate") {
     state.candidateKey = key;
     renderCandidates();
+    window.setTimeout(pollVisibleLive, 0);
     if (window.matchMedia("(max-width: 760px)").matches) {
       requestAnimationFrame(() => $(".candidate-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
     }
@@ -1775,10 +1864,12 @@ async function initialize() {
   document.addEventListener("compositionstart", (event) => { if (event.target.matches?.("#candidateSearch, #eventSearch, #historySearch")) event.target.dataset.composing = "true"; });
   document.addEventListener("compositionend", (event) => { if (event.target.matches?.("#candidateSearch, #eventSearch, #historySearch")) { event.target.dataset.composing = "false"; handleInput(event); } });
   document.addEventListener("keydown", handleKeyboard);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pollVisibleLive(); });
   window.addEventListener("resize", handleResize);
   window.addEventListener("hashchange", () => switchTab(location.hash.slice(1), false));
   $("#refreshBtn").addEventListener("click", refreshAll);
   window.setInterval(pollStatus, STATUS_POLL_INTERVAL_MS);
+  window.setInterval(pollVisibleLive, LIVE_POLL_INTERVAL_MS);
   try {
     const [statusResult, historyResult, latestResult] = await Promise.allSettled([
       getJson("/api/status"), getHistoryPayload(), getJson("/api/latest"),

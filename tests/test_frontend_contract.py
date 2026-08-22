@@ -30,6 +30,30 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("评分和排序不会随之重算", self.js)
         self.assertIn('candidate.execution_state === "BLOCKED"', self.js)
 
+    def test_live_overlay_is_monotonic_and_visible_candidate_refreshes_every_fifteen_seconds(self) -> None:
+        self.assertIn("const LIVE_POLL_INTERVAL_MS = 15 * 1000", self.js)
+        self.assertRegex(self.js, r"function shouldApplyLiveQuote\(")
+        self.assertIn("payload.source_as_of", self.js)
+        self.assertIn("candidate?.realtime?.source_as_of", self.js)
+        self.assertRegex(self.js, r"sourceEpoch\s*<\s*baselineEpoch")
+        self.assertIn("if (document.hidden)", self.js)
+        self.assertIn('state.tab === "decision"', self.js)
+        self.assertIn('state.tab === "candidates"', self.js)
+        self.assertIn("window.setInterval(pollVisibleLive, LIVE_POLL_INTERVAL_MS)", self.js)
+        self.assertIn('document.addEventListener("visibilitychange"', self.js)
+        for field in ("provider", "session_label", "latency_seconds", "quote_status"):
+            self.assertIn(field, self.js)
+        self.assertIn("实时源较旧，未覆盖快照价", self.js)
+
+    def test_shadow_research_outcomes_are_reported_outside_executable_performance(self) -> None:
+        self.assertRegex(self.js, r"function shadowLedgerStats\(")
+        self.assertIn("shadow_outcome", self.js)
+        self.assertIn("shadow_pending", self.js)
+        self.assertIn("shadow_settled", self.js)
+        self.assertIn("研究跟踪 PENDING", self.js)
+        self.assertIn("研究跟踪 SETTLED", self.js)
+        self.assertIn("不计入可执行绩效、胜率或收益", self.js)
+
     def test_evidence_views_and_canvas_charts_are_implemented(self) -> None:
         for renderer in ("renderDecision", "renderCandidates", "renderEvents", "renderHistory", "renderModel", "renderHealth"):
             self.assertRegex(self.js, rf"function {renderer}\(")

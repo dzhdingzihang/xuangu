@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import unittest
 from unittest import mock
 
@@ -114,7 +115,7 @@ class SnapshotContractTests(unittest.TestCase):
             self.assertEqual(new["primary"]["score"], old["primary"]["score"])
             self.assertEqual(new["primary"]["recommendation_degree"], old["primary"]["recommendation_degree"])
 
-    def test_global_ten_day_gate_is_strict_without_calibration_or_external_evidence(self) -> None:
+    def test_global_ten_day_gate_is_strict_without_calibration_or_event_pipeline_scan(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())
         decision = enriched["global_decision"]
         self.assertEqual(decision["action"], "NO_VALID_PICK")
@@ -124,10 +125,29 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertFalse(decision["calibrated"])
         self.assertIsNone(decision["primary"])
         self.assertEqual(decision["research_priority"]["status"], "RESEARCH_ONLY")
-        self.assertIn("EXTERNAL_EVIDENCE_MISSING", decision["blocker_codes"])
+        self.assertIn("EVENT_PIPELINE_NOT_SCANNED", decision["blocker_codes"])
         self.assertIn("TEN_DAY_PROBABILITY_UNCALIBRATED", decision["blocker_codes"])
         self.assertEqual(set(decision["market_states"]), {"a_share", "hk", "us"})
         self.assertFalse(enriched["data_health"]["decision_usable"])
+
+    def test_snapshot_publishes_exchange_specific_trade_windows(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+
+        self.assertEqual(set(enriched["next_trade_dates"]), {"a_share", "hk", "us"})
+        self.assertEqual(set(enriched["forecast_end_dates"]), {"a_share", "hk", "us"})
+        self.assertNotEqual(enriched["next_trade_date"], enriched["forecast_end_date"])
+        self.assertEqual(enriched["next_trade_dates"]["a_share"], "2026-08-20")
+        self.assertEqual(enriched["next_trade_dates"]["hk"], "2026-08-20")
+        self.assertEqual(enriched["next_trade_dates"]["us"], "2026-08-19")
+        for market_key in ("a_share", "hk", "us"):
+            window = enriched["markets"][market_key]["trade_window"]
+            self.assertEqual(window["entry_trade_date"], enriched["next_trade_dates"][market_key])
+            self.assertEqual(window["forecast_end_trade_date"], enriched["forecast_end_dates"][market_key])
+            self.assertEqual(window["horizon_sessions"], 10)
+            self.assertGreater(
+                dt.datetime.fromisoformat(window["entry_session_open_at"]),
+                dt.datetime.fromisoformat(window["decision_time"]),
+            )
 
     def test_snapshot_validator_accepts_shadow_fallback_and_rejects_decision_participation(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())
@@ -142,6 +162,17 @@ class SnapshotContractTests(unittest.TestCase):
         errors = validate_snapshot(enriched)
         self.assertIn("analysis_models.ten_day_return is required", errors)
         self.assertIn("global_decision is required", errors)
+
+    def test_snapshot_validator_rejects_invalid_trade_window_or_range_horizon(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        enriched["forecast_end_dates"]["us"] = enriched["next_trade_dates"]["us"]
+        candidate = enriched["markets"]["us"]["decision"]["primary"]
+        candidate["estimated_2d_range"]["horizon_trade_days"] = 10
+
+        errors = validate_snapshot(enriched)
+
+        self.assertIn("forecast_end_dates.us must be the 10th XNYS session", errors)
+        self.assertIn("us:NVDA estimated_2d_range horizon must be 2", errors)
 
     def test_snapshot_validator_rejects_market_state_that_understates_sources(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())

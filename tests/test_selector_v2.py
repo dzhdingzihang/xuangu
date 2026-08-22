@@ -212,6 +212,47 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertEqual(scored["quote_health"]["reason_codes"], ["TENCENT_QUOTE_UNAVAILABLE"])
         self.assertEqual(scored["candidates"], [])
 
+    def test_hk_us_scoring_publishes_truthful_quote_health(self) -> None:
+        universe = [
+            {"symbol": "AAA", "name": "AAA", "themes": [], "lens": {}},
+            {"symbol": "BBB", "name": "BBB", "themes": [], "lens": {}},
+        ]
+        live = {
+            "AAA": {
+                "price": 12.0,
+                "change_pct": 1.0,
+                "session": "regular",
+                "session_label": "盘中",
+                "source": "Yahoo 1m includePrePost",
+                "source_as_of": "2026-08-21T22:00:00+08:00",
+                "fetched_at": "2026-08-21T22:00:05+08:00",
+            }
+        }
+        with (
+            mock.patch.object(server, "yahoo_realtime_quotes", return_value=live),
+            mock.patch.object(server, "yahoo_kline_map", return_value={"AAA": fixture_kline(40)}),
+            mock.patch.object(server.time, "sleep"),
+        ):
+            scored = server.score_serenity_candidates("us", universe)
+
+        self.assertEqual(scored["quote_health"]["status"], "partial")
+        self.assertEqual(scored["quote_health"]["requested_count"], 2)
+        self.assertEqual(scored["quote_health"]["quote_count"], 1)
+        self.assertEqual(scored["quote_health"]["realtime_count"], 1)
+        self.assertEqual(scored["quote_health"]["quote_coverage"], 0.5)
+
+    def test_market_context_uses_benchmark_kline_without_overstating_missing_data(self) -> None:
+        with mock.patch.object(server, "yahoo_chart_kline", return_value=fixture_kline(40)):
+            context = server.market_context_from_benchmark("hk")
+        self.assertEqual(context["benchmark"], "^HSI")
+        self.assertEqual(context["data_state"], "READY")
+        self.assertTrue(context["items"])
+
+        with mock.patch.object(server, "yahoo_chart_kline", return_value=[]):
+            missing = server.market_context_from_benchmark("us")
+        self.assertEqual(missing["data_state"], "DEGRADED")
+        self.assertEqual(missing["risk"], "unknown")
+
     def test_degraded_a_share_still_builds_hk_and_us_sections(self) -> None:
         scored = {
             "candidates": [],
@@ -232,6 +273,18 @@ class SelectorV2Tests(unittest.TestCase):
                 mock.patch.object(server, "score_candidates", return_value=scored),
                 mock.patch.object(server, "market_universe", return_value=[]),
                 mock.patch.object(server, "score_serenity_candidates", return_value={"candidates": [], "raw_pool_size": 0, "scored_size": 0}),
+                mock.patch.object(
+                    server,
+                    "market_context_from_benchmark",
+                    return_value={
+                        "benchmark": "fixture",
+                        "benchmarks": [],
+                        "items": [],
+                        "risk": "unknown",
+                        "state": "unknown",
+                        "data_state": "DEGRADED",
+                    },
+                ),
                 mock.patch.object(server, "runtime_research_status", return_value={}),
                 mock.patch.object(server, "serenity_source_status", return_value={}),
             ):

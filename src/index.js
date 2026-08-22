@@ -22,6 +22,12 @@ const WEEKDAY_CHECKPOINTS = [
   [21, 28],
   [23, 58],
 ];
+const LIVE_MARKETS = new Set(["a_share", "hk", "us"]);
+const LIVE_CACHE_TTL_MS = 10_000;
+const LIVE_FETCH_TIMEOUT_MS = 4_000;
+const GATEWAY_FETCH_TIMEOUT_MS = 3_000;
+const LIVE_MAX_ACTIVE_AGE_SECONDS = 120;
+const liveQuoteCache = new Map();
 
 function withSecurityHeaders(response) {
   const headers = new Headers(response.headers);
@@ -45,10 +51,10 @@ function httpsRedirect(request, env) {
   return null;
 }
 
-function json(payload, status = 200) {
+function json(payload, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(payload), {
     status,
-    headers: JSON_HEADERS,
+    headers: { ...JSON_HEADERS, ...extraHeaders },
   });
 }
 
@@ -192,6 +198,227 @@ function isoFromCnTimestamp(value) {
   return `${year}-${month}-${day}T${hour}:${minute}:${second}+08:00`;
 }
 
+function normalizeLiveCode(market, value) {
+  const raw = String(value || "").trim().toUpperCase();
+  if (market === "a_share") {
+    const clean = raw.replace(/^(?:SH|SZ)\./, "");
+    return /^\d{6}$/.test(clean) ? clean : null;
+  }
+  if (market === "hk") {
+    const match = raw.match(/^(\d{1,5})\.HK$/);
+    return match ? `${match[1].padStart(4, "0")}.HK` : null;
+  }
+  if (market === "us") return /^[A-Z][A-Z0-9.-]{0,14}$/.test(raw) ? raw : null;
+  return null;
+}
+
+function validIsoDate(value) {
+  const text = String(value || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+  const parsed = new Date(`${text}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text;
+}
+
+function snapshotCandidateCodes(snapshot, market) {
+  const section = snapshot?.markets?.[market]
+    || (market === "a_share" ? { decision: snapshot?.decision || {} } : {});
+  const decision = section?.decision || {};
+  const rows = [decision.primary, decision.blocked_candidate, ...(decision.watchlist || [])];
+  for (const globalCandidate of [snapshot?.global_decision?.primary, snapshot?.global_decision?.research_priority]) {
+    if (globalCandidate && globalCandidate.market === market) rows.push(globalCandidate);
+  }
+  return new Set(rows.filter(Boolean).map((row) => normalizeLiveCode(market, row.code || row.symbol)).filter(Boolean));
+}
+
+async function fetchWithTimeout(input, init = {}, timeoutMs = LIVE_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function sessionLabel(session) {
+  return ({ pre: "盘前", regular: "盘中", post: "盘后", overnight: "夜盘", closed: "休市", unknown: "时段未知" })[session] || "时段未知";
+}
+
+function aShareSession(current = new Date()) {
+  const parts = shanghaiDateParts(current);
+  const weekday = calendarWeekday(parts);
+  if (weekday === 0 || weekday === 6) return "closed";
+  const minute = parts.hour * 60 + parts.minute;
+  if (minute >= 9 * 60 + 15 && minute < 9 * 60 + 30) return "pre";
+  if ((minute >= 9 * 60 + 30 && minute < 11 * 60 + 30) || (minute >= 13 * 60 && minute < 15 * 60)) return "regular";
+  return "closed";
+}
+
+function yahooPeriod(meta, name) {
+  const current = meta?.currentTradingPeriod?.[name];
+  if (current && Number.isFinite(Number(current.start)) && Number.isFinite(Number(current.end))) return current;
+  const periods = meta?.tradingPeriods?.[name];
+  const first = Array.isArray(periods) ? (Array.isArray(periods[0]) ? periods[0][0] : periods[0]) : null;
+  return first && Number.isFinite(Number(first.start)) && Number.isFinite(Number(first.end)) ? first : null;
+}
+
+function yahooSession(meta, epochSeconds = Math.floor(Date.now() / 1000)) {
+  const state = String(meta?.marketState || "").toUpperCase();
+  if (["PRE", "PREPRE"].includes(state)) return "pre";
+  if (state === "REGULAR") return "regular";
+  if (["POST", "POSTPOST"].includes(state)) return "post";
+  if (state === "OVERNIGHT") return "overnight";
+  for (const name of ["pre", "regular", "post"]) {
+    const period = yahooPeriod(meta, name);
+    if (period && epochSeconds >= Number(period.start) && epochSeconds < Number(period.end)) return name;
+  }
+  return "closed";
+}
+
+function yahooPriceKind(meta, epochSeconds) {
+  for (const [name, label] of [["pre", "pre_market"], ["regular", "regular"], ["post", "after_hours"]]) {
+    const period = yahooPeriod(meta, name);
+    if (period && epochSeconds >= Number(period.start) && epochSeconds <= Number(period.end)) return label;
+  }
+  return "regular";
+}
+
+function quoteTiming(sourceAsOf, session) {
+  const parsed = Date.parse(sourceAsOf || "");
+  const latencySeconds = Number.isFinite(parsed) ? Math.max(0, Math.floor((Date.now() - parsed) / 1000)) : null;
+  const active = ["pre", "regular", "post", "overnight"].includes(session);
+  if (!Number.isFinite(parsed)) {
+    return { quote_status: "DELAYED", freshness: "stale", latency_seconds: latencySeconds, is_realtime: false, is_stale: true };
+  }
+  if (!active) {
+    return { quote_status: "LAST_CLOSE", freshness: "last_close", latency_seconds: latencySeconds, is_realtime: false, is_stale: false };
+  }
+  const fresh = latencySeconds <= LIVE_MAX_ACTIVE_AGE_SECONDS;
+  return {
+    quote_status: fresh ? "REALTIME" : "DELAYED",
+    freshness: fresh ? "fresh" : "stale",
+    latency_seconds: latencySeconds,
+    is_realtime: fresh,
+    is_stale: !fresh,
+  };
+}
+
+function liveContract(payload) {
+  const timing = quoteTiming(payload.source_as_of, payload.session);
+  return {
+    contract_version: "live-quote-v1",
+    ok: true,
+    ...payload,
+    ...timing,
+    session_label: payload.session_label || sessionLabel(payload.session),
+    fetched_at: payload.fetched_at || nowCN(),
+    updated_at: payload.source_as_of || payload.fetched_at || nowCN(),
+    cache_ttl_seconds: LIVE_CACHE_TTL_MS / 1000,
+  };
+}
+
+function liveError(error, message, market, code) {
+  return {
+    contract_version: "live-quote-v1",
+    ok: false,
+    error,
+    message,
+    market: market || null,
+    code: code || null,
+    price: null,
+    current_price: null,
+    change_pct: null,
+    current_change_pct: null,
+    volume: null,
+    volume_unit: null,
+    provider: null,
+    source: null,
+    session: "unknown",
+    session_label: sessionLabel("unknown"),
+    price_kind: null,
+    quote_status: "UNAVAILABLE",
+    freshness: "unavailable",
+    latency_seconds: null,
+    is_realtime: false,
+    is_stale: true,
+    source_as_of: null,
+    fetched_at: nowCN(),
+    updated_at: null,
+    cache_ttl_seconds: LIVE_CACHE_TTL_MS / 1000,
+  };
+}
+
+function bestEffortContract(payload, fallbackReason = null) {
+  return {
+    ...payload,
+    provider_class: "PUBLIC_BEST_EFFORT",
+    source_tier: "public_best_effort_1m",
+    quote_status: payload.session === "closed" ? "LAST_CLOSE" : "DELAYED",
+    freshness: payload.session === "closed" ? "last_close" : "best_effort",
+    is_realtime: false,
+    is_stale: payload.session !== "closed",
+    realtime_guaranteed: false,
+    primary_provider: "FUTU_OPEND",
+    fallback_reason: fallbackReason,
+  };
+}
+
+function futuGatewayContract(quote) {
+  const price = num(quote?.price);
+  if (!quote || price <= 0 || quote.quote_status === "UNAVAILABLE") {
+    throw new Error("Futu gateway returned no usable quote");
+  }
+  return liveContract({
+    market: quote.market,
+    code: quote.code,
+    name: quote.name || "",
+    price,
+    current_price: price,
+    realtime_price: price,
+    change_pct: num(quote.change_pct),
+    current_change_pct: num(quote.change_pct),
+    previous_close: num(quote.previous_close),
+    bid: Number.isFinite(Number(quote.bid)) ? Number(quote.bid) : null,
+    ask: Number.isFinite(Number(quote.ask)) ? Number(quote.ask) : null,
+    volume: num(quote.volume),
+    volume_unit: quote.volume_unit || "share",
+    provider: "FUTU_OPEND",
+    provider_class: "LICENSED_REALTIME",
+    source_tier: quote.source_tier || "licensed_exchange_feed",
+    session: quote.session || "unknown",
+    session_label: quote.session_label || sessionLabel(quote.session),
+    price_kind: quote.price_kind || "last_trade",
+    source: "Futu OpenD licensed quote gateway",
+    source_as_of: quote.source_as_of,
+    fetched_at: quote.fetched_at || nowCN(),
+    kline: [],
+    realtime_guaranteed: quote.is_realtime === true,
+    gateway_latency_ms: quote.gateway_latency_ms ?? null,
+  });
+}
+
+async function futuGatewayLive(env, market, code) {
+  const baseUrl = String(env?.REALTIME_GATEWAY_URL || "").replace(/\/$/, "");
+  const token = String(env?.QUOTE_GATEWAY_TOKEN || "");
+  if (!baseUrl || !token) throw new Error("gateway not configured");
+  const target = new URL(`${baseUrl}/v1/quotes`);
+  target.searchParams.set("symbols", `${market}:${code}`);
+  const response = await fetchWithTimeout(target, {
+    headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+  }, GATEWAY_FETCH_TIMEOUT_MS);
+  if (!response.ok) throw new Error(`gateway ${response.status}`);
+  const payload = await response.json();
+  const quote = Array.isArray(payload?.quotes) ? payload.quotes[0] : null;
+  const contract = futuGatewayContract({ ...quote, gateway_latency_ms: payload?.gateway_latency_ms });
+  return {
+    ...contract,
+    quote_status: quote.quote_status || contract.quote_status,
+    is_realtime: quote.is_realtime === true && contract.is_realtime,
+    is_stale: quote.is_stale === true || contract.is_stale,
+    realtime_guaranteed: quote.is_realtime === true && contract.is_realtime,
+  };
+}
+
 async function readAssetJson(env, path) {
   const response = await env.ASSETS.fetch(`https://assets.local${path}`);
   if (!response.ok) return null;
@@ -283,6 +510,9 @@ function summarizePick(pick) {
     summary.transaction_cost = primary.transaction_cost ?? null;
     summary.tail_risk = primary.tail_risk ?? null;
     summary.model_id = primary.model_id || null;
+  }
+  if (pick.shadow_outcome && typeof pick.shadow_outcome === "object") {
+    summary.shadow_outcome = pick.shadow_outcome;
   }
   if (pick.markets) {
     summary.markets = Object.fromEntries(
@@ -442,7 +672,7 @@ function num(value) {
 async function eastmoneyJson(url, params) {
   const target = new URL(url);
   Object.entries(params || {}).forEach(([key, value]) => target.searchParams.set(key, value));
-  const response = await fetch(target, {
+  const response = await fetchWithTimeout(target, {
     headers: {
       "user-agent": "Mozilla/5.0",
       referer: "https://quote.eastmoney.com/",
@@ -486,7 +716,7 @@ function marketPrefix(code) {
 
 async function tencentAQuote(code) {
   const symbol = `${marketPrefix(code)}${String(code || "").replace(/\D/g, "")}`;
-  const response = await fetch(`https://qt.gtimg.cn/q=${symbol}`, {
+  const response = await fetchWithTimeout(`https://qt.gtimg.cn/q=${symbol}`, {
     headers: { "user-agent": "Mozilla/5.0", referer: "https://gu.qq.com/" },
   });
   if (!response.ok) throw new Error(`Tencent quote ${response.status}`);
@@ -513,7 +743,7 @@ async function tencentAKline(code, limit = 70) {
   const symbol = `${marketPrefix(code)}${String(code || "").replace(/\D/g, "")}`;
   const target = new URL("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get");
   target.searchParams.set("param", `${symbol},day,,,${limit},qfq`);
-  const response = await fetch(target, {
+  const response = await fetchWithTimeout(target, {
     headers: { "user-agent": "Mozilla/5.0", referer: "https://gu.qq.com/" },
   });
   if (!response.ok) throw new Error(`Tencent kline ${response.status}`);
@@ -554,6 +784,7 @@ async function aShareLive(code) {
       f47: quote.volume,
       f57: quote.code,
       f58: quote.name,
+      f60: quote.previous_close,
       f170: quote.change_pct,
     };
     kline = rows;
@@ -562,9 +793,10 @@ async function aShareLive(code) {
   }
   const latest = kline[kline.length - 1] || {};
   const price = num(data.f43) || num(latest.close);
+  if (price <= 0) throw new Error("A-share quote has no valid price");
   const fetchedAt = nowCN();
-  return {
-    ok: true,
+  const session = aShareSession();
+  return liveContract({
     market: "a_share",
     code: String(data.f57 || code),
     name: data.f58 || "",
@@ -575,41 +807,53 @@ async function aShareLive(code) {
     current_change_pct: num(data.f170) || num(latest.change_pct),
     volume: num(data.f47) || num(latest.volume),
     volume_unit: "lot",
-    session_label: "实时/延时",
+    previous_close: num(data.f60),
+    provider: source === "Tencent realtime quote" ? "tencent" : "eastmoney",
+    session,
+    session_label: sessionLabel(session),
+    price_kind: session === "pre" ? "pre_market" : session === "closed" ? "last_close" : "regular",
     source,
     source_as_of: sourceAsOf,
     fetched_at: fetchedAt,
-    updated_at: fetchedAt,
     kline,
-  };
+  });
 }
 
 async function yahooLive(symbol, market) {
-  const target = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=3mo&interval=1d&includePrePost=true&events=div%2Csplits`;
-  const response = await fetch(target, { headers: { "user-agent": "Mozilla/5.0" } });
+  const target = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m&includePrePost=true&events=div%2Csplits`;
+  const response = await fetchWithTimeout(target, { headers: { "user-agent": "Mozilla/5.0", accept: "application/json" } });
   if (!response.ok) throw new Error(`Yahoo ${response.status}`);
   const payload = await response.json();
   const result = (((payload.chart || {}).result || [])[0]) || {};
   const meta = result.meta || {};
   const quote = (((result.indicators || {}).quote || [])[0]) || {};
   const timestamps = result.timestamp || [];
-  const rows = timestamps
-    .map((ts, index) => ({
-      date: new Date(ts * 1000).toISOString().slice(0, 10),
-      open: num((quote.open || [])[index]),
-      high: num((quote.high || [])[index]),
-      low: num((quote.low || [])[index]),
-      close: num((quote.close || [])[index]),
-      volume: num((quote.volume || [])[index]),
-    }))
-    .filter((row) => row.close > 0 && row.high > 0 && row.low > 0);
-  const price = num(meta.regularMarketPrice) || num((rows.at(-1) || {}).close);
-  const previous = num(meta.previousClose) || num(meta.regularMarketPreviousClose) || num((rows.at(-2) || {}).close) || num(meta.chartPreviousClose);
+  const closes = quote.close || [];
+  const volumes = quote.volume || [];
+  let price = 0;
+  let sourceEpoch = 0;
+  let latestVolume = 0;
+  for (let index = closes.length - 1; index >= 0; index -= 1) {
+    const close = num(closes[index]);
+    const timestamp = num(timestamps[index]);
+    if (close > 0 && timestamp > 0) {
+      price = close;
+      sourceEpoch = timestamp;
+      latestVolume = num(volumes[index]);
+      break;
+    }
+  }
+  if (!price) {
+    price = num(meta.regularMarketPrice);
+    sourceEpoch = num(meta.regularMarketTime);
+  }
+  if (!price || !sourceEpoch) throw new Error("Yahoo intraday quote is empty");
+  const previous = num(meta.chartPreviousClose) || num(meta.previousClose) || num(meta.regularMarketPreviousClose);
   const changePct = previous ? ((price - previous) / previous) * 100 : 0;
-  const sourceAsOf = isoFromEpoch(meta.regularMarketTime) || isoFromEpoch(timestamps.at(-1));
+  const sourceAsOf = isoFromEpoch(sourceEpoch);
   const fetchedAt = nowCN();
-  return {
-    ok: true,
+  const session = yahooSession(meta);
+  return liveContract({
     market,
     code: symbol,
     name: meta.shortName || meta.longName || "",
@@ -618,21 +862,41 @@ async function yahooLive(symbol, market) {
     realtime_price: price,
     change_pct: changePct,
     current_change_pct: changePct,
-    volume: num(meta.regularMarketVolume) || num((rows.at(-1) || {}).volume),
+    previous_close: previous,
+    volume: num(meta.regularMarketVolume) || latestVolume,
     volume_unit: "share",
-    session_label: meta.marketState || "实时/延时",
-    source: "Yahoo chart quote",
+    provider: "yahoo_finance",
+    session,
+    session_label: sessionLabel(session),
+    price_kind: yahooPriceKind(meta, sourceEpoch),
+    source: "Yahoo Finance 1m includePrePost",
     source_as_of: sourceAsOf,
     fetched_at: fetchedAt,
-    updated_at: fetchedAt,
-    kline: rows,
-  };
+    kline: [],
+  });
 }
 
-async function liveStock(market, code) {
-  if (!code) return null;
-  if (market === "a_share") return aShareLive(code);
-  return yahooLive(code, market === "hk" ? "hk" : "us");
+async function publicFallbackLive(market, code, reason) {
+  const payload = market === "a_share"
+    ? await aShareLive(code)
+    : await yahooLive(code, market === "hk" ? "hk" : "us");
+  return bestEffortContract(payload, reason);
+}
+
+async function liveStock(env, market, code) {
+  const key = `${market}:${code}`;
+  const cached = liveQuoteCache.get(key);
+  if (cached && cached.expires_at > Date.now()) return cached.payload;
+  if (cached) liveQuoteCache.delete(key);
+  let payload;
+  try {
+    payload = await futuGatewayLive(env, market, code);
+  } catch (error) {
+    const reason = String(error?.message || "gateway unavailable").slice(0, 80);
+    payload = await publicFallbackLive(market, code, reason);
+  }
+  liveQuoteCache.set(key, { expires_at: Date.now() + LIVE_CACHE_TTL_MS, payload });
+  return payload;
 }
 
 async function handleApi(request, env) {
@@ -653,6 +917,9 @@ async function handleApi(request, env) {
       model_version: latest ? latest.model_version || null : null,
       weights_version: latest ? latest.weights_version || null : null,
       universe_version: latest ? latest.universe_version || null : null,
+      realtime_gateway_configured: Boolean(env.REALTIME_GATEWAY_URL && env.QUOTE_GATEWAY_TOKEN),
+      realtime_primary_provider: "FUTU_OPEND",
+      realtime_fallback_provider_class: "PUBLIC_BEST_EFFORT",
       generated_at: latest ? latest.generated_at || null : null,
       snapshot_key: latest ? latest.snapshot_key || null : null,
       ...freshness,
@@ -717,23 +984,53 @@ async function handleApi(request, env) {
       return json(snapshot);
     }
     const targetDate = url.searchParams.get("date");
+    if (targetDate && !validIsoDate(targetDate)) {
+      return json({ error: "INVALID_DATE", message: "date 必须是有效的 YYYY-MM-DD 日期" }, 400);
+    }
     const pick = targetDate ? await pickForTarget(env, targetDate) : await latestPick(env);
-    const fallback = pick || (await latestPick(env));
-    if (!fallback) {
+    if (!pick && targetDate) {
+      return json({ error: "PICK_NOT_FOUND", message: `没有 ${targetDate} 的历史快照` }, 404);
+    }
+    if (!pick) {
       return json({ error: "暂无选股快照。请等待每日任务生成后再查看。" }, 404);
     }
-    return json(fallback);
+    return json(pick);
   }
 
   if (url.pathname === "/api/live") {
-    const market = url.searchParams.get("market") || "a_share";
-    const code = url.searchParams.get("code") || "";
+    const market = String(url.searchParams.get("market") || "").trim();
+    const requestedCode = url.searchParams.get("code") || "";
+    if (!LIVE_MARKETS.has(market)) {
+      return json(liveError("INVALID_MARKET", "market 仅支持 a_share、hk 或 us", market, requestedCode), 400);
+    }
+    const code = normalizeLiveCode(market, requestedCode);
+    if (!code) {
+      return json(liveError("INVALID_CODE", "股票代码格式不合法", market, requestedCode), 400);
+    }
+    if (env.LIVE_RATE_LIMITER) {
+      const actor = request.headers.get("cf-connecting-ip") || "anonymous";
+      const limited = await env.LIVE_RATE_LIMITER.limit({ key: `${actor}:${market}:${code}` });
+      if (!limited.success) {
+        return json(
+          liveError("RATE_LIMITED", "行情刷新过于频繁，请稍后重试", market, code),
+          429,
+          { "retry-after": "60" },
+        );
+      }
+    }
+    const latest = await latestPick(env);
+    if (!latest) {
+      return json(liveError("LATEST_SNAPSHOT_UNAVAILABLE", "无法校验当前候选池", market, code), 503);
+    }
+    if (!snapshotCandidateCodes(latest, market).has(code)) {
+      return json(liveError("LIVE_CODE_NOT_IN_CURRENT_SNAPSHOT", "仅允许查询当前快照候选股", market, code), 404);
+    }
     try {
-      const payload = await liveStock(market, code);
-      if (!payload) return json({ error: "缺少股票代码" }, 400);
+      const payload = await liveStock(env, market, code);
       return json(payload);
     } catch (error) {
-      return json({ error: "实时行情暂不可用", detail: String(error && error.message ? error.message : error) }, 502);
+      const detail = String(error && error.name === "AbortError" ? "upstream timeout" : error && error.message ? error.message : error);
+      return json({ ...liveError("REALTIME_UNAVAILABLE", "实时行情暂不可用", market, code), detail }, 502);
     }
   }
 

@@ -5,6 +5,12 @@ import argparse
 import json
 import math
 import pathlib
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from market_calendar import CALENDAR_VERSION, calendar_id, market_trade_windows
 
 
 VALID_MODEL_STATUSES = {"available", "unavailable"}
@@ -84,6 +90,37 @@ def validate_snapshot(snapshot: dict) -> list[str]:
         errors.append("schema_version must be selector-snapshot-v2")
     if snapshot.get("selector_mode") != "legacy_active_v2_dual_low_shadow":
         errors.append("selector_mode must expose the dual-low shadow")
+    if snapshot.get("calendar_version") != CALENDAR_VERSION:
+        errors.append(f"calendar_version must be {CALENDAR_VERSION}")
+    window_anchor = snapshot.get("generated_at") or snapshot.get("target_date")
+    next_trade_dates = snapshot.get("next_trade_dates")
+    forecast_end_dates = snapshot.get("forecast_end_dates")
+    expected_markets = {"a_share", "hk", "us"}
+    if not isinstance(next_trade_dates, dict) or set(next_trade_dates) != expected_markets:
+        errors.append("next_trade_dates must cover three markets")
+        next_trade_dates = {}
+    if not isinstance(forecast_end_dates, dict) or set(forecast_end_dates) != expected_markets:
+        errors.append("forecast_end_dates must cover three markets")
+        forecast_end_dates = {}
+    expected_windows = {}
+    if window_anchor:
+        try:
+            expected_windows = market_trade_windows(window_anchor, horizon_sessions=10)
+        except (TypeError, ValueError):
+            errors.append("generated_at must be an aware ISO datetime")
+        for market_key in ("a_share", "hk", "us"):
+            exchange_id = calendar_id(market_key)
+            expected_window = expected_windows.get(market_key) or {}
+            if next_trade_dates.get(market_key) != expected_window.get("entry_trade_date"):
+                errors.append(f"next_trade_dates.{market_key} must be the first {exchange_id} session")
+            if forecast_end_dates.get(market_key) != expected_window.get("forecast_end_trade_date"):
+                errors.append(f"forecast_end_dates.{market_key} must be the 10th {exchange_id} session")
+    if next_trade_dates and snapshot.get("next_trade_date") != min(next_trade_dates.values()):
+        errors.append("next_trade_date must be the earliest market entry date")
+    if forecast_end_dates and snapshot.get("forecast_end_date") != max(forecast_end_dates.values()):
+        errors.append("forecast_end_date must be the latest market exit date")
+    if snapshot.get("next_trade_date") == snapshot.get("forecast_end_date"):
+        errors.append("next_trade_date and forecast_end_date must differ")
     dual_model = ((snapshot.get("analysis_models") or {}).get("dual_low") or {})
     if dual_model.get("model_id") != "dsa-screening-score-v1":
         errors.append("analysis_models.dual_low.model_id is missing")
@@ -129,8 +166,45 @@ def validate_snapshot(snapshot: dict) -> list[str]:
         if market_key not in markets:
             errors.append(f"markets.{market_key} is missing")
             continue
-        derived_market_states[market_key] = derive_market_coverage_state(markets[market_key] or {})
+        section = markets[market_key] or {}
+        derived_market_states[market_key] = derive_market_coverage_state(section)
+        trade_window = section.get("trade_window") or {}
+        if trade_window.get("calendar_id") != calendar_id(market_key):
+            errors.append(f"markets.{market_key}.trade_window.calendar_id is invalid")
+        if trade_window.get("calendar_version") != CALENDAR_VERSION:
+            errors.append(f"markets.{market_key}.trade_window.calendar_version is invalid")
+        if trade_window.get("horizon_sessions") != 10:
+            errors.append(f"markets.{market_key}.trade_window.horizon_sessions must be 10")
+        expected_window = expected_windows.get(market_key) or {}
+        if trade_window.get("decision_time") != expected_window.get("decision_time"):
+            errors.append(f"markets.{market_key}.trade_window.decision_time is invalid")
+        if trade_window.get("entry_session_open_at") != expected_window.get("entry_session_open_at"):
+            errors.append(f"markets.{market_key}.trade_window.entry_session_open_at is invalid")
+        if trade_window.get("entry_trade_date") != next_trade_dates.get(market_key):
+            errors.append(f"markets.{market_key}.trade_window entry does not match next_trade_dates")
+        if trade_window.get("forecast_end_trade_date") != forecast_end_dates.get(market_key):
+            errors.append(f"markets.{market_key}.trade_window end does not match forecast_end_dates")
         for candidate in decision_candidates((markets[market_key] or {}).get("decision") or {}):
+            code = candidate.get("code") or candidate.get("symbol")
+            range_2d = candidate.get("estimated_2d_range")
+            range_10d = candidate.get("estimated_10d_range")
+            range_2w = candidate.get("estimated_2w_range")
+            if not isinstance(range_2d, dict):
+                errors.append(f"{market_key}:{code} estimated_2d_range is required")
+            elif range_2d.get("horizon_trade_days") != 2:
+                errors.append(f"{market_key}:{code} estimated_2d_range horizon must be 2")
+            if not isinstance(range_10d, dict):
+                errors.append(f"{market_key}:{code} estimated_10d_range is required")
+            elif range_10d.get("horizon_trade_days") != 10:
+                errors.append(f"{market_key}:{code} estimated_10d_range horizon must be 10")
+            if not isinstance(range_2w, dict):
+                errors.append(f"{market_key}:{code} estimated_2w_range compatibility alias is required")
+            elif range_2w.get("horizon_trade_days") != 10:
+                errors.append(f"{market_key}:{code} estimated_2w_range horizon must be 10")
+            if isinstance(range_10d, dict) and isinstance(range_2w, dict):
+                comparable_fields = ("low_pct", "high_pct", "horizon_trade_days", "method_id", "calibrated")
+                if any(range_10d.get(field) != range_2w.get(field) for field in comparable_fields):
+                    errors.append(f"{market_key}:{code} estimated_2w_range must alias estimated_10d_range")
             analysis = ((candidate.get("analysis_projects") or {}).get("dual_low") or {})
             status = analysis.get("status")
             if status not in VALID_CANDIDATE_STATUSES:
@@ -170,6 +244,8 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                 errors.append("global_decision.action is invalid")
             if global_decision.get("action_basis") != "strict_cross_market_gate_v1":
                 errors.append("global_decision.action_basis is invalid")
+            if not strict_boolean(global_decision.get("event_pipeline_scanned")):
+                errors.append("global_decision.event_pipeline_scanned must be a boolean")
             if "calibrated" not in global_decision or not strict_boolean(global_decision.get("calibrated")):
                 errors.append("global_decision.calibrated must be a boolean")
             calibrated = global_decision.get("calibrated") is True
@@ -190,6 +266,8 @@ def validate_snapshot(snapshot: dict) -> list[str]:
             elif action == "REVIEW_EXECUTABLE_PICK":
                 if not calibrated:
                     errors.append("REVIEW_EXECUTABLE_PICK requires calibrated=true")
+                if global_decision.get("event_pipeline_scanned") is not True:
+                    errors.append("REVIEW_EXECUTABLE_PICK requires event_pipeline_scanned=true")
                 if global_decision.get("probability_status") != "CALIBRATED":
                     errors.append("REVIEW_EXECUTABLE_PICK probability_status must be CALIBRATED")
                 if not probability(global_decision.get("probability")):
@@ -235,10 +313,33 @@ def validate_snapshot(snapshot: dict) -> list[str]:
             if research is not None:
                 if not isinstance(research, dict):
                     errors.append("research_priority must be an object")
-                elif research.get("status") != "RESEARCH_ONLY":
-                    errors.append("research_priority must be RESEARCH_ONLY")
-                elif research.get("probability") is not None:
-                    errors.append("research_priority probability must be null until calibrated")
+                else:
+                    if research.get("status") != "RESEARCH_ONLY":
+                        errors.append("research_priority must be RESEARCH_ONLY")
+                    if research.get("score_kind") != "RULE_PRIORITY":
+                        errors.append("research_priority score_kind must be RULE_PRIORITY")
+                    if not finite_number(research.get("priority_score")) or not 0 <= research["priority_score"] <= 100:
+                        errors.append("research_priority priority_score must be between 0 and 100")
+                    if research.get("probability") is not None:
+                        errors.append("research_priority probability must be null until calibrated")
+                    if research.get("calibrated") is not False:
+                        errors.append("research_priority calibrated must be false")
+                    if research.get("model_id") != "ten-day-rule-shadow-v1":
+                        errors.append("research_priority model_id is invalid")
+                    if research.get("label_version") != "shadow-net-return-10-session-v1":
+                        errors.append("research_priority label_version is invalid")
+                    if not isinstance(research.get("prediction_id"), str) or not research.get("prediction_id"):
+                        errors.append("research_priority prediction_id is required")
+                    research_market = research.get("market")
+                    if research_market in expected_markets:
+                        if research.get("calendar_id") != calendar_id(research_market):
+                            errors.append("research_priority calendar_id is invalid")
+                        if research.get("entry_trade_date") != next_trade_dates.get(research_market):
+                            errors.append("research_priority entry_trade_date is invalid")
+                        if research.get("forecast_end_trade_date") != forecast_end_dates.get(research_market):
+                            errors.append("research_priority forecast_end_trade_date is invalid")
+                    else:
+                        errors.append("research_priority market is invalid")
             market_states = global_decision.get("market_states") or {}
             if not isinstance(market_states, dict) or set(market_states) != {"a_share", "hk", "us"}:
                 errors.append("global_decision.market_states must cover three markets")

@@ -14,6 +14,8 @@ on:
     - cron: "58 13 * * 1-5"
   workflow_dispatch:
 
+permissions: {}
+
 concurrency:
   group: xuangu-production
   cancel-in-progress: false
@@ -23,7 +25,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      should_archive: ${{ steps.snapshot_bundle.outputs.should_archive }}
+      snapshot_key: ${{ steps.snapshot_bundle.outputs.snapshot_key }}
+      snapshot_sha256: ${{ steps.snapshot_bundle.outputs.snapshot_sha256 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,31 +40,44 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check scheduled time slot and source health
+        id: schedule_gate
+        if: github.event_name == 'schedule'
+        run: python scripts/schedule_gate.py
+        env:
+          # The full latest payload carries quote/pool health. A timestamp-only
+          # status response cannot tell a fallback to retry a degraded source.
+          SCHEDULE_GATE_STATUS_URL: https://xuangu.alixjd.com/api/latest
+          SCHEDULE_GATE_LATEST_PATH: data/picks/latest.json
+
       - uses: actions/setup-node@v4
+        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         with:
           node-version: "22"
           cache: npm
 
       - name: Install Python dependencies
+        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: pip install -r requirements.txt
 
-      - name: Check scheduled time slot
-        id: schedule_gate
-        if: github.event_name == 'schedule'
-        run: python scripts/schedule_gate.py
-        env:
-          SCHEDULE_GATE_STATUS_URL: https://xuangu.alixjd.com/api/status
-          SCHEDULE_GATE_LATEST_PATH: data/picks/latest.json
-
       - name: Run Python unit tests
+        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: python -m unittest discover -s tests -v
 
       - name: Check Worker and browser JavaScript
+        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: |
           node --check src/index.js
           node --check static/app.js
           node --check scripts/score_dual_low.mjs
           node --check vendor/stock-scoring-kit/index.js
+
+      - name: Adopt newer production snapshot before a push deploy
+        if: github.event_name == 'push'
+        run: >-
+          python scripts/verify_deployment.py data/picks/latest.json
+          --base-url https://xuangu.alixjd.com
+          --adopt-newer-live
 
       - name: Generate smart pick snapshot
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
@@ -80,40 +99,256 @@ jobs:
             sleep "${sleep_seconds}"
           done
 
+      - name: Update shadow outcome ledger
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        run: |
+          # Run after generation so the newest research priority is immediately
+          # registered as PENDING while mature predictions settle idempotently.
+          for attempt in 1 2 3; do
+            echo "Outcome settlement attempt ${attempt}/3"
+            if python scripts/settle_outcomes.py; then
+              break
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "Outcome settlement failed after 3 attempts" >&2
+              exit 1
+            fi
+            sleep "$((attempt * 10))"
+          done
+
       - name: Validate published snapshot schema
+        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: python scripts/validate_snapshot.py data/picks/latest.json
 
-      - name: Upload latest snapshot recovery artifact
+      - name: Prepare immutable snapshot recovery bundle
+        id: snapshot_bundle
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        env:
+          RECOVERY_DIR: ${{ runner.temp }}/snapshot-recovery-${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import shutil
+          from scripts.verify_deployment import snapshot_sha256
+
+          latest_path = pathlib.Path("data/picks/latest.json")
+          snapshot = json.loads(latest_path.read_text(encoding="utf-8"))
+          snapshot_key = str(snapshot.get("snapshot_key") or "")
+          if pathlib.PurePosixPath(snapshot_key).name != snapshot_key or not snapshot_key.endswith(".json"):
+              raise SystemExit(f"unsafe snapshot_key: {snapshot_key!r}")
+          immutable_path = latest_path.parent / snapshot_key
+          if not immutable_path.is_file():
+              raise SystemExit(f"immutable snapshot is missing: {immutable_path}")
+          if immutable_path.read_bytes() != latest_path.read_bytes():
+              raise SystemExit("latest.json and immutable timestamp snapshot differ")
+
+          recovery = pathlib.Path(os.environ["RECOVERY_DIR"])
+          recovery.mkdir(parents=True, exist_ok=True)
+          target_picks = recovery / "data" / "picks"
+          target_picks.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(latest_path, target_picks / "latest.json")
+          shutil.copy2(immutable_path, target_picks / snapshot_key)
+
+          # The current shadow ledger is stored as one outcome JSON per
+          # prediction.  Keep the name-based glob for compatibility with a
+          # future consolidated ledger file.
+          ledger_candidates = list(pathlib.Path("data/outcomes").glob("*.json"))
+          for pattern in ("*ledger*.json", "*ledger*.jsonl"):
+              ledger_candidates.extend(pathlib.Path("data").rglob(pattern))
+          ledger_files = []
+          for ledger in sorted(set(ledger_candidates)):
+              if not ledger.is_file():
+                  continue
+              target = recovery / ledger
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(ledger, target)
+              ledger_files.append(ledger.as_posix())
+
+          digest = snapshot_sha256(snapshot)
+          (recovery / "recovery-manifest.json").write_text(
+              json.dumps(
+                  {
+                      "snapshot_key": snapshot_key,
+                      "generated_at": snapshot.get("generated_at"),
+                      "snapshot_sha256": digest,
+                      "ledger_present": bool(ledger_files),
+                      "ledger_files": ledger_files,
+                  },
+                  ensure_ascii=False,
+                  indent=2,
+              ) + "\n",
+              encoding="utf-8",
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("should_archive=true\n")
+              output.write(f"snapshot_key={snapshot_key}\n")
+              output.write(f"snapshot_sha256={digest}\n")
+          PY
+
+      - name: Upload immutable snapshot recovery artifact
+        if: steps.snapshot_bundle.outputs.should_archive == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: latest-snapshot-${{ github.run_id }}
-          path: data/picks/latest.json
+          name: snapshot-recovery-${{ github.run_id }}
+          path: ${{ runner.temp }}/snapshot-recovery-${{ github.run_id }}
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
       - name: Install Node dependencies
+        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: npm ci
 
       - name: Build Worker assets
+        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: npm run build
 
       - name: Deploy Worker
         if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
-        run: npx wrangler deploy
+        run: >-
+          npx wrangler deploy
+          --message "github:${{ github.sha }} run:${{ github.run_id }}"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
-      - name: Verify deployed snapshot identity
+      - name: Verify complete deployed contract
         if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
-        run: python scripts/verify_deployment.py data/picks/latest.json --base-url https://xuangu.alixjd.com
+        run: >-
+          python scripts/verify_deployment.py public/data/picks/latest.json
+          --base-url https://xuangu.alixjd.com
+          --attempts 8
+          --delay-seconds 8
+          --timeout-seconds 15
 
-      # Archival is deliberately last: a transient Git push conflict must not
-      # prevent a validated snapshot from reaching Cloudflare.
-      - name: Commit generated snapshot
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
-        continue-on-error: true
-        uses: stefanzweifel/git-auto-commit-action@v5
+  archive:
+    needs: deploy
+    if: needs.deploy.result == 'success' && needs.deploy.outputs.should_archive == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
         with:
-          commit_message: "Update daily pick snapshot"
-          file_pattern: data/picks/*.json
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download verified recovery bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: snapshot-recovery-${{ github.run_id }}
+          path: ${{ runner.temp }}/archive-payload
+
+      - name: Validate archive payload
+        env:
+          EXPECTED_SNAPSHOT_KEY: ${{ needs.deploy.outputs.snapshot_key }}
+          EXPECTED_SNAPSHOT_SHA256: ${{ needs.deploy.outputs.snapshot_sha256 }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          from scripts.verify_deployment import snapshot_sha256
+
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "archive-payload"
+          manifest = json.loads((root / "recovery-manifest.json").read_text(encoding="utf-8"))
+          latest = json.loads((root / "data" / "picks" / "latest.json").read_text(encoding="utf-8"))
+          digest = snapshot_sha256(latest)
+          expected_key = os.environ["EXPECTED_SNAPSHOT_KEY"]
+          expected_digest = os.environ["EXPECTED_SNAPSHOT_SHA256"]
+          if manifest.get("snapshot_key") != expected_key or latest.get("snapshot_key") != expected_key:
+              raise SystemExit("archive snapshot_key does not match deploy output")
+          if manifest.get("snapshot_sha256") != expected_digest or digest != expected_digest:
+              raise SystemExit("archive snapshot sha256 does not match deploy output")
+          immutable = root / "data" / "picks" / expected_key
+          if not immutable.is_file():
+              raise SystemExit(f"immutable archive payload is missing: {immutable}")
+          immutable_payload = json.loads(immutable.read_text(encoding="utf-8"))
+          if snapshot_sha256(immutable_payload) != expected_digest:
+              raise SystemExit("immutable archive snapshot sha256 does not match deploy output")
+
+          ledger_files = manifest.get("ledger_files") or []
+          if not isinstance(ledger_files, list):
+              raise SystemExit("archive ledger_files must be a list")
+          if bool(ledger_files) != bool(manifest.get("ledger_present")):
+              raise SystemExit("archive ledger_present does not match ledger_files")
+          for relative_name in ledger_files:
+              relative = pathlib.PurePosixPath(str(relative_name))
+              if relative.is_absolute() or ".." in relative.parts or not relative.parts or relative.parts[0] != "data":
+                  raise SystemExit(f"unsafe archive ledger path: {relative_name!r}")
+              if not (root / relative).is_file():
+                  raise SystemExit(f"archive ledger file is missing: {relative_name}")
+          PY
+          python scripts/validate_snapshot.py "${RUNNER_TEMP}/archive-payload/data/picks/latest.json"
+
+      - name: Archive generated snapshot with bounded conflict retries
+        env:
+          SNAPSHOT_KEY: ${{ needs.deploy.outputs.snapshot_key }}
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          payload_root="${RUNNER_TEMP}/archive-payload"
+
+          for attempt in 1 2 3; do
+            echo "Archive push attempt ${attempt}/3"
+            if ! git fetch --prune origin main; then
+              echo "Fetch failed before archive attempt ${attempt}" >&2
+              sleep "$((attempt * 5))"
+              continue
+            fi
+
+            attempt_root="$(mktemp -d "${RUNNER_TEMP}/xuangu-archive-${attempt}-XXXXXX")"
+            archive_tree="${attempt_root}/worktree"
+            if ! git worktree add --detach "${archive_tree}" origin/main; then
+              echo "Unable to create archive worktree for attempt ${attempt}" >&2
+              sleep "$((attempt * 5))"
+              continue
+            fi
+
+            mkdir -p "${archive_tree}/data"
+            cp -a "${payload_root}/data/." "${archive_tree}/data/"
+            git -C "${archive_tree}" add data
+            if git -C "${archive_tree}" diff --cached --quiet; then
+              echo "Snapshot ${SNAPSHOT_KEY} is already archived."
+              git worktree remove "${archive_tree}"
+              exit 0
+            fi
+
+            # The verified snapshot is already live. Avoid a redundant second
+            # deploy when this archival-only commit reaches main.
+            if ! git -C "${archive_tree}" commit -m "Update daily pick snapshot: ${SNAPSHOT_KEY} [skip ci]"; then
+              echo "Archive commit failed on attempt ${attempt}" >&2
+              git worktree remove "${archive_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+
+            # Close the race between the first fetch and the push. A rebase
+            # conflict is discarded and rebuilt from a fresh origin/main on
+            # the next bounded attempt.
+            if ! git fetch --prune origin main || ! git -C "${archive_tree}" rebase origin/main; then
+              echo "Archive rebase failed on attempt ${attempt}" >&2
+              git -C "${archive_tree}" rebase --abort >/dev/null 2>&1 || :
+              git worktree remove --force "${archive_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            if git -C "${archive_tree}" push origin HEAD:main; then
+              git worktree remove "${archive_tree}"
+              echo "Archived ${SNAPSHOT_KEY} successfully."
+              exit 0
+            fi
+
+            echo "Archive push conflicted on attempt ${attempt}; rebuilding from the newest main." >&2
+            git worktree remove "${archive_tree}"
+            sleep "$((attempt * 5))"
+          done
+
+          echo "Archive failed after 3 bounded attempts; marking workflow red." >&2
+          exit 1

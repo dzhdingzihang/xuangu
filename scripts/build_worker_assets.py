@@ -10,6 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PUBLIC = ROOT / "public"
 STATIC = ROOT / "static"
 PICKS = ROOT / "data" / "picks"
+OUTCOMES = ROOT / "data" / "outcomes"
 REQUIRED_STATIC_FILES = ("index.html", "styles.css", "app.js")
 MANIFEST_VERSION = "selector-manifest-v2"
 DUAL_LOW_SUMMARY_FIELDS = (
@@ -43,7 +44,68 @@ def copy_tree(source: pathlib.Path, target: pathlib.Path) -> None:
     shutil.copytree(source, target)
 
 
-def write_public_pick(source: pathlib.Path, target: pathlib.Path) -> None:
+def read_outcome_map(outcomes_dir: pathlib.Path = OUTCOMES) -> dict[str, dict]:
+    results: dict[str, dict] = {}
+    for path in outcomes_dir.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        prediction_id = payload.get("prediction_id") if isinstance(payload, dict) else None
+        if prediction_id and path.stem == prediction_id:
+            results[str(prediction_id)] = payload
+    return results
+
+
+def public_outcome(outcome: dict | None) -> dict | None:
+    if not isinstance(outcome, dict):
+        return None
+    keys = (
+        "schema_version",
+        "track",
+        "status",
+        "prediction_id",
+        "model_id",
+        "label_version",
+        "market",
+        "code",
+        "entry_trade_date",
+        "forecast_end_trade_date",
+        "horizon_trade_sessions",
+        "entry_policy",
+        "exit_policy",
+        "calendar_id",
+        "calendar_version",
+        "currency",
+        "entry_at",
+        "entry_price",
+        "entry_source",
+        "exit_at",
+        "exit_price",
+        "exit_source",
+        "gross_total_return",
+        "net_total_return",
+        "transaction_cost",
+        "corporate_action_adjusted",
+        "positive_label",
+        "settled_at",
+        "settlement_note",
+    )
+    return {key: outcome.get(key) for key in keys if key in outcome}
+
+
+def matching_shadow_outcome(pick: dict, outcome_map: dict[str, dict]) -> dict | None:
+    priority = ((pick.get("global_decision") or {}).get("research_priority") or {})
+    prediction_id = priority.get("prediction_id") if isinstance(priority, dict) else None
+    outcome = outcome_map.get(str(prediction_id)) if prediction_id else None
+    return public_outcome(outcome) if outcome and outcome.get("track") == "SHADOW_RESEARCH" else None
+
+
+def write_public_pick(
+    source: pathlib.Path,
+    target: pathlib.Path,
+    outcome_map: dict[str, dict] | None = None,
+) -> None:
     """Publish JSON without leaking machine-specific research metadata."""
     try:
         pick = json.loads(source.read_text(encoding="utf-8"))
@@ -55,6 +117,9 @@ def write_public_pick(source: pathlib.Path, target: pathlib.Path) -> None:
         serenity.pop("path", None)
         serenity["skill_metadata_detected"] = bool(serenity.get("installed"))
         serenity["mode"] = "built-in-lens"
+    shadow_outcome = matching_shadow_outcome(pick, outcome_map or {})
+    if shadow_outcome:
+        pick["shadow_outcome"] = shadow_outcome
     target.write_text(json.dumps(pick, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -240,7 +305,7 @@ def summarize_outcome(pick: dict) -> dict | None:
     return summary or None
 
 
-def summarize_pick(path: pathlib.Path) -> dict | None:
+def summarize_pick(path: pathlib.Path, outcome_map: dict[str, dict] | None = None) -> dict | None:
     try:
         pick = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -286,6 +351,9 @@ def summarize_pick(path: pathlib.Path) -> dict | None:
     outcome = summarize_outcome(pick)
     if outcome:
         summary["outcome"] = outcome
+    shadow_outcome = matching_shadow_outcome(pick, outcome_map or {})
+    if shadow_outcome:
+        summary["shadow_outcome"] = shadow_outcome
     analysis_models = summarize_analysis_models(pick)
     if analysis_models:
         summary["analysis_models"] = analysis_models
@@ -321,13 +389,14 @@ def main() -> None:
     for stale in public_picks.glob("*.json"):
         stale.unlink()
 
+    outcome_map = read_outcome_map()
     files = []
     summaries = []
     for path in sorted(PICKS.glob("*.json")):
-        write_public_pick(path, public_picks / path.name)
+        write_public_pick(path, public_picks / path.name, outcome_map)
         if path.name != "latest.json":
             files.append(path.name)
-            summary = summarize_pick(path)
+            summary = summarize_pick(path, outcome_map)
             if summary:
                 summaries.append(summary)
 
@@ -335,8 +404,9 @@ def main() -> None:
         key=lambda item: f"{item.get('target_date') or ''}{item.get('generated_at') or ''}",
         reverse=True,
     )
-    latest_summary = summarize_pick(PICKS / "latest.json") if (PICKS / "latest.json").is_file() else None
+    latest_summary = summarize_pick(PICKS / "latest.json", outcome_map) if (PICKS / "latest.json").is_file() else None
     latest_summary = latest_summary or {}
+    shadow_outcomes = [item for item in outcome_map.values() if item.get("track") == "SHADOW_RESEARCH"]
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "schema_version": latest_summary.get("schema_version"),
@@ -348,6 +418,13 @@ def main() -> None:
         "analysis_models": latest_summary.get("analysis_models") or {},
         "files": files,
         "summaries": summaries,
+        "shadow_ledger": {
+            "track": "SHADOW_RESEARCH",
+            "prediction_count": len(shadow_outcomes),
+            "pending_count": sum(1 for item in shadow_outcomes if item.get("status") == "PENDING"),
+            "settled_count": sum(1 for item in shadow_outcomes if item.get("status") == "SETTLED"),
+            "included_in_executable_performance": False,
+        },
     }
     (public_picks / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),

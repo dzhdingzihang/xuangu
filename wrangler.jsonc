@@ -4,11 +4,24 @@
   "main": "./src/index.js",
   "compatibility_date": "2026-05-29",
   "workers_dev": false,
+  "vars": {
+    "REALTIME_GATEWAY_URL": "https://xuangu-quotes.alixjd.com"
+  },
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": true
   },
+  "ratelimits": [
+    {
+      "name": "LIVE_RATE_LIMITER",
+      "namespace_id": "73142201",
+      "simple": {
+        "limit": 90,
+        "period": 60
+      }
+    }
+  ],
   "routes": [
     {
       "pattern": "xuangu.alixjd.com/*",

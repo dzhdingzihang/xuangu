@@ -44,6 +44,7 @@ def valid_executable_snapshot() -> dict:
             "probability_status": "CALIBRATED",
             "probability": 0.63,
             "calibrated": True,
+            "event_pipeline_scanned": True,
             "primary": {
                 "prediction_id": "pred_fixture_us_nvda",
                 "market": "us",
@@ -67,9 +68,9 @@ def valid_executable_snapshot() -> dict:
 
 
 def executable_builder_input() -> dict:
-    snapshot = server.enrich_snapshot_v2(snapshot_fixture())
+    snapshot = snapshot_fixture()
     snapshot["generated_at"] = "2026-08-22T09:00:00+08:00"
-    snapshot["forecast_end_date"] = "2026-09-04"
+    snapshot = server.enrich_snapshot_v2(snapshot)
     events = []
     predictions = []
     utilities = {"a_share": 0.01, "hk": 0.02, "us": 0.04}
@@ -123,7 +124,14 @@ def executable_builder_input() -> dict:
                 "tail_risk": 0.05,
             }
         )
-    snapshot["events"] = {"items": events}
+    snapshot["events"] = {
+        "pipeline": {
+            "status": "SCANNED",
+            "scanned_at": "2026-08-22T08:59:00+08:00",
+            "markets": ["a_share", "hk", "us"],
+        },
+        "items": events,
+    }
     snapshot["analysis_models"]["ten_day_return"].update(
         {
             "model_id": "ten-day-v1",
@@ -154,6 +162,100 @@ class GlobalDecisionContractTests(unittest.TestCase):
         snapshot["generated_at"] = "2026-08-22T09:03:00+08:00"
         second = server.build_global_ten_day_decision(copy.deepcopy(snapshot))["primary"]["prediction_id"]
         self.assertEqual(first, second)
+
+    def test_research_priority_has_stable_shadow_prediction_contract(self) -> None:
+        snapshot = valid_no_pick_snapshot()
+        snapshot["automation"] = {"scheduled_slot": "2026-08-22T08:58:00+08:00"}
+        first = server.build_global_ten_day_decision(copy.deepcopy(snapshot))["research_priority"]
+        snapshot["generated_at"] = "2026-08-22T09:03:00+08:00"
+        second = server.build_global_ten_day_decision(copy.deepcopy(snapshot))["research_priority"]
+
+        self.assertEqual(first["prediction_id"], second["prediction_id"])
+        self.assertEqual(first["model_id"], "ten-day-rule-shadow-v1")
+        self.assertEqual(first["label_version"], "shadow-net-return-10-session-v1")
+        self.assertEqual(first["score_kind"], "RULE_PRIORITY")
+        self.assertEqual(first["priority_score"], first["rule_priority_score"])
+        expected_priority = max(
+            0.0,
+            min(
+                100.0,
+                sum(first["priority_components"].values())
+                - first["priority_risk_penalty"]
+                - first["priority_market_penalty"],
+            ),
+        )
+        self.assertEqual(first["priority_score"], round(expected_priority, 2))
+        self.assertIsNone(first["probability"])
+        self.assertTrue(first["entry_trade_date"])
+        self.assertTrue(first["forecast_end_trade_date"])
+        self.assertIn(first["calendar_id"], {"XSHG", "XHKG", "XNYS"})
+
+    def test_builder_evaluates_complete_pool_not_only_published_legacy_rows(self) -> None:
+        snapshot = snapshot_fixture()
+        stronger = copy.deepcopy(snapshot["markets"]["a_share"]["decision"]["primary"])
+        stronger.update({"code": "600001", "symbol": "600001", "recommendation_degree": 99, "confidence": 99})
+        stronger["realtime"]["source_as_of"] = "2026-08-19T16:29:00+08:00"
+        snapshot["markets"]["a_share"]["_candidate_pool"] = [
+            snapshot["markets"]["a_share"]["decision"]["primary"],
+            stronger,
+        ]
+        snapshot = server.enrich_snapshot_v2(snapshot)
+
+        decision = snapshot["global_decision"]
+
+        evaluated = {(row["market"], row["code"]) for row in decision["evaluated_candidates"]}
+        self.assertIn(("a_share", "603228"), evaluated)
+        self.assertIn(("a_share", "600001"), evaluated)
+        self.assertEqual(decision["research_priority"]["code"], "600001")
+        self.assertEqual(decision["action"], "NO_VALID_PICK")
+        self.assertNotIn("_candidate_pool", snapshot["markets"]["a_share"])
+
+    def test_scanned_pipeline_with_zero_events_is_a_valid_empty_result(self) -> None:
+        snapshot = executable_builder_input()
+        snapshot["events"] = {
+            "pipeline": {
+                "status": "SCANNED",
+                "scanned_at": "2026-08-22T08:59:00+08:00",
+                "markets": ["a_share", "hk", "us"],
+            },
+            "items": [],
+        }
+
+        decision = server.build_global_ten_day_decision(snapshot)
+
+        self.assertEqual(decision["action"], "REVIEW_EXECUTABLE_PICK")
+        self.assertNotIn("EXTERNAL_EVIDENCE_MISSING", decision["blocker_codes"])
+        self.assertTrue(decision["event_pipeline_scanned"])
+        self.assertEqual(decision["automatic_external_evidence_count"], 0)
+
+    def test_material_negative_event_blocks_only_the_affected_candidate(self) -> None:
+        snapshot = executable_builder_input()
+        us = snapshot["markets"]["us"]["decision"]["primary"]
+        snapshot["events"]["items"].append(
+            {
+                "event_id": "official:us:negative",
+                "event_type": "announcement_or_news",
+                "market": "us",
+                "symbol": us["code"],
+                "source": "SEC filing",
+                "source_tier": "regulatory",
+                "published_at": "2026-08-21T09:00:00+08:00",
+                "effective_at": "2026-08-26T09:00:00+08:00",
+                "direction": "negative",
+                "materiality": "critical",
+                "decision_blocking": True,
+                "url": "https://example.com/material-negative",
+                "evidence_status": "verified",
+                "decision_eligible": True,
+                "ingestion_mode": "automatic",
+            }
+        )
+
+        decision = server.build_global_ten_day_decision(snapshot)
+
+        us_row = next(row for row in decision["evaluated_candidates"] if row["market"] == "us")
+        self.assertIn("MATERIAL_NEGATIVE_EVENT", us_row["blocker_codes"])
+        self.assertEqual(decision["primary"]["market"], "hk")
 
     def test_builder_does_not_treat_ready_status_as_calibration(self) -> None:
         snapshot = executable_builder_input()

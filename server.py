@@ -30,6 +30,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from market_calendar import CALENDAR_VERSION, calendar_id, market_trade_windows
+
 
 ROOT = pathlib.Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -41,6 +43,9 @@ MODEL_VERSION = "smart-selector-2026-08-22.1-dual-low-shadow"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
+SHADOW_TEN_DAY_MODEL_ID = "ten-day-rule-shadow-v1"
+SHADOW_TEN_DAY_LABEL_VERSION = "shadow-net-return-10-session-v1"
+HORIZON_RANGE_METHOD_ID = "realized-vol-drift-shadow-v1"
 SERENITY_SKILL_DIR = pathlib.Path.home() / ".agents" / "skills" / "serenity-skill"
 SCHEMA_VERSION = "selector-snapshot-v2"
 SELECTOR_MODE = "legacy_active_v2_dual_low_shadow"
@@ -2057,6 +2062,7 @@ def attach_candidate_v2(candidate: dict, market_key: str, market: dict) -> dict:
         if (candidate.get("v2") or {}).get(key) is not None
     }
     candidate["market_key"] = candidate.get("market_key") or market_key
+    attach_horizon_ranges(candidate, market_key)
     ensure_candidate_lineage(candidate, market_key)
     candidate["legacy"] = legacy_score_contract(candidate)
     candidate["v2"] = build_v2_shadow(candidate, market_key, market)
@@ -2112,6 +2118,24 @@ def _decision_candidates(decision: dict) -> list[dict]:
     return result
 
 
+def _section_candidate_pool(section: dict) -> list[dict]:
+    """Return the complete in-memory pool, falling back to published Legacy rows."""
+
+    rows = [*((section or {}).get("_candidate_pool") or []), *_decision_candidates((section or {}).get("decision") or {})]
+    result: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("code") or row.get("symbol") or "")
+        key = code or f"object:{id(row)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+    return result
+
+
 def _event_id(parts: list) -> str:
     raw = "|".join(str(part or "") for part in parts)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
@@ -2129,14 +2153,14 @@ def _parse_iso_moment(value) -> dt.datetime | None:
     return parsed.astimezone(CN_TZ)
 
 
-def _automatic_event_decision_eligible(
+def _automatic_external_event_verified(
     item: dict,
     snapshot: dict,
     *,
     market_key: str | None = None,
     symbol: str | None = None,
 ) -> bool:
-    """Only explicitly verified automatic evidence may participate in the strict gate."""
+    """Return whether an automatic external event is auditable for this window."""
 
     if not isinstance(item, dict):
         return False
@@ -2148,7 +2172,7 @@ def _automatic_event_decision_eligible(
         return False
     if str(item.get("source_tier") or "").lower() not in {"official", "regulatory", "exchange"}:
         return False
-    if str(item.get("direction") or "").lower() != "positive" or item.get("revoked_at"):
+    if item.get("revoked_at"):
         return False
     if not item.get("source") or not str(item.get("url") or "").startswith("https://"):
         return False
@@ -2160,8 +2184,10 @@ def _automatic_event_decision_eligible(
     generated = _parse_iso_moment(snapshot.get("generated_at"))
     published = _parse_iso_moment(item.get("published_at"))
     effective = _parse_iso_moment(item.get("effective_at"))
+    forecast_end_text = ((snapshot.get("forecast_end_dates") or {}).get(market_key) if market_key else None)
+    forecast_end_text = forecast_end_text or snapshot.get("forecast_end_date")
     try:
-        forecast_end = dt.date.fromisoformat(str(snapshot.get("forecast_end_date") or ""))
+        forecast_end = dt.date.fromisoformat(str(forecast_end_text or ""))
     except ValueError:
         forecast_end = None
     if not generated or not published or not effective or not forecast_end:
@@ -2171,6 +2197,53 @@ def _automatic_event_decision_eligible(
     if published > generated or published < generated - dt.timedelta(days=45):
         return False
     return window_start <= effective <= window_end
+
+
+def _automatic_event_decision_eligible(
+    item: dict,
+    snapshot: dict,
+    *,
+    market_key: str | None = None,
+    symbol: str | None = None,
+) -> bool:
+    return bool(
+        _automatic_external_event_verified(item, snapshot, market_key=market_key, symbol=symbol)
+        and str(item.get("direction") or "").lower() == "positive"
+    )
+
+
+def _material_negative_event(
+    item: dict,
+    snapshot: dict,
+    *,
+    market_key: str,
+    symbol: str,
+) -> bool:
+    if not _automatic_external_event_verified(item, snapshot, market_key=market_key, symbol=symbol):
+        return False
+    if str(item.get("direction") or "").lower() != "negative":
+        return False
+    materiality = str(item.get("materiality") or "").lower()
+    return item.get("decision_blocking") is True or materiality in {"high", "critical", "material"}
+
+
+def _event_pipeline_scan_state(snapshot: dict) -> tuple[bool, dict]:
+    events = snapshot.get("events") or {}
+    pipeline = events.get("pipeline") or snapshot.get("event_pipeline") or {}
+    if not isinstance(pipeline, dict):
+        return False, {}
+    status = str(pipeline.get("status") or "").upper()
+    markets = {str(value) for value in (pipeline.get("markets") or pipeline.get("markets_scanned") or [])}
+    scanned_at = _parse_iso_moment(pipeline.get("scanned_at"))
+    generated_at = _parse_iso_moment(snapshot.get("generated_at"))
+    complete = (
+        status in {"SCANNED", "READY", "COMPLETE"}
+        and markets == {"a_share", "hk", "us"}
+        and scanned_at is not None
+        and generated_at is not None
+        and scanned_at <= generated_at
+    )
+    return complete, pipeline
 
 
 def _finite_number(value) -> bool:
@@ -2229,9 +2302,17 @@ def _stable_prediction_id(snapshot: dict, prediction: dict, market_key: str, cod
 
 def build_event_feed(snapshot: dict) -> dict:
     generated_at = snapshot.get("generated_at")
+    existing_events = snapshot.get("events") or {}
+    existing_pipeline = existing_events.get("pipeline") or snapshot.get("event_pipeline")
+    pipeline = dict(existing_pipeline) if isinstance(existing_pipeline, dict) else {
+        "status": "PARTIAL",
+        "scanned_at": generated_at,
+        "markets": [],
+        "reason_code": "AUTOMATIC_EVENT_PIPELINE_NOT_CONFIGURED",
+    }
     items: list[dict] = []
     seen: set[str] = set()
-    for existing in ((snapshot.get("events") or {}).get("items") or []):
+    for existing in (existing_events.get("items") or []):
         if not isinstance(existing, dict):
             continue
         item = dict(existing)
@@ -2299,6 +2380,7 @@ def build_event_feed(snapshot: dict) -> dict:
     items.sort(key=lambda item: str(item.get("ingested_at") or ""), reverse=True)
     return {
         "generated_at": generated_at,
+        "pipeline": pipeline,
         "items": items,
         "stats": {
             "total": len(items),
@@ -2309,11 +2391,55 @@ def build_event_feed(snapshot: dict) -> dict:
     }
 
 
+def _rule_priority_contract(
+    candidate: dict,
+    *,
+    pipeline_scanned: bool,
+    positive_event: bool,
+    market_state: str,
+) -> dict:
+    v2 = candidate.get("v2") or {}
+    # Use absolute, bounded source scores rather than within-market percentiles.
+    # A one-stock curated pool must not receive an artificial 100th-percentile
+    # advantage over a broader market candidate pool.
+    v2_rule_score = clamp(safe_float(v2.get("rule_score")) / 100, 0.0, 1.0)
+    legacy_score = clamp(
+        safe_float(candidate.get("recommendation_degree", candidate.get("confidence"))) / 100,
+        0.0,
+        1.0,
+    )
+    quality = clamp(safe_float((candidate.get("data_quality") or {}).get("score")) / 100, 0.0, 1.0)
+    weighted = {
+        "v2_rule_score": round(v2_rule_score * 35.0, 2),
+        "legacy_recommendation": round(legacy_score * 35.0, 2),
+        "data_quality": round(quality * 20.0, 2),
+        "event_pipeline_scan": 5.0 if pipeline_scanned else 0.0,
+        "verified_positive_event": 5.0 if positive_event else 0.0,
+    }
+    gates = [gate for gate in (candidate.get("decision_gates") or []) if isinstance(gate, dict)]
+    block_count = sum(1 for gate in gates if str(gate.get("status") or "").upper() == "BLOCK")
+    warning_count = sum(1 for gate in gates if str(gate.get("status") or "").upper() == "WARN")
+    warning_count += len(candidate.get("risk_items") or []) + len(candidate.get("risk_flags") or [])
+    risk_penalty = min(45.0, block_count * 30.0 + warning_count * 1.5)
+    market_penalty = 20.0 if market_state == "BLOCKED" else 8.0 if market_state == "DEGRADED" else 0.0
+    score = clamp(sum(weighted.values()) - risk_penalty - market_penalty, 0.0, 100.0)
+    return {
+        "score_kind": "RULE_PRIORITY",
+        "rule_priority_score": round(score, 2),
+        "components": weighted,
+        "risk_penalty": round(risk_penalty, 2),
+        "market_state_penalty": round(market_penalty, 2),
+        "calibrated": False,
+        "probability": None,
+    }
+
+
 def build_global_ten_day_decision(snapshot: dict) -> dict:
-    """Create a strict cross-market action without rewriting market-level Legacy decisions."""
+    """Create a strict cross-market action without promoting Legacy signals."""
 
     events = (snapshot.get("events") or {}).get("items") or []
-    automatic_external = [item for item in events if _automatic_event_decision_eligible(item, snapshot)]
+    automatic_external = [item for item in events if _automatic_external_event_verified(item, snapshot)]
+    pipeline_scanned, pipeline = _event_pipeline_scan_state(snapshot)
     model = ((snapshot.get("analysis_models") or {}).get("ten_day_return") or {})
     model_status = str(model.get("status") or model.get("calibration_status") or "").upper()
     calibrated = model.get("calibrated") is True and model_status in {"READY", "CALIBRATED", "PRODUCTION"}
@@ -2324,11 +2450,10 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
 
     market_states: dict[str, dict] = {}
     evaluated: list[dict] = []
-    research_rows: list[tuple] = []
+    research_rows: list[dict] = []
     executable: list[dict] = []
     for market_key in ("a_share", "hk", "us"):
-        section = ((snapshot.get("markets") or {}).get(market_key) or {})
-        section = section or {}
+        section = ((snapshot.get("markets") or {}).get(market_key) or {}) or {}
         decision = section.get("decision") or {}
         stats = section.get("stats") or {}
         pool = section.get("pool_health") or {}
@@ -2372,84 +2497,136 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
             },
         }
 
-        primary = decision.get("primary")
-        if not isinstance(primary, dict):
-            continue
-        code = str(primary.get("code") or primary.get("symbol") or "")
-        gates = primary.get("decision_gates") or []
-        hard_blocked = primary.get("execution_state") == "BLOCKED" or any(
-            gate.get("status") == "BLOCK" for gate in gates if isinstance(gate, dict)
-        )
-        gates_ready = bool(gates) and all(
-            isinstance(gate, dict) and gate.get("status") == "PASS" for gate in gates
-        )
-        quality = primary.get("data_quality") or {}
-        required_inputs = [item for item in (quality.get("inputs") or []) if isinstance(item, dict) and item.get("required")]
-        quality_ready = bool(required_inputs) and all(item.get("state") == "fresh" for item in required_inputs)
-        has_external = any(
-            _automatic_event_decision_eligible(item, snapshot, market_key=market_key, symbol=code)
-            for item in automatic_external
-        )
-        prediction = _candidate_prediction(model, market_key, code) if model_ready else None
-        if prediction:
-            prediction["prediction_id"] = prediction.get("prediction_id") or _stable_prediction_id(
-                snapshot, prediction, market_key, code
+        candidates = _section_candidate_pool(section)
+        for candidate in candidates:
+            code = str(candidate.get("code") or candidate.get("symbol") or "")
+            if not code:
+                continue
+            gates = candidate.get("decision_gates") or []
+            hard_blocked = candidate.get("execution_state") == "BLOCKED" or any(
+                gate.get("status") == "BLOCK" for gate in gates if isinstance(gate, dict)
             )
-        candidate_blockers = list(reasons)
-        if hard_blocked:
-            candidate_blockers.append("CANDIDATE_EXECUTION_BLOCKED")
-        if not gates_ready:
-            candidate_blockers.append("DECISION_GATES_NOT_ALL_PASS")
-        if not quality_ready:
-            candidate_blockers.append("REQUIRED_INPUTS_INCOMPLETE")
-        if not has_external:
-            candidate_blockers.append("EXTERNAL_EVIDENCE_MISSING")
-        if not model_ready:
-            candidate_blockers.append("TEN_DAY_MODEL_NOT_READY")
-        if not prediction:
-            candidate_blockers.append("TEN_DAY_PREDICTION_MISSING")
-        elif prediction["expected_net_utility"] <= 0:
-            candidate_blockers.append("NON_POSITIVE_EXPECTED_NET_UTILITY")
-        row = {
-            "market": market_key,
-            "code": code,
-            "name": primary.get("name"),
-            "status": "EXECUTABLE" if not candidate_blockers else "RESEARCH_ONLY",
-            "score_kind": "TEN_DAY_EXPECTED_NET_UTILITY" if prediction else "RULE_SCORE",
-            "legacy_recommendation_degree": primary.get("recommendation_degree", primary.get("confidence")),
-            "v2_rank": (primary.get("v2") or {}).get("rank"),
-            "v2_rank_universe_size": (primary.get("v2") or {}).get("rank_universe_size"),
-            "probability": prediction.get("probability") if prediction else None,
-            "expected_net_utility": prediction.get("expected_net_utility") if prediction else None,
-            "transaction_cost": prediction.get("transaction_cost") if prediction else None,
-            "tail_risk": prediction.get("tail_risk") if prediction else None,
-            "model_id": prediction.get("model_id") if prediction else None,
-            "label_version": prediction.get("label_version") if prediction else None,
-            "prediction_id": prediction.get("prediction_id") if prediction else None,
-            "calibrated": bool(prediction and prediction.get("calibrated") is True),
-            "blocker_codes": list(dict.fromkeys(candidate_blockers)),
-        }
-        evaluated.append(row)
-        if not hard_blocked and state_name != "BLOCKED":
-            quality = safe_float((primary.get("data_quality") or {}).get("score"))
-            rank = safe_float((primary.get("v2") or {}).get("rank"))
-            universe = safe_float((primary.get("v2") or {}).get("rank_universe_size"))
-            percentile = (1 - rank / universe) if rank and universe else 0.0
-            legacy = safe_float(primary.get("recommendation_degree", primary.get("confidence")))
-            research_rows.append((quality, percentile, legacy, row))
-        if not candidate_blockers:
-            executable.append(row)
+            gates_ready = bool(gates) and all(
+                isinstance(gate, dict) and gate.get("status") == "PASS" for gate in gates
+            )
+            quality = candidate.get("data_quality") or {}
+            required_inputs = [
+                item for item in (quality.get("inputs") or []) if isinstance(item, dict) and item.get("required")
+            ]
+            quality_ready = bool(required_inputs) and all(item.get("state") == "fresh" for item in required_inputs)
+            positive_event = any(
+                _automatic_event_decision_eligible(item, snapshot, market_key=market_key, symbol=code)
+                for item in automatic_external
+            )
+            material_negative = any(
+                _material_negative_event(item, snapshot, market_key=market_key, symbol=code) for item in events
+            )
+            prediction = _candidate_prediction(model, market_key, code) if model_ready else None
+            if prediction:
+                prediction["prediction_id"] = prediction.get("prediction_id") or _stable_prediction_id(
+                    snapshot, prediction, market_key, code
+                )
+            candidate_blockers = list(reasons)
+            if hard_blocked:
+                candidate_blockers.append("CANDIDATE_EXECUTION_BLOCKED")
+            if not gates_ready:
+                candidate_blockers.append("DECISION_GATES_NOT_ALL_PASS")
+            if not quality_ready:
+                candidate_blockers.append("REQUIRED_INPUTS_INCOMPLETE")
+            if not pipeline_scanned:
+                candidate_blockers.append("EVENT_PIPELINE_NOT_SCANNED")
+            if material_negative:
+                candidate_blockers.append("MATERIAL_NEGATIVE_EVENT")
+            if not model_ready:
+                candidate_blockers.append("TEN_DAY_MODEL_NOT_READY")
+            if not prediction:
+                candidate_blockers.append("TEN_DAY_PREDICTION_MISSING")
+            elif prediction["expected_net_utility"] <= 0:
+                candidate_blockers.append("NON_POSITIVE_EXPECTED_NET_UTILITY")
+            priority = _rule_priority_contract(
+                candidate,
+                pipeline_scanned=pipeline_scanned,
+                positive_event=positive_event,
+                market_state=state_name,
+            )
+            window = section.get("trade_window") or (market_trade_windows(
+                snapshot.get("generated_at") or snapshot.get("target_date"),
+                horizon_sessions=FORECAST_TRADE_DAYS,
+            )[market_key])
+            shadow_identity = {
+                "model_id": SHADOW_TEN_DAY_MODEL_ID,
+                "label_version": SHADOW_TEN_DAY_LABEL_VERSION,
+            }
+            shadow_prediction_id = _stable_prediction_id(snapshot, shadow_identity, market_key, code)
+            row = {
+                "market": market_key,
+                "code": code,
+                "name": candidate.get("name"),
+                "status": "EXECUTABLE" if not candidate_blockers else "RESEARCH_ONLY",
+                "score_kind": "TEN_DAY_EXPECTED_NET_UTILITY" if prediction else "RULE_PRIORITY",
+                "legacy_signal": decision.get("action"),
+                "legacy_recommendation_degree": candidate.get("recommendation_degree", candidate.get("confidence")),
+                "v2_rank": (candidate.get("v2") or {}).get("rank"),
+                "v2_rank_universe_size": (candidate.get("v2") or {}).get("rank_universe_size"),
+                "priority_score": priority["rule_priority_score"],
+                "rule_priority_score": priority["rule_priority_score"],
+                "priority_components": priority["components"],
+                "priority_risk_penalty": priority["risk_penalty"],
+                "priority_market_penalty": priority["market_state_penalty"],
+                "probability": prediction.get("probability") if prediction else None,
+                "expected_net_utility": prediction.get("expected_net_utility") if prediction else None,
+                "transaction_cost": prediction.get("transaction_cost") if prediction else None,
+                "tail_risk": prediction.get("tail_risk") if prediction else None,
+                "model_id": prediction.get("model_id") if prediction else SHADOW_TEN_DAY_MODEL_ID,
+                "label_version": prediction.get("label_version") if prediction else SHADOW_TEN_DAY_LABEL_VERSION,
+                "prediction_id": prediction.get("prediction_id") if prediction else shadow_prediction_id,
+                "calibrated": bool(prediction and prediction.get("calibrated") is True),
+                "calendar_id": window.get("calendar_id") or calendar_id(market_key),
+                "calendar_version": window.get("calendar_version") or CALENDAR_VERSION,
+                "entry_trade_date": window.get("entry_trade_date"),
+                "forecast_end_trade_date": window.get("forecast_end_trade_date"),
+                "entry_price": candidate.get("entry_price") or candidate.get("price"),
+                "estimated_2d_range": candidate.get("estimated_2d_range"),
+                "estimated_10d_range": candidate.get("estimated_10d_range") or candidate.get("estimated_2w_range"),
+                "blocker_codes": list(dict.fromkeys(candidate_blockers)),
+            }
+            evaluated.append(row)
+            if not hard_blocked and not material_negative:
+                research_rows.append(row)
+            if not candidate_blockers:
+                executable.append(row)
 
-    research_rows.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-    research_priority = dict(research_rows[0][3]) if research_rows else None
+    research_rows.sort(
+        key=lambda item: (safe_float(item.get("rule_priority_score")), item.get("market", ""), item.get("code", "")),
+        reverse=True,
+    )
+    research_priority = dict(research_rows[0]) if research_rows else None
     if research_priority:
-        research_priority["status"] = "RESEARCH_ONLY"
-        research_priority["priority_score_kind"] = "ordinal_rule_priority"
+        research_priority.update(
+            {
+                "status": "RESEARCH_ONLY",
+                "score_kind": "RULE_PRIORITY",
+                "priority_score_kind": "auditable_rule_priority_v1",
+                "model_id": SHADOW_TEN_DAY_MODEL_ID,
+                "label_version": SHADOW_TEN_DAY_LABEL_VERSION,
+                "probability": None,
+                "expected_net_utility": None,
+                "transaction_cost": None,
+                "tail_risk": None,
+                "calibrated": False,
+                "prediction_id": _stable_prediction_id(
+                    snapshot,
+                    {"model_id": SHADOW_TEN_DAY_MODEL_ID, "label_version": SHADOW_TEN_DAY_LABEL_VERSION},
+                    research_priority["market"],
+                    research_priority["code"],
+                ),
+            }
+        )
     blocker_codes: list[str] = []
     if any(item.get("state") != "READY" for item in market_states.values()):
         blocker_codes.append("MARKET_COVERAGE_INCOMPLETE")
-    if not automatic_external:
-        blocker_codes.append("EXTERNAL_EVIDENCE_MISSING")
+    if not pipeline_scanned:
+        blocker_codes.append("EVENT_PIPELINE_NOT_SCANNED")
     if not calibrated:
         blocker_codes.append("TEN_DAY_PROBABILITY_UNCALIBRATED")
     if not costs_ready:
@@ -2477,6 +2654,8 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
         "blocker_codes": list(dict.fromkeys(blocker_codes)),
         "market_states": market_states,
         "evaluated_candidates": evaluated,
+        "event_pipeline_status": str(pipeline.get("status") or "UNKNOWN").upper(),
+        "event_pipeline_scanned": pipeline_scanned,
         "automatic_external_evidence_count": len(automatic_external),
     }
 
@@ -2487,6 +2666,19 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
     snapshot["weights_version"] = V2_WEIGHTS_VERSION
     snapshot["universe_version"] = UNIVERSE_VERSION
     snapshot.setdefault("automation", automation_metadata())
+    target_date = str(snapshot.get("target_date") or snapshot.get("generated_at") or now_cn().date().isoformat())[:10]
+    snapshot["target_date"] = target_date
+    window_anchor = snapshot.get("generated_at") or target_date
+    trade_windows = market_trade_windows(window_anchor, horizon_sessions=FORECAST_TRADE_DAYS)
+    snapshot["calendar_version"] = CALENDAR_VERSION
+    snapshot["next_trade_dates"] = {
+        market_key: window["entry_trade_date"] for market_key, window in trade_windows.items()
+    }
+    snapshot["forecast_end_dates"] = {
+        market_key: window["forecast_end_trade_date"] for market_key, window in trade_windows.items()
+    }
+    snapshot["next_trade_date"] = min(snapshot["next_trade_dates"].values())
+    snapshot["forecast_end_date"] = max(snapshot["forecast_end_dates"].values())
     (snapshot.setdefault("analysis_models", {})).setdefault(
         "dual_low",
         {
@@ -2518,9 +2710,10 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
     global_market = snapshot.get("market") or {}
     markets = snapshot.get("markets") or {}
     for market_key, section in markets.items():
+        section["trade_window"] = dict(trade_windows[market_key])
         decision = (section or {}).get("decision") or {}
         market_context = global_market if market_key == "a_share" else (section.get("market_context") or {})
-        candidates = _decision_candidates(decision)
+        candidates = _section_candidate_pool(section)
         enrich_market_candidates(candidates, market_key, market_context)
         section["market_regime"] = classify_market_regime(market_key, market_context, candidates)
         if market_key in ("hk", "us"):
@@ -2532,6 +2725,9 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
         enrich_market_candidates(candidates, "a_share", global_market)
     snapshot["events"] = build_event_feed(snapshot)
     snapshot["global_decision"] = build_global_ten_day_decision(snapshot)
+    for section in markets.values():
+        if isinstance(section, dict):
+            section.pop("_candidate_pool", None)
     snapshot["data_health"] = {
         "decision_usable": snapshot["global_decision"]["action"] != "NO_VALID_PICK",
         "market_states": snapshot["global_decision"]["market_states"],
@@ -2914,6 +3110,77 @@ def index_quotes() -> dict:
         risk = "normal"
         note = "指数环境未触发系统性风险拦截。"
     return {"items": items, "risk": risk, "risk_note": note}
+
+
+def market_context_from_benchmark(market_key: str) -> dict:
+    """Build an honest HK/US regime input from the benchmark daily series."""
+
+    benchmark_map = {
+        "hk": ("^HSI", "恒生指数"),
+        "us": ("^GSPC", "标普500"),
+    }
+    if market_key not in benchmark_map:
+        raise ValueError(f"unsupported benchmark market: {market_key}")
+    symbol, name = benchmark_map[market_key]
+    kline = yahoo_chart_kline(symbol, 90)
+    if len(kline) < 2:
+        return {
+            "benchmark": symbol,
+            "benchmarks": [],
+            "items": [],
+            "risk": "unknown",
+            "risk_note": f"{name}日线暂不可用，不对市场环境做乐观推断。",
+            "state": "unknown",
+            "data_state": "DEGRADED",
+            "source": "Yahoo Finance daily chart",
+            "source_as_of": None,
+        }
+
+    last = kline[-1]
+    previous = kline[-2]
+    close = safe_float(last.get("close"))
+    previous_close = safe_float(previous.get("close"))
+    day_change = safe_float(last.get("change_pct"))
+    if not day_change and previous_close > 0:
+        day_change = pct_change(close, previous_close)
+    five_day_change = (
+        pct_change(close, safe_float(kline[-6].get("close")))
+        if len(kline) >= 6 and safe_float(kline[-6].get("close")) > 0
+        else None
+    )
+
+    if day_change <= -1.8 or (five_day_change is not None and five_day_change <= -4.5):
+        risk, state = "high", "risk_off"
+        note = f"{name}短期走弱，降低追涨和仓位容忍度。"
+    elif abs(day_change) >= 2.5 or (five_day_change is not None and abs(five_day_change) >= 7.0):
+        risk, state = "medium", "high_vol"
+        note = f"{name}波动偏高，放大滑点和回撤假设。"
+    elif day_change >= 0.5 or (five_day_change is not None and five_day_change >= 2.0):
+        risk, state = "normal", "trend_risk_on"
+        note = f"{name}运行偏强，未触发系统性风险拦截。"
+    else:
+        risk, state = "normal", "range"
+        note = f"{name}维持震荡，不额外放大风险偏好。"
+
+    item = {
+        "code": symbol,
+        "name": name,
+        "close": round(close, 4),
+        "change_pct": round(day_change, 2),
+        "change_5d_pct": round(five_day_change, 2) if five_day_change is not None else None,
+        "source_as_of": last.get("date"),
+    }
+    return {
+        "benchmark": symbol,
+        "benchmarks": [item],
+        "items": [item],
+        "risk": risk,
+        "risk_note": note,
+        "state": state,
+        "data_state": "READY",
+        "source": "Yahoo Finance daily chart",
+        "source_as_of": last.get("date"),
+    }
 
 
 def daily_dragon_tiger(date_text: str) -> dict[str, dict]:
@@ -3773,6 +4040,77 @@ def estimate_range(confidence: int, technical: float, theme: float, risk_count: 
     }
 
 
+def estimate_horizon_range(
+    kline: list[dict],
+    market_key: str,
+    horizon_trade_days: int,
+    *,
+    confidence: int | float = 50,
+    risk_count: int = 0,
+) -> dict:
+    """Return an explainable volatility band, never a calibrated forecast."""
+
+    if horizon_trade_days not in {2, 10}:
+        raise ValueError("horizon_trade_days must be 2 or 10")
+    closes = [safe_float(row.get("close")) for row in (kline or [])]
+    closes = [value for value in closes if value > 0]
+    returns = [pct_change(current, previous) for previous, current in zip(closes, closes[1:]) if previous > 0]
+    recent = returns[-20:]
+    default_daily_vol = {"a_share": 1.8, "hk": 1.6, "us": 2.2}.get(market_key, 2.0)
+    if len(recent) >= 5:
+        average = mean(recent)
+        variance = mean([(value - average) ** 2 for value in recent])
+        daily_vol = clamp(math.sqrt(max(variance, 0.0)), 0.4, 6.0)
+        trend = clamp(mean(recent[-10:]), -1.0, 1.0) * 0.12
+    else:
+        daily_vol = default_daily_vol
+        trend = 0.0
+    # Rule confidence is deliberately heavily shrunk; it is not a learned
+    # expected-return estimate and cannot justify an all-positive interval.
+    confidence_drift = clamp((safe_float(confidence) - 50.0) * 0.004, -0.12, 0.16)
+    center = (trend + confidence_drift) * horizon_trade_days
+    width = 1.28 * daily_vol * math.sqrt(horizon_trade_days)
+    width += max(0, int(risk_count)) * 0.12 * math.sqrt(horizon_trade_days)
+    market_cap = {"a_share": 22.0, "hk": 24.0, "us": 30.0}.get(market_key, 25.0)
+    low = clamp(min(center - width, -0.35 * width), -market_cap, market_cap)
+    high = clamp(max(center + width, 0.35 * width), -market_cap, market_cap)
+    if high <= low:
+        high = min(market_cap, low + 0.1)
+    return {
+        "low_pct": round(low, 1),
+        "high_pct": round(high, 1),
+        "text": f"{low:+.1f}% ~ {high:+.1f}%",
+        "horizon_trade_days": horizon_trade_days,
+        "method_id": HORIZON_RANGE_METHOD_ID,
+        "calibrated": False,
+        "source_observations": len(recent),
+    }
+
+
+def attach_horizon_ranges(candidate: dict, market_key: str) -> dict:
+    confidence = candidate.get("recommendation_degree", candidate.get("confidence", 50))
+    risk_count = len(candidate.get("risk_flags") or []) + int(candidate.get("hard_risk_count") or 0)
+    kline = candidate.get("kline") or []
+    two_day = estimate_horizon_range(
+        kline,
+        market_key,
+        2,
+        confidence=confidence,
+        risk_count=risk_count,
+    )
+    ten_day = estimate_horizon_range(
+        kline,
+        market_key,
+        10,
+        confidence=confidence,
+        risk_count=risk_count,
+    )
+    candidate["estimated_2d_range"] = two_day
+    candidate["estimated_10d_range"] = ten_day
+    candidate["estimated_2w_range"] = dict(ten_day)
+    return candidate
+
+
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -4110,7 +4448,44 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         )
         time.sleep(0.08)
     final.sort(key=lambda item: (item.get("hard_risk_count", 0), -item["confidence"], -item["score"]))
-    return {"candidates": final, "raw_pool_size": len(candidates), "scored_size": len(final)}
+    requested_count = len(candidates)
+    quote_count = len(final)
+    realtime_count = sum(
+        1
+        for candidate in candidates
+        if safe_float((realtime_map.get(candidate.get("symbol")) or {}).get("price")) > 0
+    )
+    quote_coverage = round(quote_count / requested_count, 4) if requested_count else 0.0
+    realtime_coverage = round(realtime_count / requested_count, 4) if requested_count else 0.0
+    if requested_count == 0:
+        quote_status = "unavailable"
+        reason_codes = ["QUOTE_INPUT_EMPTY"]
+    elif quote_count == 0:
+        quote_status = "unavailable"
+        reason_codes = ["YAHOO_QUOTE_UNAVAILABLE"]
+    elif quote_count < requested_count:
+        quote_status = "partial"
+        reason_codes = ["YAHOO_QUOTE_PARTIAL"]
+    else:
+        quote_status = "available"
+        reason_codes = []
+    if realtime_count < requested_count:
+        reason_codes.append("YAHOO_REALTIME_PARTIAL")
+    return {
+        "candidates": final,
+        "raw_pool_size": requested_count,
+        "scored_size": quote_count,
+        "quote_health": {
+            "status": quote_status,
+            "source": "Yahoo Finance 1m includePrePost + daily chart",
+            "requested_count": requested_count,
+            "quote_count": quote_count,
+            "realtime_count": realtime_count,
+            "quote_coverage": quote_coverage,
+            "realtime_coverage": realtime_coverage,
+            "reason_codes": reason_codes,
+        },
+    }
 
 
 def candidate_is_executable(candidate: dict) -> bool:
@@ -4544,17 +4919,36 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
     us_universe = market_universe("us")
     hk_scored = score_serenity_candidates("hk", hk_universe)
     us_scored = score_serenity_candidates("us", us_universe)
-    enrich_market_candidates(hk_scored["candidates"], "hk", {})
-    enrich_market_candidates(us_scored["candidates"], "us", {})
+    hk_market_context = market_context_from_benchmark("hk")
+    us_market_context = market_context_from_benchmark("us")
+    enrich_market_candidates(hk_scored["candidates"], "hk", hk_market_context)
+    enrich_market_candidates(us_scored["candidates"], "us", us_market_context)
     hk_decision = make_serenity_decision(hk_scored["candidates"], "hk")
     us_decision = make_serenity_decision(us_scored["candidates"], "us")
-    forecast_end = add_trade_weekdays(target_day, FORECAST_TRADE_DAYS)
+    trade_windows = market_trade_windows(generated_at, horizon_sessions=FORECAST_TRADE_DAYS)
+    forecast_end = max(
+        dt.date.fromisoformat(window["forecast_end_trade_date"])
+        for window in trade_windows.values()
+    )
+    empty_yahoo_health = {
+        "status": "unavailable",
+        "source": "Yahoo Finance 1m includePrePost + daily chart",
+        "requested_count": 0,
+        "quote_count": 0,
+        "realtime_count": 0,
+        "quote_coverage": 0.0,
+        "realtime_coverage": 0.0,
+        "reason_codes": ["QUOTE_INPUT_EMPTY"],
+    }
+    hk_quote_health = hk_scored.get("quote_health") or dict(empty_yahoo_health)
+    us_quote_health = us_scored.get("quote_health") or dict(empty_yahoo_health)
     market_sections = {
         "a_share": {
             "key": "a_share",
             "label": "A股",
             "description": "A股实时价 + UZI评审团/风控重权重 + CZSC结构 + Serenity AI 上游瓶颈。",
             "decision": decision,
+            "_candidate_pool": scored["candidates"],
             "pool_health": pool_health,
             "quote_health": quote_health,
             "stats": {
@@ -4573,6 +4967,9 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "label": "港股",
             "description": "港股实时价/盘前盘后状态 + UZI评审团 + 两周趋势结构和风险过滤。",
             "decision": hk_decision,
+            "_candidate_pool": hk_scored["candidates"],
+            "quote_health": hk_quote_health,
+            "market_context": hk_market_context,
             "stats": {
                 "raw_pool_size": hk_scored["raw_pool_size"],
                 "universe_size": len(hk_universe),
@@ -4587,6 +4984,9 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "label": "美股",
             "description": "美股盘前/盘中/盘后实时价 + UZI评审团 + CPO/光子、HBM、neocloud、电力瓶颈。",
             "decision": us_decision,
+            "_candidate_pool": us_scored["candidates"],
+            "quote_health": us_quote_health,
+            "market_context": us_market_context,
             "stats": {
                 "raw_pool_size": us_scored["raw_pool_size"],
                 "universe_size": len(us_universe),
