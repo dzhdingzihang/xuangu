@@ -48,7 +48,7 @@ const DUAL_LOW_REASON_META = {
 };
 const DUAL_LOW_RISK_META = { low: "低", medium: "中", high: "高" };
 const DUAL_LOW_INPUT_META = {
-  quote_valuation_core_v1: "实时行情 + PE / PB / 总市值核心字段",
+  quote_valuation_core_v1: "当前行情 + PE / PB / 总市值核心字段",
 };
 const POOL_HEALTH_REASON_META = {
   POOL_COVERAGE_INSUFFICIENT: "候选池或报价覆盖未达安全阈值",
@@ -609,7 +609,7 @@ function executionAdvice(candidate, hasPrimary) {
   if (Number.isFinite(take) && current >= take * 0.98) return { tone: "warning", label: "不追高", text: "当前价已接近止盈参考，继续追买的盈亏比不足。", deviation };
   if (Number.isFinite(entry) && current > entry * 1.03) return { tone: "warning", label: "等回落", text: "当前价高于快照建议价 3% 以上，等待回到计划区。", deviation };
   if (Number.isFinite(entry) && current >= entry * 0.985 && current <= entry * 1.01) return { tone: "positive", label: "进入复核区", text: "当前价仍在计划区附近；是否执行必须继续服从 global 严格门禁。", deviation };
-  return { tone: "warning", label: "继续观察", text: "实时价偏离计划区，等待价格回归并重新检查 global 严格门禁。", deviation };
+  return { tone: "warning", label: "继续观察", text: "当前价偏离计划区，等待价格回归并重新检查 global 严格门禁。", deviation };
 }
 
 function icon(name) {
@@ -979,7 +979,7 @@ function renderDecision() {
       : Math.max(num(item.stats.universe_size), num(item.stats.raw_pool_size));
     const stateTone = item.state === "READY" ? "positive" : item.state === "BLOCKED" ? "negative" : "warning";
     const stateLabel = item.state === "READY" ? "可评估" : item.state === "BLOCKED" ? "阻断" : "降级";
-    const legacySignal = item.decision.primary ? "BUY_CANDIDATE" : String(item.decision.action || "NO_TRADE");
+    const legacySignal = `LEGACY ${item.decision.primary ? "BUY_CANDIDATE" : String(item.decision.action || "NO_TRADE")}`;
     const reasons = item.reasons.length ? item.reasons.join("；") : "关键数据门禁已通过";
     return `<article class="market-decision-card ${stateTone}">
       <header><span>${marketBadge(item.market)}<b>${meta.label}</b></span><span class="status-pill ${stateTone}">${stateLabel}</span></header>
@@ -1082,7 +1082,7 @@ function candidateDetail(row) {
   const coverage = marketCoverageState(market);
   const marketGate = coverage.state === "READY" ? "" : `<div class="callout ${coverage.state === "BLOCKED" ? "negative" : "warning"}">${icon(coverage.state === "BLOCKED" ? "ph-warning-octagon" : "ph-warning-circle")}<div><strong>市场级门禁：${coverage.state}</strong><br>${esc(coverage.reasons.join("；") || "市场覆盖尚未达到跨市场可执行标准")}。单股门控通过也不能绕过市场级阻断。</div></div>`;
   const live = state.live.get(candidateId(raw, market));
-  const liveStatus = live ? `<div class="callout info">${icon("ph-waveform")}<div><strong>当前行情：${esc(liveQuoteLabel(raw, market))}</strong><br>源时间 ${esc(dateTime(live.source_as_of))}；抓取时间 ${esc(dateTime(live.fetched_at))}。实时价只覆盖展示和执行提示，不重算快照评分。</div></div>` : "";
+  const liveStatus = live ? `<div class="callout info">${icon("ph-waveform")}<div><strong>当前行情：${esc(liveQuoteLabel(raw, market))}</strong><br>源时间 ${esc(dateTime(live.source_as_of))}；抓取时间 ${esc(dateTime(live.fetched_at))}。该行情只覆盖展示和复核提示，不重算快照评分；是否实时以状态标签为准。</div></div>` : "";
   return `<article class="detail-panel candidate-detail">
     <header class="detail-header"><div><div class="eyebrow">${marketBadge(market)} ${esc(MARKET_META[market].label)} · ${esc(candidate.code || candidate.symbol)}</div><h2 class="detail-title">${esc(candidate.name)}</h2><p class="detail-subtitle">${esc(candidate.role || candidate.reason_tags || "综合候选")}</p></div><div class="detail-actions">${badge(`Legacy #${row.legacyRank}`, "primary")}${candidate.v2?.rank ? badge(`V2 #${candidate.v2.rank}/${candidate.v2.rank_universe_size}`, "purple") : ""}${dualLow?.status === "ranked" ? badge(`双低 #${dualLow.rank}/${dualLow.rank_universe_size}`, "positive") : dualLow ? badge(dualLowLabel(dualLow), dualLowTone(dualLow)) : ""}</div></header>
     ${marketGate}
@@ -1501,13 +1501,13 @@ function renderModel() {
     <section class="panel model-pipeline-panel"><header class="panel-header"><div><h3 class="panel-title">7 阶段决策流水线</h3><p class="panel-subtitle">任一关键门禁失败，自动回退为 NO_VALID_PICK</p></div>${badge(snapshot.selector_mode || "legacy_active", "purple")}</header><ol class="pipeline-list pipeline-seven"><li><span>01</span><div><b>全市场召回</b><p>A / 港 / 美候选覆盖与召回来源。</p></div></li><li><span>02</span><div><b>交易与数据门禁</b><p>流动性、停牌、完整性和新鲜度。</p></div></li><li><span>03</span><div><b>因子和事件特征</b><p>Legacy、V2、双低与外部证据分开。</p></div></li><li><span>04</span><div><b>分市场 10 日模型</b><p>${tenDayLive ? "预测净总回报分布；已参与门禁。" : "预测净总回报分布；当前未上线。"}</p></div></li><li><span>05</span><div><b>概率校准</b><p>${tenDayLive ? "P(R10>0) 已校准并记录模型版本。" : "P(R10>0) 样本外校准；当前未上线。"}</p></div></li><li><span>06</span><div><b>跨市场效用排名</b><p>收益、风险、成本与不确定性统一比较。</p></div></li><li class="is-gate"><span>07</span><div><b>可执行性复核</b><p>价格、仓位、事件时点与尾部风险。</p></div></li></ol></section>
     <section class="model-version-grid"><article class="panel"><header class="panel-header"><div><h3 class="panel-title">版本状态</h3><p class="panel-subtitle">实际运行、影子观察与计划能力明确分开</p></div></header><div class="version-table"><div><b>Legacy</b><span class="status-pill positive">运行中</span><small>规则评分与市场级动作</small></div><div><b>V2</b><span class="status-pill primary">影子</span><small>分组因子与市场内结构排名</small></div><div><b>10 日收益模型</b><span class="status-pill ${tenDayLive ? "positive" : "warning"}">${tenDayLive ? "运行中" : "计划"}</span><small>${tenDayLive ? esc(tenDay.model.model_id || "已校准模型") : "净收益分布与 P(R10>0)"}</small></div><div><b>数据闸门</b><span class="status-pill positive">运行中</span><small>可直接输出 NO_VALID_PICK</small></div></div></article><article class="panel"><header class="panel-header"><div><h3 class="panel-title">术语边界</h3><p class="panel-subtitle">分数、概率与动作不能混用</p></div></header><dl class="term-list"><dt>规则分</dt><dd>现有规则匹配程度，不等于上涨概率</dd><dt>正收益概率</dt><dd>经样本外校准的 P(R10&gt;0)</dd><dt>预测净收益</dt><dd>最终跨市场排序目标</dd><dt>置信度</dt><dd>数据和模型不确定性</dd><dt>研究优先</dt><dd>值得继续核验，不等于建议买入</dd></dl></article></section>
     <div class="model-grid">
-      <article class="panel"><header class="panel-header"><div><h3 class="panel-title">旧因子仍然保留</h3><p class="panel-subtitle">回答“之前的评分还在吗”</p></div>${badge("Active", "positive")}</header><div class="legacy-map"><div><b>初筛 pre_score</b><span>成交额、换手、量比、涨幅等</span></div><div><b>缠论近似 chan_score</b><span>均线结构、二买 / 三买、箱体回踩</span></div><div><b>CZSC 近似</b><span>中枢、趋势、箱体位置与背驰风险</span></div><div><b>UZI + 评审团</b><span>买点纪律、流动性、过热和杀猪盘门控</span></div><div><b>Serenity 先验</b><span>AI capex 上游稀缺环节与融资风险</span></div><div><b>推荐度与动作</b><span>继续决定实际排名和 BUY / NO_TRADE</span></div></div></article>
+      <article class="panel"><header class="panel-header"><div><h3 class="panel-title">旧因子仍然保留</h3><p class="panel-subtitle">回答“之前的评分还在吗”</p></div>${badge("Active", "positive")}</header><div class="legacy-map"><div><b>初筛 pre_score</b><span>成交额、换手、量比、涨幅等</span></div><div><b>缠论近似 chan_score</b><span>均线结构、二买 / 三买、箱体回踩</span></div><div><b>CZSC 近似</b><span>中枢、趋势、箱体位置与背驰风险</span></div><div><b>UZI + 评审团</b><span>买点纪律、流动性、过热和杀猪盘门控</span></div><div><b>Serenity 先验</b><span>AI capex 上游稀缺环节与融资风险</span></div><div><b>推荐度与动作</b><span>只决定市场内 Legacy 排名与信号；能否执行由 global 严格门禁决定</span></div></div></article>
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">V2 分组权重</h3><p class="panel-subtitle">随市场状态采用规则先验；分数只作影子观察</p></div>${badge(snapshot.weights_version || "示意基准", "purple")}</header><div class="weight-list">${weights.map(([label, value]) => `<div><span>${esc(label)}</span><div class="progress-bar"><span style="width:${clamp(value)}%"></span></div><b>${fmt(value, 0)}%</b></div>`).join("")}</div><p class="fine-print">若市场基准数据不足，状态为 unknown 并保守处理；这里不声称是机器学习概率。</p></article>
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">双低七因子 · 独立影子</h3><p class="panel-subtitle">补充估值视角，不与 Legacy / V2 机械相加</p></div>${badge(dualModel.status === "available" ? "Shadow available" : "Shadow", dualModel.status === "available" ? "positive" : "warning")}</header><dl><dt>模型</dt><dd>${esc(dualModel.model_id || "dsa-screening-score-v1")}</dd><dt>市场</dt><dd>A股；港美暂不适用</dd><dt>比较池</dt><dd>${esc(dualModel.pool_scope || "a_share.merged_recall_quote_pool.pre_kline_v1")}</dd><dt>输入 / 合格</dt><dd>${dualModel.input_count === undefined ? "待新快照" : `${fmt(dualModel.input_count, 0)} / ${fmt(dualModel.eligible_count, 0)}`}</dd><dt>默认风格</dt><dd>PE≤15、PB≤2、不过热</dd><dt>决策权限</dt><dd>无；仅输出研究优先级</dd></dl><p class="fine-print">“被过滤”只表示不符合这套价值风格或数据不完整，不表示公司质量差。</p></article>
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">候选池边界</h3><p class="panel-subtitle">扩大召回，但不承诺全市场无遗漏</p></div></header><dl><dt>A股</dt><dd>事件 + 动量 + 流动性 + 回踩 + 历史延续</dd><dt>港股</dt><dd>153 只左右精选静态清单，按快照重新取价和排序</dd><dt>美股</dt><dd>258 只左右精选静态清单，按快照重新取价和排序</dd><dt>历史延续</dt><dd>最多 5 个工作日、40 只、带衰减元数据</dd><dt>交易日</dt><dd>XSHG / XHKG / XNYS 真实交易所日历，分市场计算入场和第 10 个交易日退出</dd></dl></article>
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">运行架构</h3><p class="panel-subtitle">公开站点不依赖 Render</p></div>${badge("Cloudflare only", "primary")}</header><div class="architecture-list"><div>${icon("ph-github-logo")}<span><b>GitHub Actions</b><small>定时运行 Python，生成最新快照与历史文件</small></span></div><div>${icon("ph-package")}<span><b>构建时 JSON assets</b><small>数据随 Worker 部署，不使用 KV / D1 / R2</small></span></div><div>${icon("ph-cloud")}<span><b>Cloudflare Worker</b><small>提供静态页面、历史快照 API 与实时行情代理</small></span></div><div>${icon("ph-browser")}<span><b>浏览器</b><small>渲染证据、筛选与执行提示，不在前端重算评分</small></span></div></div></article>
     </div>
-    <section class="panel section-gap"><header class="panel-header"><div><h3 class="panel-title">能力状态与限制</h3><p class="panel-subtitle">不把近似规则包装成官方框架</p></div></header><div class="truth-grid"><div><span class="status-pill warning">内置近似</span><b>缠论 / CZSC</b><p>用日线均线、箱体、突破回踩和背驰风险近似，不是原生 CZSC 执行。</p></div><div><span class="status-pill warning">方法论加权</span><b>UZI</b><p>内置轻量评审和风控规则，不是外部 UZI 模型服务。</p></div><div><span class="status-pill warning">研究先验</span><b>Serenity</b><p>硬编码产业链 lens；安装 Skill 只改变元数据，不会改变分数。</p></div><div><span class="status-pill positive">真实接口</span><b>实时行情</b><p>Futu OpenD 授权链路优先；失败时公开源仅标记 DELAYED / LAST_CLOSE，源时间和抓取时间分开。</p></div></div></section>`;
+    <section class="panel section-gap"><header class="panel-header"><div><h3 class="panel-title">能力状态与限制</h3><p class="panel-subtitle">不把近似规则包装成官方框架</p></div></header><div class="truth-grid"><div><span class="status-pill warning">内置近似</span><b>缠论 / CZSC</b><p>用日线均线、箱体、突破回踩和背驰风险近似，不是原生 CZSC 执行。</p></div><div><span class="status-pill warning">方法论加权</span><b>UZI</b><p>内置轻量评审和风控规则，不是外部 UZI 模型服务。</p></div><div><span class="status-pill warning">研究先验</span><b>Serenity</b><p>硬编码产业链 lens；安装 Skill 只改变元数据，不会改变分数。</p></div><div><span class="status-pill primary">分级接口</span><b>当前行情</b><p>Futu OpenD 授权链路优先；失败时公开源仅标记 DELAYED / LAST_CLOSE，源时间和抓取时间分开。</p></div></div></section>`;
 }
 
 function renderHealth() {
@@ -1546,7 +1546,7 @@ function renderHealth() {
       ${truth.markets.map((market) => row(MARKET_META[market.market].label, marketTone(market), marketStateLabel(market), marketMetrics(market), market.reasons.join("；") || "关键数据门禁已通过")).join("")}
       ${row("事件数据", truth.autoEvidenceCount ? "warning" : "negative", truth.autoEvidenceCount ? "待复核" : "严重缺口", `外部自动 ${truth.autoEvidenceCount} · 模型信号 ${eventItems().filter((event) => event.event_type === "model_signal").length}`, "事件因子不可作为自动买入依据")}
       ${row("发布任务", schedulerRunning ? "positive" : "negative", schedulerRunning ? "页面可用" : "需检查", `最近快照 ${dateTime(state.snapshot?.generated_at)}`, "页面可用和快照新鲜，不代表决策数据完整")}
-    </div></article><aside class="health-side"><article class="panel"><header class="panel-header"><div><h3 class="panel-title">实际更新机制</h3><p class="panel-subtitle">快照和当前行情分层更新</p></div>${badge("已运行", "primary")}</header><dl><dt>选股快照</dt><dd>北京时间多检查点 + 30 分钟补跑</dd><dt>当前行情</dt><dd>仅页面可见候选每 15 秒轮询</dd><dt>交易日窗口</dt><dd>XSHG / XHKG / XNYS 真实日历</dd><dt>结果跟踪</dt><dd>生成后立即 PENDING，第 10 个交易日后结算</dd></dl></article><article class="panel"><header class="panel-header"><div><h3 class="panel-title">调度正常，不代表结果可信</h3></div></header><p>任务可以按时完成，但如果召回池、外部证据或概率模型缺失，页面仍必须显示阻断。</p>${badge(schedulerRunning ? "当前：发布可访问" : "当前：发布待检查", schedulerRunning ? "primary" : "negative")}</article><a class="secondary-button" href="https://github.com/dzhdingzihang/xuangu/actions" target="_blank" rel="noopener noreferrer">查看最近一次任务 ${icon("ph-arrow-square-out")}</a></aside></section>`;
+    </div></article><aside class="health-side"><article class="panel"><header class="panel-header"><div><h3 class="panel-title">实际更新机制</h3><p class="panel-subtitle">快照和当前行情分层更新</p></div>${badge("已配置", "primary")}</header><dl><dt>选股快照</dt><dd>北京时间多检查点 + 30 分钟补跑</dd><dt>当前行情</dt><dd>仅页面可见候选每 15 秒轮询；源数据等级以状态标签为准</dd><dt>交易日窗口</dt><dd>XSHG / XHKG / XNYS 真实日历</dd><dt>结果跟踪</dt><dd>生成后立即 PENDING，第 10 个交易日后结算</dd></dl></article><article class="panel"><header class="panel-header"><div><h3 class="panel-title">调度正常，不代表结果可信</h3></div></header><p>任务可以按时完成，但如果召回池、外部证据或概率模型缺失，页面仍必须显示阻断。</p>${badge(schedulerRunning ? "当前：发布可访问" : "当前：发布待检查", schedulerRunning ? "primary" : "negative")}</article><a class="secondary-button" href="https://github.com/dzhdingzihang/xuangu/actions" target="_blank" rel="noopener noreferrer">查看最近一次任务 ${icon("ph-arrow-square-out")}</a></aside></section>`;
 }
 
 function renderActiveTab() {
@@ -1655,7 +1655,7 @@ async function loadLive(candidate, market, notify = true) {
     if (notify) showToast(`${candidate.name} 当前行情已更新；评分与排序保持快照值。`, "success");
     renderActiveTab();
   } catch (error) {
-    if (notify) showToast(error.message || "实时行情暂不可用", "error");
+    if (notify) showToast(error.message || "当前行情暂不可用", "error");
   } finally {
     state.liveLoading.delete(key);
   }
