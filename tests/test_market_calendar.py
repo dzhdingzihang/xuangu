@@ -37,6 +37,33 @@ class MarketCalendarTests(unittest.TestCase):
         )
         self.assertEqual(exact_us_open["entry_trade_date"], "2026-08-25")
 
+    def test_expected_quote_session_before_open_uses_previous_completed_session(self) -> None:
+        shanghai = ZoneInfo("Asia/Shanghai")
+        self.assertEqual(
+            market_calendar.expected_quote_session(
+                "hk", dt.datetime(2026, 8, 24, 8, 17, tzinfo=shanghai)
+            ),
+            dt.date(2026, 8, 21),
+        )
+        self.assertEqual(
+            market_calendar.expected_quote_session(
+                "us", dt.datetime(2026, 8, 24, 20, 17, tzinfo=shanghai)
+            ),
+            dt.date(2026, 8, 21),
+        )
+        self.assertEqual(
+            market_calendar.expected_quote_session(
+                "hk", dt.datetime(2026, 8, 24, 10, 0, tzinfo=shanghai)
+            ),
+            dt.date(2026, 8, 24),
+        )
+        self.assertEqual(
+            market_calendar.expected_quote_session(
+                "us", dt.datetime(2026, 8, 24, 23, 0, tzinfo=shanghai)
+            ),
+            dt.date(2026, 8, 24),
+        )
+
     def test_exchange_specific_holidays_do_not_fall_back_to_weekdays(self) -> None:
         self.assertFalse(market_calendar.is_market_session("a_share", "2026-10-01"))
         self.assertEqual(market_calendar.next_session("a_share", "2026-10-01"), dt.date(2026, 10, 8))

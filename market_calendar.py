@@ -97,6 +97,48 @@ def session_dates(
     return [session.date() for session in _calendar(market).sessions_in_range(start_day, end_day)]
 
 
+def expected_quote_session(
+    market: str,
+    value: dt.datetime | str,
+) -> dt.date:
+    """Return the exchange session a current quote must cover.
+
+    Before the next regular open this is the previous exchange session.  From
+    the regular open onward (including the lunch break and after the close) it
+    is the current session.  This deliberately uses the exchange calendar,
+    rather than weekdays, so holidays do not make an old quote look fresh.
+    """
+
+    calendar = _calendar(market)
+    anchor = _as_open_anchor(value)
+    local_day = anchor.astimezone(calendar.tz).date()
+    if calendar.is_session(local_day.isoformat()):
+        session_open = calendar.session_open(local_day.isoformat()).to_pydatetime()
+        if anchor >= session_open:
+            return local_day
+        return calendar.previous_session(local_day.isoformat()).date()
+    return calendar.date_to_session(local_day.isoformat(), direction="previous").date()
+
+
+def quote_session_phase(market: str, value: dt.datetime | str) -> str:
+    """Return pre, regular, break, post, or closed for an exchange clock."""
+
+    calendar = _calendar(market)
+    anchor = _as_open_anchor(value)
+    local_day = anchor.astimezone(calendar.tz).date()
+    if not calendar.is_session(local_day.isoformat()):
+        return "closed"
+    session_open = calendar.session_open(local_day.isoformat()).to_pydatetime()
+    session_close = calendar.session_close(local_day.isoformat()).to_pydatetime()
+    if anchor < session_open:
+        return "pre"
+    if anchor > session_close:
+        return "post"
+    if calendar.is_open_on_minute(anchor, ignore_breaks=False):
+        return "regular"
+    return "break"
+
+
 def market_trade_window(
     market: str,
     value: dt.date | dt.datetime | str,

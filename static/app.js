@@ -58,6 +58,7 @@ const POOL_HEALTH_REASON_META = {
   CORE_BOARD_MISSING: "A 股存在整个板块未召回",
   MERGED_POOL_EMPTY: "合并候选池为空",
   QUOTE_COVERAGE_BELOW_MINIMUM: "候选报价覆盖率低于最低要求",
+  A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM: "A 股深度评分 K 线覆盖低于 98%",
 };
 const GLOBAL_BLOCKER_META = {
   SNAPSHOT_NOT_FRESH: "快照状态不是 fresh",
@@ -380,12 +381,13 @@ function marketCoverageState(market, snapshot = state.snapshot) {
   const candidateBlocked = Boolean(primary && (primary.execution_state === "BLOCKED" || (primary.decision_gates || []).some((gate) => gate.status === "BLOCK")));
   const quoteHealth = section.quote_health || {};
   const quoteCoverage = num(quoteHealth.quote_coverage, 0);
+  const realtimeCoverage = num(quoteHealth.realtime_coverage, quoteCoverage);
   const serverState = snapshot?.global_decision?.market_states?.[market];
   const reasons = [];
   if (pool.degraded) reasons.push("候选池覆盖不足");
   if (origin === "curated_static") reasons.push("仅静态精选池，并非全市场");
   if (!regime || regime === "unknown") reasons.push("市场状态证据不足");
-  if (quoteHealth.status !== "available" || quoteCoverage < 0.98) reasons.push("行情覆盖或源时间不完整");
+  if (quoteHealth.status !== "available" || quoteCoverage < 0.98 || realtimeCoverage < 0.98) reasons.push("行情覆盖或源时间不完整");
   if (candidateBlocked) reasons.push("候选存在客观阻断");
   const coverageReasons = reasons.filter((reason) => reason !== "候选存在客观阻断");
   const derivedState = pool.degraded ? "BLOCKED" : coverageReasons.length ? "DEGRADED" : "READY";
@@ -1549,8 +1551,10 @@ function renderHealth() {
     const prefix = market.market === "a_share"
       ? `宽基 ${fmt(market.pool.broadPoolSize ?? market.stats.broad_pool_size, 0)} · 召回 ${fmt(funnel.selected, 0)}/${fmt(funnel.target, 0)}`
       : `${universeLabel} ${fmt(funnel.selected, 0)}/${fmt(funnel.target, 0)}`;
+    const freshCount = num(market.quoteHealth?.realtime_count, quoteCount(market));
+    const deepAttempted = num(market.stats?.deep_attempted_size, funnel.deepScored);
     return quoteRequested(market)
-      ? `${prefix} · 行情 ${fmt(quoteCount(market), 0)}/${fmt(quoteRequested(market), 0)} · 深评 ${fmt(funnel.deepScored, 0)}`
+      ? `${prefix} · 有效行情 ${fmt(quoteCount(market), 0)}/${fmt(quoteRequested(market), 0)} · 最近时段 ${fmt(freshCount, 0)}/${fmt(quoteRequested(market), 0)} · 深评 ${fmt(funnel.deepScored, 0)}/${fmt(deepAttempted, 0)}`
       : `${prefix} · 行情健康未发布`;
   };
   const row = (label, tone, stateLabel, metrics, impact) => `<div class="health-table-row"><b>${esc(label)}</b><span class="status-pill ${tone}">${esc(stateLabel)}</span><code>${esc(metrics)}</code><p>${esc(impact)}</p></div>`;

@@ -340,11 +340,12 @@ class SelectorV2Tests(unittest.TestCase):
                 if market_key == "hk":
                     self.assertTrue(all(re.fullmatch(r"\d{4}\.HK", symbol) for symbol in symbols))
                     self.assertIn("6051.HK", symbols)
-                    self.assertIn("8111.HK", symbols)
+                    self.assertIn("1787.HK", symbols)
                     self.assertIn("2601.HK", symbols)
                     self.assertNotIn("0011.HK", symbols)
                     self.assertNotIn("8083.HK", symbols)
                     self.assertNotIn("8110.HK", symbols)
+                    self.assertNotIn("8111.HK", symbols)
                 else:
                     self.assertNotIn("SIVE.ST", symbols)
                     self.assertNotIn("SOI", symbols)
@@ -406,6 +407,21 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
 
+    def test_tencent_quote_preserves_successful_batches(self) -> None:
+        response = mock.Mock()
+        response.read.return_value = tencent_quote_payload()
+        failure = urllib.error.URLError("second batch down")
+        with (
+            mock.patch.object(
+                server.urllib.request,
+                "urlopen",
+                side_effect=[response, failure, failure, failure],
+            ),
+            mock.patch.object(server.time, "sleep"),
+        ):
+            result = server.tencent_quote(["600000"] * 71)
+        self.assertIn("600000", result)
+
     def test_a_share_quote_failure_returns_unavailable_health(self) -> None:
         with mock.patch.object(server, "tencent_quote", side_effect=urllib.error.URLError("down")):
             scored = server.score_candidates("2026-08-21", [{"code": "600000"}], {})
@@ -441,6 +457,109 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertEqual(scored["quote_health"]["quote_count"], 1)
         self.assertEqual(scored["quote_health"]["realtime_count"], 1)
         self.assertEqual(scored["quote_health"]["quote_coverage"], 0.5)
+
+    def test_yahoo_quote_freshness_uses_exchange_session_and_regular_latency(self) -> None:
+        as_of = dt.datetime.fromisoformat("2026-08-21T10:00:00+08:00")
+        fresh = server.yahoo_quote_freshness(
+            "hk", {"price": 10, "source_as_of": "2026-08-21T09:40:00+08:00"}, as_of=as_of
+        )
+        delayed = server.yahoo_quote_freshness(
+            "hk", {"price": 10, "source_as_of": "2026-08-21T09:39:59+08:00"}, as_of=as_of
+        )
+        future_ok = server.yahoo_quote_freshness(
+            "hk", {"price": 10, "source_as_of": "2026-08-21T10:05:00+08:00"}, as_of=as_of
+        )
+        future_bad = server.yahoo_quote_freshness(
+            "hk", {"price": 10, "source_as_of": "2026-08-21T10:05:01+08:00"}, as_of=as_of
+        )
+        weekend_close = server.yahoo_quote_freshness(
+            "hk",
+            {"price": 10, "source_as_of": "2026-08-21T16:00:00+08:00"},
+            as_of=dt.datetime.fromisoformat("2026-08-22T12:00:00+08:00"),
+        )
+
+        self.assertTrue(fresh["fresh"])
+        self.assertEqual(delayed["reason"], "SOURCE_LATENCY_EXCEEDED")
+        self.assertTrue(future_ok["fresh"])
+        self.assertEqual(future_bad["reason"], "SOURCE_AS_OF_FUTURE")
+        self.assertTrue(weekend_close["fresh"])
+        self.assertEqual(weekend_close["reference_session"], "2026-08-21")
+
+    def test_hk_realtime_count_requires_positive_fresh_source(self) -> None:
+        universe = [
+            {"symbol": symbol, "name": symbol, "themes": [], "lens": {}}
+            for symbol in ("AAA.HK", "BBB.HK", "CCC.HK")
+        ]
+        live = {
+            "AAA.HK": {"price": 12, "change_pct": 1, "session": "regular", "session_label": "盘中", "source_as_of": "2026-08-21T09:55:00+08:00"},
+            "BBB.HK": {"price": 13, "change_pct": 1, "session": "regular", "session_label": "盘中", "source_as_of": "2026-08-20T15:55:00+08:00"},
+            "CCC.HK": {"price": 0, "change_pct": 1, "session": "regular", "session_label": "盘中", "source_as_of": "2026-08-21T09:55:00+08:00"},
+        }
+        klines = {symbol: fixture_kline(40) for symbol in ("AAA.HK", "BBB.HK", "CCC.HK")}
+        with (
+            mock.patch.object(server, "now_cn", return_value=dt.datetime.fromisoformat("2026-08-21T10:00:00+08:00")),
+            mock.patch.object(server, "yahoo_realtime_quotes", return_value=live),
+            mock.patch.object(server, "yahoo_kline_map", return_value=klines),
+        ):
+            scored = server.score_serenity_candidates("hk", universe)
+
+        health = scored["quote_health"]
+        self.assertEqual(health["quote_count"], 3)
+        self.assertEqual(health["realtime_count"], 1)
+        self.assertEqual(health["realtime_coverage"], 0.3333)
+        self.assertEqual(health["stale_realtime_symbols"], ["BBB.HK"])
+        self.assertIn("YAHOO_REALTIME_STALE", health["reason_codes"])
+        by_code = {row["code"]: row for row in scored["candidates"]}
+        self.assertNotEqual(by_code["BBB.HK"]["entry_price"], 13)
+        self.assertNotEqual(by_code["CCC.HK"]["entry_price"], 0)
+
+    def test_a_share_deep_score_excludes_incomplete_kline(self) -> None:
+        codes = ("600000", "000001", "300001")
+
+        def quote(code: str) -> dict:
+            return {
+                "code": code,
+                "name": code,
+                "price": 10.0,
+                "entry_price": 10.0,
+                "current_price": 10.0,
+                "last_close": 9.9,
+                "open": 9.95,
+                "low": 9.9,
+                "change_pct": 1.0,
+                "current_change_pct": 1.0,
+                "amount_wan": 50_000,
+                "turnover_pct": 5.0,
+                "vol_ratio": 1.2,
+                "float_mcap_yi": 200,
+                "limit_up": 10.89,
+                "limit_down": 8.91,
+                "fundamentals": {},
+                "realtime": {"session_label": "盘中", "source_as_of": "2026-08-21T10:00:00+08:00"},
+            }
+
+        with (
+            mock.patch.object(server, "tencent_quote", return_value={code: quote(code) for code in codes}),
+            mock.patch.object(server, "daily_dragon_tiger", return_value={}),
+            mock.patch.object(
+                server,
+                "a_share_kline_map",
+                return_value={codes[0]: fixture_kline(32), codes[1]: fixture_kline(31), codes[2]: []},
+            ),
+            mock.patch.object(server, "run_dual_low_analysis", return_value={"by_code": {}, "metadata": {}}),
+            mock.patch.dict(server.os.environ, {"CHAN_MAX_KLINE_CHECKS": "3"}),
+        ):
+            scored = server.score_candidates(
+                "2026-08-21",
+                [{"code": code, "reason": "测试", "candidate_lineage": {}} for code in codes],
+                {"risk": "normal"},
+            )
+
+        self.assertEqual(scored["deep_attempted_size"], 3)
+        self.assertEqual(scored["deep_scored_size"], 1)
+        self.assertEqual(scored["scored_size"], 1)
+        self.assertEqual(scored["deep_kline_coverage"], 0.3333)
+        self.assertEqual([row["code"] for row in scored["candidates"]], ["600000"])
 
     def test_market_context_uses_benchmark_kline_without_overstating_missing_data(self) -> None:
         with mock.patch.object(server, "yahoo_chart_kline", return_value=fixture_kline(40)):
@@ -520,6 +639,36 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertEqual(health["status"], "degraded")
         self.assertIn("QUOTE_COVERAGE_BELOW_MINIMUM", health["reason_codes"])
         self.assertEqual(health["quote_coverage"], 0.39)
+
+    def test_a_share_deep_kline_coverage_requires_95_of_96(self) -> None:
+        broad = [{"code": str(index)} for index in range(300)]
+        recall = {
+            "target_count": 300,
+            "selected_count": 300,
+            "board_coverage": dict(server.A_SHARE_BOARD_TARGETS),
+            "board_shortfalls": {},
+        }
+        healthy = server.a_share_pool_health(
+            broad,
+            quote_count=300,
+            deep_attempted_count=96,
+            deep_completed_count=95,
+            merged_count=300,
+            recall_coverage=recall,
+        )
+        degraded = server.a_share_pool_health(
+            broad,
+            quote_count=300,
+            deep_attempted_count=96,
+            deep_completed_count=94,
+            merged_count=300,
+            recall_coverage=recall,
+        )
+
+        self.assertEqual(healthy["status"], "healthy")
+        self.assertNotIn("A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM", healthy["reason_codes"])
+        self.assertEqual(degraded["status"], "degraded")
+        self.assertIn("A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM", degraded["reason_codes"])
 
     def test_objectively_blocked_candidate_cannot_be_a_share_primary(self) -> None:
         blocked = decision_ready_candidate("600001")
@@ -681,7 +830,7 @@ class SelectorV2Tests(unittest.TestCase):
         freshness = next(item for item in enriched["decision_gates"] if item["id"] == "quote_freshness")
         self.assertEqual(freshness["status"], "WARN")
 
-    def test_explicit_stale_quote_only_blocks_in_regular_session(self) -> None:
+    def test_explicit_stale_quote_blocks_in_all_sessions(self) -> None:
         regular = fixture_candidate()
         regular["realtime"].update({"stale": True, "session": "regular", "source_as_of": "2026-08-19T09:30:00+08:00"})
         server.attach_candidate_v2(regular, "a_share", {"risk": "normal", "items": [{"change_pct": 0.1}]})
@@ -693,8 +842,8 @@ class SelectorV2Tests(unittest.TestCase):
         closed["realtime"].update({"stale": True, "session": "closed", "source_as_of": "2026-08-19T16:00:00+08:00"})
         server.attach_candidate_v2(closed, "a_share", {"risk": "normal", "items": [{"change_pct": 0.1}]})
         closed_gate = next(item for item in closed["decision_gates"] if item["id"] == "quote_freshness")
-        self.assertNotEqual(closed_gate["status"], "BLOCK")
-        self.assertNotIn("STALE_QUOTE", {item["code"] for item in closed["risk_items"]})
+        self.assertEqual(closed_gate["status"], "BLOCK")
+        self.assertIn("STALE_QUOTE", {item["code"] for item in closed["risk_items"]})
 
     def test_event_feed_keeps_missing_evidence_null(self) -> None:
         snapshot = {

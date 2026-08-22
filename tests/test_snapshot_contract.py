@@ -35,7 +35,7 @@ def snapshot_fixture() -> dict:
             "recall_shortfall": 0,
             "raw_pool_size": targets[market_key],
             "universe_size": targets[market_key],
-            "valid_quote_size": 1,
+            "valid_quote_size": targets[market_key],
             "deep_scored_size": 1,
             "scored_size": 1,
             "source_counts": {"fixture": targets[market_key]},
@@ -43,6 +43,9 @@ def snapshot_fixture() -> dict:
         if market_key == "a_share":
             stats.update(
                 {
+                    "deep_score_limit": 96,
+                    "deep_attempted_size": 96,
+                    "deep_kline_coverage": 0.0104,
                     "board_targets": dict(server.A_SHARE_BOARD_TARGETS),
                     "board_counts": dict(server.A_SHARE_BOARD_TARGETS),
                     "board_shortfalls": {},
@@ -62,6 +65,24 @@ def snapshot_fixture() -> dict:
                 "watchlist": [],
             },
             "stats": stats,
+            "quote_health": {
+                "status": "available",
+                "requested_count": targets[market_key],
+                "quote_count": targets[market_key],
+                "quote_coverage": 1.0,
+                "reason_codes": [],
+                **(
+                    {
+                        "realtime_count": targets[market_key],
+                        "stale_realtime_count": 0,
+                        "realtime_coverage": 1.0,
+                        "freshness_policy": "latest_exchange_session_v1",
+                        "freshness_reference_session": "2026-08-19" if market_key == "hk" else "2026-08-18",
+                    }
+                    if market_key in {"hk", "us"}
+                    else {}
+                ),
+            },
         }
     return {
         "model_version": "legacy-fixture",
@@ -232,6 +253,17 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertIn("markets.a_share.stats.board_shortfalls is inconsistent", errors)
         self.assertIn("markets.hk.stats.raw_pool_size must equal selected size", errors)
         self.assertIn("markets.hk.stats.scored_size must equal deep scored size", errors)
+
+    def test_expanded_universe_validates_deep_and_freshness_accounting(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        enriched["markets"]["a_share"]["stats"]["deep_attempted_size"] = 0
+        enriched["markets"]["hk"]["quote_health"]["realtime_count"] = 199
+
+        errors = validate_snapshot(enriched)
+
+        self.assertIn("markets.a_share.stats.deep_scored_size exceeds attempted size", errors)
+        self.assertIn("markets.a_share.stats.deep_kline_coverage is inconsistent", errors)
+        self.assertIn("markets.hk.quote_health.realtime_coverage is inconsistent", errors)
 
     def test_snapshot_validator_requires_global_ten_day_contract(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())

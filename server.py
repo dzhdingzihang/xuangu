@@ -30,7 +30,13 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from market_calendar import CALENDAR_VERSION, calendar_id, market_trade_windows
+from market_calendar import (
+    CALENDAR_VERSION,
+    calendar_id,
+    expected_quote_session,
+    market_trade_windows,
+    quote_session_phase,
+)
 
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -40,7 +46,7 @@ PICKS = CACHE / "picks"
 MARKET_RECALL_EXPANSION_PATH = CACHE / "universes" / "market_recall_expansion_v2.json"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-08-22.2-expanded-recall"
+MODEL_VERSION = "smart-selector-2026-08-22.3-freshness-gated-recall"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
@@ -51,7 +57,7 @@ SERENITY_SKILL_DIR = pathlib.Path.home() / ".agents" / "skills" / "serenity-skil
 SCHEMA_VERSION = "selector-snapshot-v2"
 SELECTOR_MODE = "legacy_active_v2_dual_low_shadow"
 V2_WEIGHTS_VERSION = "v2-rule-prior-1"
-UNIVERSE_VERSION = "recall-v2-2-diversified-300-200-300"
+UNIVERSE_VERSION = "recall-v2-3-diversified-300-200-300"
 DUAL_LOW_MODEL_ID = "dsa-screening-score-v1"
 DUAL_LOW_PACKAGE_VERSION = "1.0.0"
 DUAL_LOW_STRATEGY_ID = "dual_low"
@@ -86,6 +92,13 @@ A_SHARE_BOARD_ROUTE_TARGETS = {
 A_SHARE_MIN_BROAD_POOL_COUNT = 240
 A_SHARE_MIN_QUOTE_COVERAGE = 0.80
 A_SHARE_DEEP_SCORE_LIMIT = 96
+A_SHARE_MIN_DEEP_SCORE_COVERAGE = 0.98
+YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
+MARKET_SOURCE_TIMEZONES = {
+    "a_share": ZoneInfo("Asia/Shanghai"),
+    "hk": ZoneInfo("Asia/Hong_Kong"),
+    "us": ZoneInfo("America/New_York"),
+}
 
 V2_REGIME_WEIGHTS = {
     "trend_risk_on": {
@@ -2078,7 +2091,7 @@ def build_risk_items(candidate: dict, quality: dict) -> list[dict]:
     if "退市" in name or candidate.get("delisting"):
         items.append({"code": "DELISTING", "severity": "hard", "evidence": candidate.get("name")})
     realtime = candidate.get("realtime") or {}
-    if "quote" in quality.get("stale", []) and realtime.get("session") == "regular":
+    if "quote" in quality.get("stale", []):
         items.append({"code": "STALE_QUOTE", "severity": "hard", "evidence": quality.get("source_as_of")})
 
     metrics = ((candidate.get("chan") or {}).get("metrics") or {})
@@ -2125,7 +2138,7 @@ def evaluate_decision_gates(candidate: dict, quality: dict, risk_items: list[dic
         {
             "id": "quote_freshness",
             "status": "BLOCK" if "STALE_QUOTE" in hard_codes else "WARN" if not quality.get("source_as_of") else "PASS",
-            "reason": "交易时段行情已知过期" if "STALE_QUOTE" in hard_codes else "缺少数据源真实时间" if not quality.get("source_as_of") else "数据源时间可验证",
+            "reason": "行情时间戳未覆盖最近交易时段" if "STALE_QUOTE" in hard_codes else "缺少数据源真实时间" if not quality.get("source_as_of") else "数据源时间可验证",
         },
         {
             "id": "data_coverage",
@@ -2558,10 +2571,13 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
         if not regime or regime == "unknown":
             reasons.append("MARKET_CONTEXT_MISSING")
         quote_coverage = quote_health.get("quote_coverage")
+        realtime_coverage = quote_health.get("realtime_coverage", quote_coverage)
         quote_ready = (
             str(quote_health.get("status") or "").lower() == "available"
             and _finite_number(quote_coverage)
             and quote_coverage >= 0.98
+            and _finite_number(realtime_coverage)
+            and realtime_coverage >= 0.98
             and int(quote_health.get("requested_count") or 0) > 0
         )
         if not quote_ready:
@@ -2576,6 +2592,8 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 "requested_count": quote_health.get("requested_count"),
                 "quote_count": quote_health.get("quote_count"),
                 "quote_coverage": quote_coverage,
+                "realtime_count": quote_health.get("realtime_count"),
+                "realtime_coverage": realtime_coverage,
             },
         }
 
@@ -3477,13 +3495,20 @@ def cached_a_share_pool(
 
 def tencent_quote(codes: list[str]) -> dict[str, dict]:
     result: dict[str, dict] = {}
+    last_error: Exception | None = None
     session = market_session("a_share")
     for start in range(0, len(codes), 70):
         batch = codes[start : start + 70]
         prefixed = [market_prefix(code) + code for code in batch]
         url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
         req = urllib.request.Request(url, headers={"User-Agent": UA})
-        raw = urlopen_with_retry(req, timeout=16).read().decode("gbk", "ignore")
+        try:
+            raw = urlopen_with_retry(req, timeout=16).read().decode("gbk", "ignore")
+        except Exception as exc:
+            # Preserve successful batches.  A 300-name pool spans five
+            # requests, so one transient batch must not erase the other four.
+            last_error = exc
+            continue
         for line in raw.strip().split(";"):
             if not line.strip() or "=\"" not in line:
                 continue
@@ -3541,6 +3566,8 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
                 },
             }
         time.sleep(0.12)
+    if not result and last_error is not None:
+        raise last_error
     return result
 
 
@@ -4091,6 +4118,57 @@ def yahoo_realtime_quotes(symbols: list[str]) -> dict[str, dict]:
                     quote = {}
                 if quote:
                     result[symbol] = quote
+    return result
+
+
+def yahoo_quote_freshness(
+    market_key: str,
+    quote: dict,
+    *,
+    as_of: dt.datetime | None = None,
+) -> dict:
+    """Judge a Yahoo quote against the latest relevant exchange session."""
+
+    reference_time = as_of or now_cn()
+    if reference_time.tzinfo is None or reference_time.utcoffset() is None:
+        raise ValueError("quote freshness reference must be timezone-aware")
+    expected_session = expected_quote_session(market_key, reference_time)
+    result = {
+        "fresh": False,
+        "policy": YAHOO_QUOTE_FRESHNESS_POLICY,
+        "reference_session": expected_session.isoformat(),
+        "reference_phase": quote_session_phase(market_key, reference_time),
+        "source_session": None,
+        "reason": "SOURCE_AS_OF_MISSING",
+    }
+    if safe_float((quote or {}).get("price")) <= 0:
+        result["reason"] = "SOURCE_PRICE_INVALID"
+        return result
+    source_text = quote.get("source_as_of") if isinstance(quote, dict) else None
+    if not source_text:
+        return result
+    try:
+        source_time = dt.datetime.fromisoformat(str(source_text).replace("Z", "+00:00"))
+    except ValueError:
+        result["reason"] = "SOURCE_AS_OF_INVALID"
+        return result
+    if source_time.tzinfo is None or source_time.utcoffset() is None:
+        result["reason"] = "SOURCE_AS_OF_NAIVE"
+        return result
+    if source_time > reference_time.astimezone(source_time.tzinfo) + dt.timedelta(minutes=5):
+        result["reason"] = "SOURCE_AS_OF_FUTURE"
+        return result
+    source_session = source_time.astimezone(MARKET_SOURCE_TIMEZONES[market_key]).date()
+    result["source_session"] = source_session.isoformat()
+    if source_session < expected_session:
+        result["reason"] = "SOURCE_SESSION_STALE"
+        return result
+    source_age = reference_time.astimezone(dt.timezone.utc) - source_time.astimezone(dt.timezone.utc)
+    result["source_age_seconds"] = round(source_age.total_seconds())
+    if result["reference_phase"] == "regular" and source_age > dt.timedelta(minutes=20):
+        result["reason"] = "SOURCE_LATENCY_EXCEEDED"
+        return result
+    result.update({"fresh": True, "reason": None})
     return result
 
 
@@ -4864,6 +4942,15 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
     else:
         realtime_map = {}
         kline_map = {}
+    freshness_as_of = now_cn()
+    freshness_by_symbol = {
+        symbol: yahoo_quote_freshness(
+            market_key,
+            realtime_map.get(symbol) or {},
+            as_of=freshness_as_of,
+        )
+        for symbol in symbols
+    }
     final = []
     for candidate in candidates:
         symbol = candidate["symbol"]
@@ -4876,9 +4963,21 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         quote = quote_from_kline(kline)
         if not quote or quote["price"] <= 0:
             continue
-        realtime = (realtime_map.get(symbol) or {}) if market_key in ("hk", "us") else {}
-        entry_price = safe_float(realtime.get("price")) or quote["price"]
-        current_change_pct = safe_float(realtime.get("change_pct")) if realtime else quote["change_pct"]
+        realtime = dict(realtime_map.get(symbol) or {}) if market_key in ("hk", "us") else {}
+        freshness = freshness_by_symbol.get(symbol) or {}
+        if realtime:
+            realtime.update(
+                {
+                    "stale": not bool(freshness.get("fresh")),
+                    "freshness_policy": freshness.get("policy"),
+                    "freshness_reference_session": freshness.get("reference_session"),
+                    "freshness_source_session": freshness.get("source_session"),
+                    "freshness_reason": freshness.get("reason"),
+                }
+            )
+        fresh_realtime = realtime if freshness.get("fresh") else {}
+        entry_price = safe_float(fresh_realtime.get("price")) or quote["price"]
+        current_change_pct = safe_float(fresh_realtime.get("change_pct")) if fresh_realtime else quote["change_pct"]
         fallback_source_as_of = daily_bar_source_as_of(market_key, kline[-1].get("date"))
         fallback_fetched_at = now_cn().isoformat(timespec="seconds")
         live_quote = {
@@ -4962,6 +5061,7 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                 "signal_change_pct": round(quote["change_pct"], 2),
                 "current_change_pct": round(current_change_pct, 2),
                 "realtime": live_quote["realtime"],
+                "quote_freshness": freshness,
                 "amount_yi": 0,
                 "turnover_pct": 0,
                 "vol_ratio": round(quote["vol_ratio"], 2),
@@ -5005,11 +5105,13 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
     final.sort(key=lambda item: (item.get("hard_risk_count", 0), -item["confidence"], -item["score"]))
     requested_count = len(candidates)
     quote_count = len(final)
-    realtime_count = sum(
-        1
-        for candidate in candidates
-        if safe_float((realtime_map.get(candidate.get("symbol")) or {}).get("price")) > 0
-    )
+    realtime_count = sum(1 for symbol in symbols if (freshness_by_symbol.get(symbol) or {}).get("fresh"))
+    stale_realtime_symbols = [
+        symbol
+        for symbol in symbols
+        if safe_float((realtime_map.get(symbol) or {}).get("price")) > 0
+        and not (freshness_by_symbol.get(symbol) or {}).get("fresh")
+    ]
     quote_coverage = round(quote_count / requested_count, 4) if requested_count else 0.0
     realtime_coverage = round(realtime_count / requested_count, 4) if requested_count else 0.0
     if requested_count == 0:
@@ -5026,6 +5128,13 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         reason_codes = []
     if realtime_count < requested_count:
         reason_codes.append("YAHOO_REALTIME_PARTIAL")
+    if stale_realtime_symbols:
+        reason_codes.append("YAHOO_REALTIME_STALE")
+    freshness_reference_session = (
+        expected_quote_session(market_key, freshness_as_of).isoformat()
+        if market_key in {"hk", "us"}
+        else None
+    )
     return {
         "candidates": final,
         "raw_pool_size": requested_count,
@@ -5036,8 +5145,12 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
             "requested_count": requested_count,
             "quote_count": quote_count,
             "realtime_count": realtime_count,
+            "stale_realtime_count": len(stale_realtime_symbols),
+            "stale_realtime_symbols": stale_realtime_symbols,
             "quote_coverage": quote_coverage,
             "realtime_coverage": realtime_coverage,
+            "freshness_policy": YAHOO_QUOTE_FRESHNESS_POLICY,
+            "freshness_reference_session": freshness_reference_session,
             "reason_codes": reason_codes,
         },
     }
@@ -5205,6 +5318,8 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
         quote = item["quote"]
         code = quote["code"]
         kline = kline_map.get(code) or []
+        if len(kline) < 32:
+            continue
         chan = chan_signal(kline)
         czsc = czsc_structure_score(kline)
         metrics = chan.get("metrics") or {}
@@ -5340,6 +5455,9 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
         "candidates": final,
         "raw_pool_size": len(hot_rows),
         "scored_size": len(final),
+        "deep_attempted_size": len(deep_items),
+        "deep_scored_size": len(final),
+        "deep_kline_coverage": round(len(final) / len(deep_items), 4) if deep_items else 0.0,
         "dragon_count": len(dragon_map),
         "quote_health": quote_health,
         "analysis_models": {"dual_low": dual_low_batch["metadata"]},
@@ -5352,19 +5470,29 @@ def a_share_pool_health(
     event_count: int = 0,
     cached_count: int = 0,
     quote_count: int = 0,
+    deep_attempted_count: int = 0,
+    deep_completed_count: int = 0,
     merged_count: int | None = None,
     recall_coverage: dict | None = None,
     min_broad_pool_count: int = A_SHARE_MIN_BROAD_POOL_COUNT,
     min_quote_coverage: float = A_SHARE_MIN_QUOTE_COVERAGE,
+    min_deep_score_coverage: float = A_SHARE_MIN_DEEP_SCORE_COVERAGE,
 ) -> dict:
     broad_pool_count = len(broad_rows)
     if merged_count is None:
         merged_count = broad_pool_count + max(0, int(event_count)) + max(0, int(cached_count))
     merged_pool_count = max(0, int(merged_count))
     quote_count = max(0, int(quote_count))
+    deep_attempted_count = max(0, int(deep_attempted_count))
+    deep_completed_count = max(0, min(int(deep_completed_count), deep_attempted_count))
     quote_coverage = (
         round(min(1.0, quote_count / merged_pool_count), 4)
         if merged_pool_count
+        else 0.0
+    )
+    deep_score_coverage = (
+        round(deep_completed_count / deep_attempted_count, 4)
+        if deep_attempted_count
         else 0.0
     )
     reason_codes: list[str] = []
@@ -5387,6 +5515,8 @@ def a_share_pool_health(
         reason_codes.append("MERGED_POOL_EMPTY")
     elif quote_coverage < min_quote_coverage:
         reason_codes.append("QUOTE_COVERAGE_BELOW_MINIMUM")
+    if deep_attempted_count == 0 or deep_score_coverage < min_deep_score_coverage:
+        reason_codes.append("A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM")
     return {
         "status": "degraded" if reason_codes else "healthy",
         "reason_codes": reason_codes,
@@ -5396,6 +5526,10 @@ def a_share_pool_health(
         "quote_coverage": quote_coverage,
         "min_broad_pool_count": min_broad_pool_count,
         "min_quote_coverage": min_quote_coverage,
+        "deep_attempted_count": deep_attempted_count,
+        "deep_completed_count": deep_completed_count,
+        "deep_score_coverage": deep_score_coverage,
+        "min_deep_score_coverage": min_deep_score_coverage,
         "target_count": target_count,
         "selected_count": selected_count,
         "recall_coverage": round(selected_count / target_count, 4) if target_count else 0.0,
@@ -5540,6 +5674,8 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         event_count=len(event_rows),
         cached_count=len(cached_rows),
         quote_count=int(quote_health.get("quote_count") or 0),
+        deep_attempted_count=int(scored.get("deep_attempted_size") or 0),
+        deep_completed_count=int(scored.get("deep_scored_size") or 0),
         merged_count=len(hot_rows),
         recall_coverage=recall_coverage,
     )
@@ -5558,12 +5694,21 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "requested_count": 0,
         "quote_count": 0,
         "realtime_count": 0,
+        "stale_realtime_count": 0,
+        "stale_realtime_symbols": [],
         "quote_coverage": 0.0,
         "realtime_coverage": 0.0,
+        "freshness_policy": YAHOO_QUOTE_FRESHNESS_POLICY,
         "reason_codes": ["QUOTE_INPUT_EMPTY"],
     }
-    hk_quote_health = hk_scored.get("quote_health") or dict(empty_yahoo_health)
-    us_quote_health = us_scored.get("quote_health") or dict(empty_yahoo_health)
+    hk_quote_health = hk_scored.get("quote_health") or {
+        **empty_yahoo_health,
+        "freshness_reference_session": expected_quote_session("hk", generated_at).isoformat(),
+    }
+    us_quote_health = us_scored.get("quote_health") or {
+        **empty_yahoo_health,
+        "freshness_reference_session": expected_quote_session("us", generated_at).isoformat(),
+    }
     hk_decision = make_serenity_decision(
         hk_scored["candidates"], "hk", quote_health=hk_quote_health
     )
@@ -5602,12 +5747,14 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
                 "source_counts": recall_source_counts(hot_rows, "a_share"),
                 "recall_backfill_count": recall_coverage["backfill_count"],
                 "deep_score_limit": int(os.environ.get("CHAN_MAX_KLINE_CHECKS", str(A_SHARE_DEEP_SCORE_LIMIT))),
+                "deep_attempted_size": scored.get("deep_attempted_size", 0),
                 "event_pool_size": len(event_rows),
                 "broad_pool_size": len(broad_rows),
                 "cached_pool_size": len(cached_rows),
                 "broad_pool_mode": broad_mode,
                 "valid_quote_size": int(quote_health.get("quote_count") or 0),
-                "deep_scored_size": scored["scored_size"],
+                "deep_scored_size": scored.get("deep_scored_size", scored["scored_size"]),
+                "deep_kline_coverage": scored.get("deep_kline_coverage", 0.0),
                 "scored_size": scored["scored_size"],
                 "dragon_count": scored["dragon_count"],
             },

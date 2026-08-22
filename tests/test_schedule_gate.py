@@ -54,6 +54,22 @@ def healthy_snapshot(generated_at: str = "2026-08-21T08:25:00+08:00") -> dict:
         "chinext": 75,
         "star": 60,
     }
+    snapshot["markets"]["a_share"]["stats"].update(
+        {
+            "deep_score_limit": 96,
+            "deep_attempted_size": 96,
+            "deep_scored_size": 96,
+            "deep_kline_coverage": 1.0,
+        }
+    )
+    for market in ("hk", "us"):
+        snapshot["markets"][market]["quote_health"].update(
+            {
+                "stale_realtime_count": 0,
+                "freshness_policy": "latest_exchange_session_v1",
+                "freshness_reference_session": "2026-08-20",
+            }
+        )
     return snapshot
 
 
@@ -263,6 +279,10 @@ class ScheduleGateTests(unittest.TestCase):
                     "stats": {
                         "raw_pool_size": 300,
                         "scored_size": 96,
+                        "deep_score_limit": 96,
+                        "deep_attempted_size": 96,
+                        "deep_scored_size": 96,
+                        "deep_kline_coverage": 1.0,
                         "recall_target": 300,
                         "recall_selected_size": 300,
                         "board_counts": {
@@ -299,6 +319,9 @@ class ScheduleGateTests(unittest.TestCase):
                 "realtime_count": structurally_blocked["markets"][market]["stats"]["raw_pool_size"],
                 "quote_coverage": 1.0,
                 "realtime_coverage": 1.0,
+                "stale_realtime_count": 0,
+                "freshness_policy": "latest_exchange_session_v1",
+                "freshness_reference_session": "2026-08-20",
                 "reason_codes": [],
             }
         self.assertEqual(
@@ -361,6 +384,33 @@ class ScheduleGateTests(unittest.TestCase):
         reasons = self.module.snapshot_data_source_recovery_reasons(snapshot)
 
         self.assertIn("A_SHARE_BOARD_QUOTA_PARTIAL", reasons)
+
+    def test_a_share_deep_kline_boundary_forces_recovery(self) -> None:
+        healthy = healthy_snapshot()
+        healthy["markets"]["a_share"]["stats"].update(
+            {"deep_scored_size": 95, "scored_size": 95, "deep_kline_coverage": 0.9896}
+        )
+        degraded = healthy_snapshot()
+        degraded["markets"]["a_share"]["stats"].update(
+            {"deep_scored_size": 94, "scored_size": 94, "deep_kline_coverage": 0.9792}
+        )
+
+        self.assertNotIn(
+            "A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM",
+            self.module.snapshot_data_source_recovery_reasons(healthy),
+        )
+        self.assertIn(
+            "A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM",
+            self.module.snapshot_data_source_recovery_reasons(degraded),
+        )
+
+    def test_hk_realtime_freshness_metadata_is_required(self) -> None:
+        snapshot = healthy_snapshot()
+        snapshot["markets"]["hk"]["quote_health"].pop("freshness_policy")
+        self.assertIn(
+            "HK_REALTIME_FRESHNESS_UNKNOWN",
+            self.module.snapshot_data_source_recovery_reasons(snapshot),
+        )
 
     def test_hk_yahoo_source_failure_is_recoverable(self) -> None:
         snapshot = {

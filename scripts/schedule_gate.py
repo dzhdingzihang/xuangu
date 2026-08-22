@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import sys
 import time
@@ -29,6 +30,7 @@ RECOVERABLE_SOURCE_REASON_CODES = {
     "TENCENT_QUOTE_UNAVAILABLE",
     "YAHOO_QUOTE_PARTIAL",
     "YAHOO_QUOTE_UNAVAILABLE",
+    "YAHOO_REALTIME_STALE",
 }
 MARKET_RECALL_TARGETS = {
     "a_share": 300,
@@ -41,6 +43,9 @@ A_SHARE_BOARD_TARGETS = {
     "chinext": 75,
     "star": 60,
 }
+A_SHARE_DEEP_SCORE_LIMIT = 96
+A_SHARE_MIN_DEEP_SCORE_COVERAGE = 0.98
+YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
 
 
 def as_cn_time(value: dt.datetime) -> dt.datetime:
@@ -162,6 +167,26 @@ def snapshot_data_source_recovery_reasons(snapshot: dict) -> list[str]:
                 or realtime_coverage < 0.98
             ):
                 reasons.append(f"{market.upper()}_REALTIME_COVERAGE_BELOW_MINIMUM")
+            realtime_count = quote_health.get("realtime_count")
+            stale_count = quote_health.get("stale_realtime_count")
+            freshness_reference = quote_health.get("freshness_reference_session")
+            freshness_shape_known = (
+                quote_health.get("freshness_policy") == YAHOO_QUOTE_FRESHNESS_POLICY
+                and isinstance(freshness_reference, str)
+                and len(freshness_reference) == 10
+                and isinstance(realtime_count, int)
+                and not isinstance(realtime_count, bool)
+                and isinstance(stale_count, int)
+                and not isinstance(stale_count, bool)
+                and realtime_count >= 0
+                and stale_count >= 0
+                and isinstance(requested_count, (int, float))
+                and realtime_count + stale_count <= requested_count
+                and isinstance(realtime_coverage, (int, float))
+                and abs(realtime_coverage - round(realtime_count / requested_count, 4)) < 0.00005
+            ) if requested_count else False
+            if not freshness_shape_known:
+                reasons.append(f"{market.upper()}_REALTIME_FRESHNESS_UNKNOWN")
         quote_codes = {str(code) for code in reason_codes} if isinstance(reason_codes, list) else set()
         reasons.extend(sorted(quote_codes & RECOVERABLE_SOURCE_REASON_CODES))
 
@@ -193,6 +218,28 @@ def snapshot_data_source_recovery_reasons(snapshot: dict) -> list[str]:
                 )
             ):
                 reasons.append("A_SHARE_BOARD_QUOTA_PARTIAL")
+            deep_limit = stats.get("deep_score_limit")
+            deep_attempted = stats.get("deep_attempted_size")
+            deep_completed = stats.get("deep_scored_size")
+            deep_coverage = stats.get("deep_kline_coverage")
+            valid_quote_count = quote_health.get("quote_count")
+            deep_shape_known = (
+                deep_limit == A_SHARE_DEEP_SCORE_LIMIT
+                and isinstance(valid_quote_count, (int, float))
+                and not isinstance(valid_quote_count, bool)
+                and isinstance(deep_attempted, int)
+                and not isinstance(deep_attempted, bool)
+                and isinstance(deep_completed, int)
+                and not isinstance(deep_completed, bool)
+                and isinstance(deep_coverage, (int, float))
+                and not isinstance(deep_coverage, bool)
+                and deep_attempted == min(A_SHARE_DEEP_SCORE_LIMIT, int(valid_quote_count))
+                and 0 <= deep_completed <= deep_attempted
+                and deep_coverage == (round(deep_completed / deep_attempted, 4) if deep_attempted else 0.0)
+            )
+            required_complete = math.ceil(deep_attempted * A_SHARE_MIN_DEEP_SCORE_COVERAGE) if isinstance(deep_attempted, int) and deep_attempted > 0 else 1
+            if not deep_shape_known or deep_completed < required_complete:
+                reasons.append("A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM")
         raw_pool_size = stats.get("raw_pool_size")
         scored_size = stats.get("scored_size")
         if (

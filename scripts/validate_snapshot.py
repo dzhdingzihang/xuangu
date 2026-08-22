@@ -12,7 +12,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from market_calendar import CALENDAR_VERSION, calendar_id, market_trade_windows
+from market_calendar import CALENDAR_VERSION, calendar_id, expected_quote_session, market_trade_windows
 
 
 VALID_MODEL_STATUSES = {"available", "unavailable"}
@@ -23,7 +23,9 @@ VALID_VOLUME_UNITS = {"lot", "share"}
 MARKET_RECALL_TARGETS = {"a_share": 300, "hk": 200, "us": 300}
 A_SHARE_BOARD_TARGETS = {"sh_main": 90, "sz_main": 75, "chinext": 75, "star": 60}
 A_SHARE_ROUTE_TARGETS = {"event": 40, "momentum": 80, "pullback": 65, "liquidity": 85, "history": 30}
-EXPANDED_RECALL_UNIVERSE_VERSION = "recall-v2-2-diversified-300-200-300"
+EXPANDED_RECALL_UNIVERSE_VERSION = "recall-v2-3-diversified-300-200-300"
+A_SHARE_DEEP_SCORE_LIMIT = 96
+YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
 
 
 def finite_number(value) -> bool:
@@ -182,10 +184,13 @@ def derive_market_coverage_state(section: dict) -> tuple[str, list[str]]:
     regime_payload = section.get("market_regime") or {}
     regime = regime_payload if isinstance(regime_payload, str) else regime_payload.get("state")
     quote_coverage = quote_health.get("quote_coverage")
+    realtime_coverage = quote_health.get("realtime_coverage", quote_coverage)
     quote_ready = (
         str(quote_health.get("status") or "").lower() == "available"
         and finite_number(quote_coverage)
         and quote_coverage >= 0.98
+        and finite_number(realtime_coverage)
+        and realtime_coverage >= 0.98
         and isinstance(quote_health.get("requested_count"), int)
         and quote_health.get("requested_count") > 0
     )
@@ -358,6 +363,31 @@ def validate_snapshot(snapshot: dict) -> list[str]:
             ):
                 errors.append(f"markets.{market_key}.stats.source_counts is invalid")
             if market_key == "a_share":
+                for field in ("deep_score_limit", "deep_attempted_size", "deep_kline_coverage"):
+                    if field not in stats:
+                        errors.append(f"markets.a_share.stats.{field} is required")
+                deep_score_limit = stats.get("deep_score_limit")
+                deep_attempted_size = stats.get("deep_attempted_size")
+                deep_kline_coverage = stats.get("deep_kline_coverage")
+                deep_limit_bound = deep_score_limit if isinstance(deep_score_limit, int) and not isinstance(deep_score_limit, bool) else 0
+                if deep_score_limit != A_SHARE_DEEP_SCORE_LIMIT:
+                    errors.append(f"markets.a_share.stats.deep_score_limit must be {A_SHARE_DEEP_SCORE_LIMIT}")
+                if (
+                    not isinstance(deep_attempted_size, int)
+                    or isinstance(deep_attempted_size, bool)
+                    or deep_attempted_size < 0
+                    or (isinstance(valid_quote_size, int) and deep_attempted_size > min(deep_limit_bound, valid_quote_size))
+                ):
+                    errors.append("markets.a_share.stats.deep_attempted_size is invalid")
+                if isinstance(deep_attempted_size, int) and isinstance(deep_scored_size, int) and deep_scored_size > deep_attempted_size:
+                    errors.append("markets.a_share.stats.deep_scored_size exceeds attempted size")
+                expected_deep_coverage = (
+                    round(deep_scored_size / deep_attempted_size, 4)
+                    if isinstance(deep_attempted_size, int) and deep_attempted_size > 0 and isinstance(deep_scored_size, int)
+                    else 0.0
+                )
+                if not finite_number(deep_kline_coverage) or deep_kline_coverage != expected_deep_coverage:
+                    errors.append("markets.a_share.stats.deep_kline_coverage is inconsistent")
                 board_targets = stats.get("board_targets")
                 board_counts = stats.get("board_counts")
                 board_shortfalls = stats.get("board_shortfalls")
@@ -408,6 +438,38 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                     }
                     if route_shortfalls != expected_route_shortfalls:
                         errors.append("markets.a_share.stats.route_shortfalls is inconsistent")
+            elif expanded_recall_contract:
+                quote_health = section.get("quote_health") if isinstance(section.get("quote_health"), dict) else {}
+                requested_count = quote_health.get("requested_count")
+                realtime_count = quote_health.get("realtime_count")
+                stale_count = quote_health.get("stale_realtime_count")
+                realtime_coverage = quote_health.get("realtime_coverage")
+                if quote_health.get("freshness_policy") != YAHOO_QUOTE_FRESHNESS_POLICY:
+                    errors.append(f"markets.{market_key}.quote_health.freshness_policy is invalid")
+                try:
+                    expected_reference = expected_quote_session(market_key, window_anchor).isoformat()
+                except (TypeError, ValueError):
+                    expected_reference = None
+                if quote_health.get("freshness_reference_session") != expected_reference:
+                    errors.append(f"markets.{market_key}.quote_health.freshness_reference_session is invalid")
+                if (
+                    not isinstance(realtime_count, int)
+                    or isinstance(realtime_count, bool)
+                    or not isinstance(stale_count, int)
+                    or isinstance(stale_count, bool)
+                    or realtime_count < 0
+                    or stale_count < 0
+                    or not isinstance(requested_count, int)
+                    or realtime_count + stale_count > requested_count
+                ):
+                    errors.append(f"markets.{market_key}.quote_health freshness counts are invalid")
+                expected_realtime_coverage = (
+                    round(realtime_count / requested_count, 4)
+                    if isinstance(requested_count, int) and requested_count > 0 and isinstance(realtime_count, int)
+                    else 0.0
+                )
+                if not finite_number(realtime_coverage) or realtime_coverage != expected_realtime_coverage:
+                    errors.append(f"markets.{market_key}.quote_health.realtime_coverage is inconsistent")
         trade_window = section.get("trade_window") or {}
         if trade_window.get("calendar_id") != calendar_id(market_key):
             errors.append(f"markets.{market_key}.trade_window.calendar_id is invalid")
