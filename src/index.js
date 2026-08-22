@@ -227,6 +227,20 @@ function summarizeDecision(decision) {
 }
 
 function summarizePick(pick) {
+  const legacySummary = summarizeDecision(pick.decision || {});
+  const globalDecision = pick.global_decision && typeof pick.global_decision === "object"
+    ? pick.global_decision
+    : {
+      action: "NO_VALID_PICK",
+      action_basis: "strict_cross_market_gate_v1",
+      probability_status: "UNAVAILABLE",
+      probability: null,
+      calibrated: false,
+      primary: null,
+      research_priority: null,
+      blocker_codes: ["GLOBAL_DECISION_MISSING"],
+      automatic_external_evidence_count: 0,
+    };
   const summary = {
     target_date: pick.target_date,
     signal_date: pick.signal_date,
@@ -236,8 +250,34 @@ function summarizePick(pick) {
     forecast_end_date: pick.forecast_end_date,
     forecast_horizon: pick.forecast_horizon,
     model_version: pick.model_version,
-    ...summarizeDecision(pick.decision || {}),
+    decision_scope: "global_10d",
+    action: globalDecision.action || "NO_VALID_PICK",
+    title: globalDecision.action === "REVIEW_EXECUTABLE_PICK" ? "跨市场候选待复核" : "当前没有可执行跨市场候选",
+    message: (globalDecision.blocker_codes || []).join(" · "),
+    has_primary: Boolean(globalDecision.primary),
+    global_decision: {
+      action: globalDecision.action || "NO_VALID_PICK",
+      action_basis: globalDecision.action_basis || "strict_cross_market_gate_v1",
+      probability_status: globalDecision.probability_status || "UNAVAILABLE",
+      probability: globalDecision.probability ?? null,
+      calibrated: globalDecision.calibrated === true,
+      primary: globalDecision.primary || null,
+      research_priority: globalDecision.research_priority || null,
+      blocker_codes: globalDecision.blocker_codes || [],
+      automatic_external_evidence_count: globalDecision.automatic_external_evidence_count || 0,
+    },
+    a_share_legacy: legacySummary,
   };
+  const primary = globalDecision.primary;
+  if (primary && typeof primary === "object") {
+    summary.code = primary.code || primary.symbol;
+    summary.name = primary.name;
+    summary.probability = primary.probability ?? null;
+    summary.expected_net_utility = primary.expected_net_utility ?? null;
+    summary.transaction_cost = primary.transaction_cost ?? null;
+    summary.tail_risk = primary.tail_risk ?? null;
+    summary.model_id = primary.model_id || null;
+  }
   if (pick.markets) {
     summary.markets = Object.fromEntries(
       Object.entries(pick.markets).map(([key, section]) => [key, summarizeDecision((section && section.decision) || {})]),

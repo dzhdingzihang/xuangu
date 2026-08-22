@@ -15,12 +15,12 @@ class FrontendContractTests(unittest.TestCase):
         cls.css = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
         cls.js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
-    def test_five_accessible_tabs_are_present(self) -> None:
-        for tab in ("decision", "candidates", "events", "history", "model"):
+    def test_six_accessible_tabs_are_present(self) -> None:
+        for tab in ("decision", "candidates", "events", "history", "model", "health"):
             self.assertIn(f'id="tab-{tab}"', self.html)
             self.assertIn(f'id="panel-{tab}"', self.html)
             self.assertIn(f'data-tab="{tab}"', self.html)
-        self.assertEqual(self.html.count('role="tabpanel"'), 5)
+        self.assertEqual(self.html.count('role="tabpanel"'), 6)
 
     def test_frontend_uses_published_snapshot_and_live_overlay_only(self) -> None:
         self.assertIn('getJson("/api/latest")', self.js)
@@ -31,7 +31,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('candidate.execution_state === "BLOCKED"', self.js)
 
     def test_evidence_views_and_canvas_charts_are_implemented(self) -> None:
-        for renderer in ("renderDecision", "renderCandidates", "renderEvents", "renderHistory", "renderModel"):
+        for renderer in ("renderDecision", "renderCandidates", "renderEvents", "renderHistory", "renderModel", "renderHealth"):
             self.assertRegex(self.js, rf"function {renderer}\(")
         self.assertIn('<canvas id="decisionChart"', self.js)
         self.assertIn('<canvas id="historyChart"', self.js)
@@ -47,12 +47,13 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_event_links_and_unknown_direction_are_normalized(self) -> None:
         self.assertIn("function safeHttpUrl", self.js)
+        self.assertIn('if (!raw) return ""', self.js)
         self.assertIn('parsed.protocol === "https:" || parsed.protocol === "http:"', self.js)
         self.assertIn("function normalizedDirection", self.js)
 
     def test_design_is_responsive_and_has_no_css_gradients(self) -> None:
         self.assertIn("@media (max-width: 760px)", self.css)
-        self.assertIn("grid-template-columns: 190px", self.css)
+        self.assertIn("grid-template-columns: 192px", self.css)
         self.assertIsNone(re.search(r"(?:linear|radial|conic)-gradient\(", self.css))
 
     def test_three_score_lenses_and_dual_low_evidence_are_rendered(self) -> None:
@@ -95,6 +96,50 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('id="qualityBadge"', self.html)
         self.assertIn("快照新鲜度与数据完整度分开判断", self.js)
         self.assertIn("health-badge.is-degraded", self.css)
+
+    def test_cross_market_answer_is_dynamic_and_strict(self) -> None:
+        self.assertRegex(self.js, r"function globalDecisionTruth\(")
+        self.assertRegex(self.js, r"function marketCoverageState\(")
+        self.assertRegex(self.js, r"function tenDayModelState\(")
+        self.assertIn('"NO_VALID_PICK"', self.js)
+        self.assertIn("TEN_DAY_PROBABILITY_UNCALIBRATED", self.js)
+        self.assertIn("EXTERNAL_EVIDENCE_MISSING", self.js)
+        self.assertIn("MARKET_COVERAGE_INCOMPLETE", self.js)
+        self.assertIn('serverPrimary.score_kind === "TEN_DAY_EXPECTED_NET_UTILITY"', self.js)
+        self.assertIn('serverPrimary.status === "EXECUTABLE"', self.js)
+        self.assertIn('serverDecision?.contract_version === "global-10d-v1"', self.js)
+        self.assertIn('serverDecision?.decision_scope === "global_10d"', self.js)
+        self.assertIn('serverDecision?.action_basis === "strict_cross_market_gate_v1"', self.js)
+        self.assertIn('serverDecision?.calibrated === true', self.js)
+        self.assertIn("serverBlockers.length === 0", self.js)
+        self.assertIn("allMarketsReady", self.js)
+        self.assertIn("candidateHasEvidence", self.js)
+        self.assertIn("serverPrimary.model_id === modelState.model.model_id", self.js)
+        self.assertIn("severity[serverStateName] >= severity[derivedState]", self.js)
+        self.assertIn("probability: ready ? serverPrimary.probability : null", self.js)
+        self.assertIn("EXECUTABLE_REVIEW", self.js)
+        self.assertNotIn("candidateScore(candidate) / 100", self.js)
+
+    def test_manual_evidence_never_becomes_automatic_evidence(self) -> None:
+        self.assertIn("MANUAL_RESEARCH_EVIDENCE", self.js)
+        self.assertIn("manual_verified_pending_ingestion", self.js)
+        self.assertIn('event.event_type === "manual_external"', self.js)
+        self.assertIn("不参与自动买入门禁", self.js)
+        self.assertIn('String(event.url || "").startsWith("https://")', self.js)
+        self.assertIn("published >= generated - 45 * 24 * 60 * 60 * 1000", self.js)
+        self.assertIn("effective >= windowStart", self.js)
+        self.assertIn("effective <= windowEnd", self.js)
+
+    def test_event_audit_remains_open_during_filtering(self) -> None:
+        self.assertIn("eventAuditOpen: false", self.js)
+        self.assertIn("state.eventAuditOpen = currentAudit.open", self.js)
+        self.assertIn('state.eventAuditOpen ? "open" : ""', self.js)
+
+    def test_history_is_explicitly_not_ready(self) -> None:
+        self.assertIn("NOT_READY · 未上线", self.js)
+        self.assertIn("10 日概率校准尚未上线", self.js)
+        self.assertIn("不展示胜率或模拟收益", self.js)
+        self.assertIn("空白代表尚未有可靠评估", self.js)
 
 
 if __name__ == "__main__":

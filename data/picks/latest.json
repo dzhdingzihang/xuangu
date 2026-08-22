@@ -29026,6 +29026,15 @@
           "count": 1
         }
       ]
+    },
+    "ten_day_return": {
+      "model_id": "ten-day-net-return-v0",
+      "status": "planned",
+      "calibrated": false,
+      "costs_ready": false,
+      "tail_risk_ready": false,
+      "participates_in_decision": false,
+      "probability": null
     }
   },
   "stats": {
@@ -29171,7 +29180,211 @@
     "stats": {
       "total": 3,
       "partial_evidence": 0,
-      "model_signals": 3
+      "model_signals": 3,
+      "automatic_external": 0
     }
+  },
+  "global_decision": {
+    "contract_version": "global-10d-v1",
+    "decision_scope": "global_10d",
+    "horizon_trade_days": 10,
+    "action": "NO_VALID_PICK",
+    "action_basis": "strict_cross_market_gate_v1",
+    "probability_status": "UNAVAILABLE",
+    "probability": null,
+    "calibrated": false,
+    "primary": null,
+    "research_priority": {
+      "market": "us",
+      "code": "NTNX",
+      "name": "Nutanix",
+      "status": "RESEARCH_ONLY",
+      "score_kind": "RULE_SCORE",
+      "legacy_recommendation_degree": 83,
+      "v2_rank": 4,
+      "v2_rank_universe_size": 246,
+      "probability": null,
+      "expected_net_utility": null,
+      "transaction_cost": null,
+      "tail_risk": null,
+      "model_id": null,
+      "calibrated": false,
+      "blocker_codes": [
+        "CURATED_STATIC_UNIVERSE",
+        "MARKET_CONTEXT_MISSING",
+        "QUOTE_HEALTH_INCOMPLETE",
+        "DECISION_GATES_NOT_ALL_PASS",
+        "EXTERNAL_EVIDENCE_MISSING",
+        "TEN_DAY_MODEL_NOT_READY",
+        "TEN_DAY_PREDICTION_MISSING"
+      ],
+      "priority_score_kind": "ordinal_rule_priority"
+    },
+    "blocker_codes": [
+      "MARKET_COVERAGE_INCOMPLETE",
+      "EXTERNAL_EVIDENCE_MISSING",
+      "TEN_DAY_PROBABILITY_UNCALIBRATED",
+      "TRANSACTION_COST_MODEL_MISSING",
+      "TAIL_RISK_MODEL_MISSING",
+      "TEN_DAY_MODEL_NOT_AUTHORIZED",
+      "NO_CANDIDATE_PASSED_STRICT_GATE"
+    ],
+    "market_states": {
+      "a_share": {
+        "state": "BLOCKED",
+        "universe_origin": "dynamic_snapshot",
+        "reason_codes": [
+          "POOL_COVERAGE_INCOMPLETE"
+        ],
+        "quote_health": {
+          "status": "available",
+          "requested_count": 96,
+          "quote_count": 96,
+          "quote_coverage": 1.0
+        }
+      },
+      "hk": {
+        "state": "DEGRADED",
+        "universe_origin": "curated_static",
+        "reason_codes": [
+          "CURATED_STATIC_UNIVERSE",
+          "MARKET_CONTEXT_MISSING",
+          "QUOTE_HEALTH_INCOMPLETE"
+        ],
+        "quote_health": {
+          "status": "missing",
+          "requested_count": null,
+          "quote_count": null,
+          "quote_coverage": null
+        }
+      },
+      "us": {
+        "state": "DEGRADED",
+        "universe_origin": "curated_static",
+        "reason_codes": [
+          "CURATED_STATIC_UNIVERSE",
+          "MARKET_CONTEXT_MISSING",
+          "QUOTE_HEALTH_INCOMPLETE"
+        ],
+        "quote_health": {
+          "status": "missing",
+          "requested_count": null,
+          "quote_count": null,
+          "quote_coverage": null
+        }
+      }
+    },
+    "evaluated_candidates": [
+      {
+        "market": "hk",
+        "code": "0941.HK",
+        "name": "中国移动",
+        "status": "RESEARCH_ONLY",
+        "score_kind": "RULE_SCORE",
+        "legacy_recommendation_degree": 80,
+        "v2_rank": 3,
+        "v2_rank_universe_size": 62,
+        "probability": null,
+        "expected_net_utility": null,
+        "transaction_cost": null,
+        "tail_risk": null,
+        "model_id": null,
+        "calibrated": false,
+        "blocker_codes": [
+          "CURATED_STATIC_UNIVERSE",
+          "MARKET_CONTEXT_MISSING",
+          "QUOTE_HEALTH_INCOMPLETE",
+          "DECISION_GATES_NOT_ALL_PASS",
+          "EXTERNAL_EVIDENCE_MISSING",
+          "TEN_DAY_MODEL_NOT_READY",
+          "TEN_DAY_PREDICTION_MISSING"
+        ]
+      },
+      {
+        "market": "us",
+        "code": "NTNX",
+        "name": "Nutanix",
+        "status": "RESEARCH_ONLY",
+        "score_kind": "RULE_SCORE",
+        "legacy_recommendation_degree": 83,
+        "v2_rank": 4,
+        "v2_rank_universe_size": 246,
+        "probability": null,
+        "expected_net_utility": null,
+        "transaction_cost": null,
+        "tail_risk": null,
+        "model_id": null,
+        "calibrated": false,
+        "blocker_codes": [
+          "CURATED_STATIC_UNIVERSE",
+          "MARKET_CONTEXT_MISSING",
+          "QUOTE_HEALTH_INCOMPLETE",
+          "DECISION_GATES_NOT_ALL_PASS",
+          "EXTERNAL_EVIDENCE_MISSING",
+          "TEN_DAY_MODEL_NOT_READY",
+          "TEN_DAY_PREDICTION_MISSING"
+        ]
+      }
+    ],
+    "automatic_external_evidence_count": 0
+  },
+  "data_health": {
+    "decision_usable": false,
+    "market_states": {
+      "a_share": {
+        "state": "BLOCKED",
+        "universe_origin": "dynamic_snapshot",
+        "reason_codes": [
+          "POOL_COVERAGE_INCOMPLETE"
+        ],
+        "quote_health": {
+          "status": "available",
+          "requested_count": 96,
+          "quote_count": 96,
+          "quote_coverage": 1.0
+        }
+      },
+      "hk": {
+        "state": "DEGRADED",
+        "universe_origin": "curated_static",
+        "reason_codes": [
+          "CURATED_STATIC_UNIVERSE",
+          "MARKET_CONTEXT_MISSING",
+          "QUOTE_HEALTH_INCOMPLETE"
+        ],
+        "quote_health": {
+          "status": "missing",
+          "requested_count": null,
+          "quote_count": null,
+          "quote_coverage": null
+        }
+      },
+      "us": {
+        "state": "DEGRADED",
+        "universe_origin": "curated_static",
+        "reason_codes": [
+          "CURATED_STATIC_UNIVERSE",
+          "MARKET_CONTEXT_MISSING",
+          "QUOTE_HEALTH_INCOMPLETE"
+        ],
+        "quote_health": {
+          "status": "missing",
+          "requested_count": null,
+          "quote_count": null,
+          "quote_coverage": null
+        }
+      }
+    },
+    "automatic_external_evidence_count": 0,
+    "probability_status": "UNAVAILABLE",
+    "blocker_codes": [
+      "MARKET_COVERAGE_INCOMPLETE",
+      "EXTERNAL_EVIDENCE_MISSING",
+      "TEN_DAY_PROBABILITY_UNCALIBRATED",
+      "TRANSACTION_COST_MODEL_MISSING",
+      "TAIL_RISK_MODEL_MISSING",
+      "TEN_DAY_MODEL_NOT_AUTHORIZED",
+      "NO_CANDIDATE_PASSED_STRICT_GATE"
+    ]
   }
 }

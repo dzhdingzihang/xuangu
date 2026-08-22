@@ -108,7 +108,7 @@ def summarize_analysis_models(pick: dict) -> dict:
     """Keep model identity and batch health without copying pool-sized results."""
     dual_low = ((pick.get("analysis_models") or {}).get("dual_low") or {})
     if not isinstance(dual_low, dict):
-        return {}
+        dual_low = {}
 
     summary = {
         key: dual_low.get(key)
@@ -131,7 +131,70 @@ def summarize_analysis_models(pick: dict) -> dict:
         if coverage_summary:
             summary["required_field_coverage"] = coverage_summary
 
-    return {"dual_low": summary} if summary else {}
+    result = {"dual_low": summary} if summary else {}
+    ten_day = ((pick.get("analysis_models") or {}).get("ten_day_return") or {})
+    if isinstance(ten_day, dict):
+        ten_day_summary = {
+            key: ten_day.get(key)
+            for key in (
+                "model_id",
+                "status",
+                "calibrated",
+                "costs_ready",
+                "tail_risk_ready",
+                "participates_in_decision",
+                "probability",
+            )
+            if key in ten_day
+        }
+        if ten_day_summary:
+            result["ten_day_return"] = ten_day_summary
+    return result
+
+
+def summarize_global_decision(pick: dict) -> dict | None:
+    decision = pick.get("global_decision")
+    if not isinstance(decision, dict):
+        return None
+    summary = {
+        key: decision.get(key)
+        for key in (
+            "horizon_trade_days",
+            "contract_version",
+            "decision_scope",
+            "action",
+            "action_basis",
+            "probability_status",
+            "probability",
+            "calibrated",
+            "research_priority",
+            "blocker_codes",
+            "market_states",
+            "automatic_external_evidence_count",
+        )
+        if key in decision
+    }
+    primary = decision.get("primary")
+    if isinstance(primary, dict):
+        summary["primary"] = {
+            key: primary.get(key)
+            for key in (
+                "market",
+                "code",
+                "name",
+                "score_kind",
+                "probability",
+                "expected_net_utility",
+                "transaction_cost",
+                "tail_risk",
+                "model_id",
+                "calibrated",
+            )
+            if key in primary
+        }
+    else:
+        summary["primary"] = None
+    return summary
 
 
 def summarize_pick(path: pathlib.Path) -> dict | None:
@@ -139,6 +202,19 @@ def summarize_pick(path: pathlib.Path) -> dict | None:
         pick = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+    legacy_summary = summarize_decision(pick.get("decision") or {})
+    global_decision = summarize_global_decision(pick) or {
+        "horizon_trade_days": 10,
+        "action": "NO_VALID_PICK",
+        "action_basis": "strict_cross_market_gate_v1",
+        "probability_status": "UNAVAILABLE",
+        "probability": None,
+        "calibrated": False,
+        "primary": None,
+        "research_priority": None,
+        "blocker_codes": ["GLOBAL_DECISION_MISSING"],
+        "automatic_external_evidence_count": 0,
+    }
     summary = {
         "target_date": pick.get("target_date"),
         "signal_date": pick.get("signal_date"),
@@ -153,11 +229,22 @@ def summarize_pick(path: pathlib.Path) -> dict | None:
         "model_version": pick.get("model_version"),
         "weights_version": pick.get("weights_version"),
         "universe_version": pick.get("universe_version"),
-        **summarize_decision(pick.get("decision") or {}),
+        "decision_scope": "global_10d",
+        "action": global_decision.get("action") or "NO_VALID_PICK",
+        "title": "跨市场候选待复核" if global_decision.get("action") == "REVIEW_EXECUTABLE_PICK" else "当前没有可执行跨市场候选",
+        "message": " · ".join(global_decision.get("blocker_codes") or []),
+        "has_primary": bool(global_decision.get("primary")),
+        "a_share_legacy": legacy_summary,
+        "global_decision": global_decision,
     }
     analysis_models = summarize_analysis_models(pick)
     if analysis_models:
         summary["analysis_models"] = analysis_models
+    primary = global_decision.get("primary")
+    if isinstance(primary, dict):
+        for key in ("code", "name", "probability", "expected_net_utility", "transaction_cost", "tail_risk", "model_id"):
+            if key in primary:
+                summary[key] = primary.get(key)
     markets = pick.get("markets") or {}
     if markets:
         summary["markets"] = {}

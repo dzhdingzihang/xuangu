@@ -1938,10 +1938,113 @@ def _event_id(parts: list) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
 
 
+def _parse_iso_moment(value) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=CN_TZ)
+    return parsed.astimezone(CN_TZ)
+
+
+def _automatic_event_decision_eligible(
+    item: dict,
+    snapshot: dict,
+    *,
+    market_key: str | None = None,
+    symbol: str | None = None,
+) -> bool:
+    """Only explicitly verified automatic evidence may participate in the strict gate."""
+
+    if not isinstance(item, dict):
+        return False
+    if item.get("event_type") in {"model_signal", "manual_external"}:
+        return False
+    if item.get("decision_eligible") is not True or str(item.get("ingestion_mode") or "").lower() != "automatic":
+        return False
+    if str(item.get("evidence_status") or "").lower() not in {"verified", "confirmed"}:
+        return False
+    if str(item.get("source_tier") or "").lower() not in {"official", "regulatory", "exchange"}:
+        return False
+    if str(item.get("direction") or "").lower() != "positive" or item.get("revoked_at"):
+        return False
+    if not item.get("source") or not str(item.get("url") or "").startswith("https://"):
+        return False
+    if market_key and str(item.get("market") or "").lower() != market_key.lower():
+        return False
+    if symbol and str(item.get("symbol") or "").lower() != symbol.lower():
+        return False
+
+    generated = _parse_iso_moment(snapshot.get("generated_at"))
+    published = _parse_iso_moment(item.get("published_at"))
+    effective = _parse_iso_moment(item.get("effective_at"))
+    try:
+        forecast_end = dt.date.fromisoformat(str(snapshot.get("forecast_end_date") or ""))
+    except ValueError:
+        forecast_end = None
+    if not generated or not published or not effective or not forecast_end:
+        return False
+    window_start = generated.replace(hour=0, minute=0, second=0, microsecond=0)
+    window_end = dt.datetime.combine(forecast_end, dt.time.max, tzinfo=CN_TZ)
+    if published > generated or published < generated - dt.timedelta(days=45):
+        return False
+    return window_start <= effective <= window_end
+
+
+def _finite_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _candidate_prediction(model: dict, market_key: str, code: str) -> dict | None:
+    predictions = model.get("predictions")
+    prediction = None
+    if isinstance(predictions, list):
+        prediction = next(
+            (
+                item
+                for item in predictions
+                if isinstance(item, dict)
+                and str(item.get("market") or "").lower() == market_key.lower()
+                and str(item.get("code") or item.get("symbol") or "").lower() == code.lower()
+            ),
+            None,
+        )
+    elif isinstance(predictions, dict):
+        prediction = predictions.get(f"{market_key}:{code}") or predictions.get(code)
+    if not isinstance(prediction, dict):
+        return None
+    required_numbers = ("probability", "expected_net_utility", "transaction_cost", "tail_risk")
+    if prediction.get("calibrated") is not True or not all(_finite_number(prediction.get(key)) for key in required_numbers):
+        return None
+    if not 0 <= prediction["probability"] <= 1 or prediction["transaction_cost"] < 0 or prediction["tail_risk"] < 0:
+        return None
+    model_id = prediction.get("model_id") or model.get("model_id")
+    if not model_id:
+        return None
+    result = dict(prediction)
+    result["model_id"] = model_id
+    return result
+
+
 def build_event_feed(snapshot: dict) -> dict:
     generated_at = snapshot.get("generated_at")
     items: list[dict] = []
     seen: set[str] = set()
+    for existing in ((snapshot.get("events") or {}).get("items") or []):
+        if not isinstance(existing, dict):
+            continue
+        item = dict(existing)
+        event_id = item.get("event_id") or _event_id(
+            [item.get("market"), item.get("symbol"), item.get("source"), item.get("title"), item.get("published_at")]
+        )
+        if event_id in seen:
+            continue
+        item["event_id"] = event_id
+        seen.add(event_id)
+        items.append(item)
     for market_key, section in (snapshot.get("markets") or {}).items():
         decision = (section or {}).get("decision") or {}
         rows = _decision_candidates(decision)
@@ -2003,7 +2106,174 @@ def build_event_feed(snapshot: dict) -> dict:
             "total": len(items),
             "partial_evidence": sum(1 for item in items if item.get("evidence_status") == "partial"),
             "model_signals": sum(1 for item in items if item.get("event_type") == "model_signal"),
+            "automatic_external": sum(1 for item in items if _automatic_event_decision_eligible(item, snapshot)),
         },
+    }
+
+
+def build_global_ten_day_decision(snapshot: dict) -> dict:
+    """Create a strict cross-market action without rewriting market-level Legacy decisions."""
+
+    events = (snapshot.get("events") or {}).get("items") or []
+    automatic_external = [item for item in events if _automatic_event_decision_eligible(item, snapshot)]
+    model = ((snapshot.get("analysis_models") or {}).get("ten_day_return") or {})
+    model_status = str(model.get("status") or model.get("calibration_status") or "").upper()
+    calibrated = model.get("calibrated") is True and model_status in {"READY", "CALIBRATED", "PRODUCTION"}
+    costs_ready = model.get("costs_ready") is True or model.get("transaction_costs_ready") is True
+    tail_ready = model.get("tail_risk_ready") is True or model.get("expected_shortfall_ready") is True
+    participates = model.get("participates_in_decision") is True
+    model_ready = calibrated and costs_ready and tail_ready and participates
+
+    market_states: dict[str, dict] = {}
+    evaluated: list[dict] = []
+    research_rows: list[tuple] = []
+    executable: list[dict] = []
+    for market_key in ("a_share", "hk", "us"):
+        section = ((snapshot.get("markets") or {}).get(market_key) or {})
+        section = section or {}
+        decision = section.get("decision") or {}
+        stats = section.get("stats") or {}
+        pool = section.get("pool_health") or {}
+        quote_health = section.get("quote_health") or {}
+        pool_state = str(pool.get("state") or pool.get("status") or pool.get("data_state") or "").upper()
+        pool_codes = list(pool.get("reason_codes") or [])
+        decision_codes = list(decision.get("blocker_codes") or [])
+        pool_degraded = pool_state == "DEGRADED" or bool(pool_codes) or any(
+            any(token in str(code) for token in ("POOL_COVERAGE", "BROAD_POOL", "QUOTE_COVERAGE"))
+            for code in decision_codes
+        )
+        origin = str(stats.get("universe_origin") or "")
+        regime_payload = section.get("market_regime") or {}
+        regime = regime_payload if isinstance(regime_payload, str) else regime_payload.get("state")
+        reasons: list[str] = []
+        if pool_degraded:
+            reasons.append("POOL_COVERAGE_INCOMPLETE")
+        if origin == "curated_static":
+            reasons.append("CURATED_STATIC_UNIVERSE")
+        if not regime or regime == "unknown":
+            reasons.append("MARKET_CONTEXT_MISSING")
+        quote_coverage = quote_health.get("quote_coverage")
+        quote_ready = (
+            str(quote_health.get("status") or "").lower() == "available"
+            and _finite_number(quote_coverage)
+            and quote_coverage >= 0.98
+            and int(quote_health.get("requested_count") or 0) > 0
+        )
+        if not quote_ready:
+            reasons.append("QUOTE_HEALTH_INCOMPLETE")
+        state_name = "BLOCKED" if pool_degraded else "DEGRADED" if reasons else "READY"
+        market_states[market_key] = {
+            "state": state_name,
+            "universe_origin": origin or None,
+            "reason_codes": list(dict.fromkeys(reasons)),
+            "quote_health": {
+                "status": quote_health.get("status") or "missing",
+                "requested_count": quote_health.get("requested_count"),
+                "quote_count": quote_health.get("quote_count"),
+                "quote_coverage": quote_coverage,
+            },
+        }
+
+        primary = decision.get("primary")
+        if not isinstance(primary, dict):
+            continue
+        code = str(primary.get("code") or primary.get("symbol") or "")
+        gates = primary.get("decision_gates") or []
+        hard_blocked = primary.get("execution_state") == "BLOCKED" or any(
+            gate.get("status") == "BLOCK" for gate in gates if isinstance(gate, dict)
+        )
+        gates_ready = bool(gates) and all(
+            isinstance(gate, dict) and gate.get("status") == "PASS" for gate in gates
+        )
+        quality = primary.get("data_quality") or {}
+        required_inputs = [item for item in (quality.get("inputs") or []) if isinstance(item, dict) and item.get("required")]
+        quality_ready = bool(required_inputs) and all(item.get("state") == "fresh" for item in required_inputs)
+        has_external = any(
+            _automatic_event_decision_eligible(item, snapshot, market_key=market_key, symbol=code)
+            for item in automatic_external
+        )
+        prediction = _candidate_prediction(model, market_key, code) if model_ready else None
+        candidate_blockers = list(reasons)
+        if hard_blocked:
+            candidate_blockers.append("CANDIDATE_EXECUTION_BLOCKED")
+        if not gates_ready:
+            candidate_blockers.append("DECISION_GATES_NOT_ALL_PASS")
+        if not quality_ready:
+            candidate_blockers.append("REQUIRED_INPUTS_INCOMPLETE")
+        if not has_external:
+            candidate_blockers.append("EXTERNAL_EVIDENCE_MISSING")
+        if not model_ready:
+            candidate_blockers.append("TEN_DAY_MODEL_NOT_READY")
+        if not prediction:
+            candidate_blockers.append("TEN_DAY_PREDICTION_MISSING")
+        elif prediction["expected_net_utility"] <= 0:
+            candidate_blockers.append("NON_POSITIVE_EXPECTED_NET_UTILITY")
+        row = {
+            "market": market_key,
+            "code": code,
+            "name": primary.get("name"),
+            "status": "EXECUTABLE" if not candidate_blockers else "RESEARCH_ONLY",
+            "score_kind": "TEN_DAY_EXPECTED_NET_UTILITY" if prediction else "RULE_SCORE",
+            "legacy_recommendation_degree": primary.get("recommendation_degree", primary.get("confidence")),
+            "v2_rank": (primary.get("v2") or {}).get("rank"),
+            "v2_rank_universe_size": (primary.get("v2") or {}).get("rank_universe_size"),
+            "probability": prediction.get("probability") if prediction else None,
+            "expected_net_utility": prediction.get("expected_net_utility") if prediction else None,
+            "transaction_cost": prediction.get("transaction_cost") if prediction else None,
+            "tail_risk": prediction.get("tail_risk") if prediction else None,
+            "model_id": prediction.get("model_id") if prediction else None,
+            "calibrated": bool(prediction and prediction.get("calibrated") is True),
+            "blocker_codes": list(dict.fromkeys(candidate_blockers)),
+        }
+        evaluated.append(row)
+        if not hard_blocked and state_name != "BLOCKED":
+            quality = safe_float((primary.get("data_quality") or {}).get("score"))
+            rank = safe_float((primary.get("v2") or {}).get("rank"))
+            universe = safe_float((primary.get("v2") or {}).get("rank_universe_size"))
+            percentile = (1 - rank / universe) if rank and universe else 0.0
+            legacy = safe_float(primary.get("recommendation_degree", primary.get("confidence")))
+            research_rows.append((quality, percentile, legacy, row))
+        if not candidate_blockers:
+            executable.append(row)
+
+    research_rows.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    research_priority = dict(research_rows[0][3]) if research_rows else None
+    if research_priority:
+        research_priority["status"] = "RESEARCH_ONLY"
+        research_priority["priority_score_kind"] = "ordinal_rule_priority"
+    blocker_codes: list[str] = []
+    if any(item.get("state") != "READY" for item in market_states.values()):
+        blocker_codes.append("MARKET_COVERAGE_INCOMPLETE")
+    if not automatic_external:
+        blocker_codes.append("EXTERNAL_EVIDENCE_MISSING")
+    if not calibrated:
+        blocker_codes.append("TEN_DAY_PROBABILITY_UNCALIBRATED")
+    if not costs_ready:
+        blocker_codes.append("TRANSACTION_COST_MODEL_MISSING")
+    if not tail_ready:
+        blocker_codes.append("TAIL_RISK_MODEL_MISSING")
+    if not participates:
+        blocker_codes.append("TEN_DAY_MODEL_NOT_AUTHORIZED")
+    if not executable:
+        blocker_codes.append("NO_CANDIDATE_PASSED_STRICT_GATE")
+    executable.sort(key=lambda item: item["expected_net_utility"], reverse=True)
+    action = "REVIEW_EXECUTABLE_PICK" if executable and not blocker_codes else "NO_VALID_PICK"
+    selected = executable[0] if action == "REVIEW_EXECUTABLE_PICK" else None
+    return {
+        "contract_version": "global-10d-v1",
+        "decision_scope": "global_10d",
+        "horizon_trade_days": FORECAST_TRADE_DAYS,
+        "action": action,
+        "action_basis": "strict_cross_market_gate_v1",
+        "probability_status": "CALIBRATED" if calibrated else "UNAVAILABLE",
+        "probability": selected.get("probability") if selected else None,
+        "calibrated": calibrated,
+        "primary": selected,
+        "research_priority": research_priority,
+        "blocker_codes": list(dict.fromkeys(blocker_codes)),
+        "market_states": market_states,
+        "evaluated_candidates": evaluated,
+        "automatic_external_evidence_count": len(automatic_external),
     }
 
 
@@ -2027,6 +2297,18 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
             "participates_in_decision": False,
         },
     )
+    snapshot["analysis_models"].setdefault(
+        "ten_day_return",
+        {
+            "model_id": "ten-day-net-return-v0",
+            "status": "planned",
+            "calibrated": False,
+            "costs_ready": False,
+            "tail_risk_ready": False,
+            "participates_in_decision": False,
+            "probability": None,
+        },
+    )
     global_market = snapshot.get("market") or {}
     markets = snapshot.get("markets") or {}
     for market_key, section in markets.items():
@@ -2043,6 +2325,14 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
         candidates = _decision_candidates(snapshot["decision"])
         enrich_market_candidates(candidates, "a_share", global_market)
     snapshot["events"] = build_event_feed(snapshot)
+    snapshot["global_decision"] = build_global_ten_day_decision(snapshot)
+    snapshot["data_health"] = {
+        "decision_usable": snapshot["global_decision"]["action"] != "NO_VALID_PICK",
+        "market_states": snapshot["global_decision"]["market_states"],
+        "automatic_external_evidence_count": snapshot["global_decision"]["automatic_external_evidence_count"],
+        "probability_status": snapshot["global_decision"]["probability_status"],
+        "blocker_codes": snapshot["global_decision"]["blocker_codes"],
+    }
     return snapshot
 
 

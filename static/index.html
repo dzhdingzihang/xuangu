@@ -8,32 +8,35 @@
     <link rel="preconnect" href="https://unpkg.com" />
     <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css" />
     <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260822-freshness-p0" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260822-six-tabs-p1" />
   </head>
   <body>
     <a class="skip-link" href="#mainContent">跳到主内容</a>
     <div class="app-shell">
       <aside class="side-rail" aria-label="主导航">
         <a class="brand" href="#decision" aria-label="智能选股首页">
-          <span class="brand-symbol"><i class="ph-fill ph-chart-line-up" aria-hidden="true"></i></span>
           <span class="brand-name">智能选股</span>
+          <small class="brand-subtitle">10-DAY DECISION</small>
         </a>
 
         <nav class="primary-nav" role="tablist" aria-label="智能选股功能">
-          <button id="tab-decision" class="nav-item is-active" type="button" role="tab" aria-label="决策" aria-selected="true" aria-controls="panel-decision" data-tab="decision">
-            <i class="ph ph-target" aria-hidden="true"></i><span>决策</span>
+          <button id="tab-decision" class="nav-item is-active" type="button" role="tab" aria-label="今日答案" aria-selected="true" aria-controls="panel-decision" data-tab="decision">
+            <i class="ph ph-target" aria-hidden="true"></i><span>今日答案</span>
           </button>
-          <button id="tab-candidates" class="nav-item" type="button" role="tab" aria-label="候选" aria-selected="false" aria-controls="panel-candidates" data-tab="candidates">
-            <i class="ph ph-star" aria-hidden="true"></i><span>候选</span>
+          <button id="tab-candidates" class="nav-item" type="button" role="tab" aria-label="候选池" aria-selected="false" aria-controls="panel-candidates" data-tab="candidates">
+            <i class="ph ph-star" aria-hidden="true"></i><span>候选池</span>
           </button>
-          <button id="tab-events" class="nav-item" type="button" role="tab" aria-label="事件" aria-selected="false" aria-controls="panel-events" data-tab="events">
-            <i class="ph ph-bell" aria-hidden="true"></i><span>事件</span>
+          <button id="tab-events" class="nav-item" type="button" role="tab" aria-label="事件证据" aria-selected="false" aria-controls="panel-events" data-tab="events">
+            <i class="ph ph-bell" aria-hidden="true"></i><span>事件证据</span>
           </button>
-          <button id="tab-history" class="nav-item" type="button" role="tab" aria-label="历史" aria-selected="false" aria-controls="panel-history" data-tab="history">
-            <i class="ph ph-clock-counter-clockwise" aria-hidden="true"></i><span>历史</span>
+          <button id="tab-history" class="nav-item" type="button" role="tab" aria-label="历史检验" aria-selected="false" aria-controls="panel-history" data-tab="history">
+            <i class="ph ph-clock-counter-clockwise" aria-hidden="true"></i><span>历史检验</span>
           </button>
-          <button id="tab-model" class="nav-item" type="button" role="tab" aria-label="模型说明" aria-selected="false" aria-controls="panel-model" data-tab="model">
-            <i class="ph ph-book-open" aria-hidden="true"></i><span>模型说明</span>
+          <button id="tab-model" class="nav-item" type="button" role="tab" aria-label="模型逻辑" aria-selected="false" aria-controls="panel-model" data-tab="model">
+            <i class="ph ph-book-open" aria-hidden="true"></i><span>模型逻辑</span>
+          </button>
+          <button id="tab-health" class="nav-item" type="button" role="tab" aria-label="数据健康" aria-selected="false" aria-controls="panel-health" data-tab="health">
+            <i class="ph ph-database" aria-hidden="true"></i><span>数据健康</span>
           </button>
         </nav>
 
@@ -94,11 +97,17 @@
               <i class="ph ph-spinner-gap" aria-hidden="true"></i><span>正在读取模型版本与规则…</span>
             </div>
           </section>
+
+          <section id="panel-health" class="tab-panel" role="tabpanel" aria-labelledby="tab-health" data-tab="health" hidden>
+            <div id="healthView" class="view-loading" aria-live="polite">
+              <i class="ph ph-spinner-gap" aria-hidden="true"></i><span>正在核对市场、证据与调度状态…</span>
+            </div>
+          </section>
         </main>
       </div>
     </div>
 
     <div id="toastRegion" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
-    <script src="/static/app.js?v=20260822-freshness-p0"></script>
+    <script src="/static/app.js?v=20260822-six-tabs-p1"></script>
   </body>
 </html>
