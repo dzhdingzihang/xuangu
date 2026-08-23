@@ -45,10 +45,12 @@ STATIC = ROOT / "static"
 CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
 A_SHARE_KLINE_CACHE = CACHE / "runtime-cache" / "a_share_daily.json"
+DYNAMIC_MARKET_CACHE = CACHE / "runtime-cache" / "hk_us_dynamic_recall.json"
+HK_US_KLINE_CACHE = CACHE / "runtime-cache" / "hk_us_daily.json"
 MARKET_RECALL_EXPANSION_PATH = CACHE / "universes" / "market_recall_expansion_v2.json"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-08-23.1-a300-full-score"
+MODEL_VERSION = "smart-selector-2026-08-23.2-dynamic-hk-us"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
@@ -59,7 +61,7 @@ SERENITY_SKILL_DIR = pathlib.Path.home() / ".agents" / "skills" / "serenity-skil
 SCHEMA_VERSION = "selector-snapshot-v2"
 SELECTOR_MODE = "legacy_active_v2_dual_low_shadow"
 V2_WEIGHTS_VERSION = "v2-rule-prior-1"
-UNIVERSE_VERSION = "recall-v2-4-a300-full-score"
+UNIVERSE_VERSION = "recall-v2-5-dynamic-hk-us"
 DUAL_LOW_MODEL_ID = "dsa-screening-score-v1"
 DUAL_LOW_PACKAGE_VERSION = "1.0.0"
 DUAL_LOW_STRATEGY_ID = "dual_low"
@@ -72,6 +74,17 @@ NETWORK_RETRY_MAX_DELAY_SECONDS = 1.0
 A_SHARE_RECALL_TARGET = 300
 HK_RECALL_TARGET = 200
 US_RECALL_TARGET = 300
+DYNAMIC_MARKET_RECALL_POLICY_VERSION = "hk-us-cross-section-v1"
+DYNAMIC_MARKET_ROUTE_TARGETS = {
+    "hk": {"momentum": 45, "pullback": 35, "activity": 35, "quality": 30, "liquidity": 55},
+    "us": {"momentum": 70, "pullback": 50, "activity": 45, "quality": 45, "liquidity": 90},
+}
+DYNAMIC_MARKET_MIN_ELIGIBLE = {"hk": 210, "us": 315}
+DYNAMIC_MARKET_MIN_SCORE_COVERAGE = 0.98
+DYNAMIC_MARKET_MAX_REGULAR_SOURCE_AGE = dt.timedelta(minutes=45)
+DYNAMIC_MARKET_MAX_SOURCE_FUTURE_SKEW = dt.timedelta(minutes=5)
+DYNAMIC_MARKET_ORIGIN = "dynamic_market_snapshot"
+DYNAMIC_MARKET_CACHE_ORIGIN = "dynamic_market_snapshot_cache"
 A_SHARE_BOARD_TARGETS = {
     "sh_main": 90,
     "sz_main": 75,
@@ -789,6 +802,12 @@ def normalize_universe_item(item: dict, market_key: str, expansion: dict | None 
 
 
 def market_universe(market_key: str) -> list[dict]:
+    """Return the legacy curated universe used only for old-snapshot compatibility.
+
+    Production HK/US selection is performed by ``load_dynamic_market_pool``.
+    Keeping this loader makes historical snapshots reproducible without letting
+    the curated names silently fill a failed live discovery run.
+    """
     expansion = load_market_recall_expansion()
     extras = {
         "hk": HK_BROAD_UNIVERSE + HK_AI_EXPANSION_UNIVERSE + rows_to_universe(HK_TECH_AI_EXTRA_ROWS),
@@ -816,6 +835,912 @@ def market_universe(market_key: str) -> list[dict]:
     if target is not None and len(rows) != target:
         raise ValueError(f"{market_key} universe size {len(rows)} != target {target}")
     return rows
+
+
+def _dynamic_neutral_lens(market_key: str) -> dict:
+    """Use one neutral prior for every dynamically discovered stock.
+
+    The old curated rows contain hand-authored AI-chain lenses.  Reusing those
+    lenses would make a dynamic pool look fair while still favoring the old
+    names in the final ranking, so dynamic candidates deliberately start from
+    the same prior and earn their differentiation from market/K-line inputs.
+    """
+
+    return inferred_lens({"symbol": "", "themes": [], "role": ""}, market_key)
+
+
+def canonical_dynamic_market_symbol(value: str, market_key: str) -> str | None:
+    raw = str(value or "").strip().upper()
+    if market_key == "hk":
+        match = re.fullmatch(r"0*(\d{1,5})(?:\.HK)?", raw)
+        if not match:
+            return None
+        number = int(match.group(1))
+        if not 1 <= number <= 9999:
+            return None
+        return f"{number:04d}.HK"
+    if market_key == "us":
+        normalized = raw.replace("_", "-").replace(".", "-")
+        return normalized if re.fullmatch(r"[A-Z][A-Z0-9-]{0,14}", normalized) else None
+    return None
+
+
+def _parse_dynamic_source_timestamp(value, market_key: str) -> int | None:
+    """Return an epoch only for explicit, timezone-aware provider timestamps."""
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        timestamp = int(value)
+        return timestamp if timestamp > 0 else None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    timezone = MARKET_SOURCE_TIMEZONES[market_key]
+    parsed = None
+    for pattern in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            parsed = dt.datetime.strptime(text, pattern).replace(tzinfo=timezone)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        try:
+            parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+    return int(parsed.timestamp())
+
+
+def _dynamic_source_time_coverage(
+    candidates: list[dict], market_key: str, *, as_of: dt.datetime | None = None
+) -> dict:
+    """Measure selected-name source freshness, not merely the newest raw row."""
+
+    anchor = (as_of or now_cn()).astimezone(CN_TZ)
+    expected_session = expected_quote_session(market_key, anchor)
+    phase = quote_session_phase(market_key, anchor)
+    source_timestamps: list[int] = []
+    fresh_symbols: list[str] = []
+    stale_symbols: list[str] = []
+    for candidate in candidates:
+        metrics = candidate.get("recall_metrics") or {}
+        timestamp = _parse_dynamic_source_timestamp(metrics.get("source_timestamp"), market_key)
+        symbol = str(candidate.get("symbol") or "")
+        if timestamp is None:
+            stale_symbols.append(symbol)
+            continue
+        source_timestamps.append(timestamp)
+        source_moment = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc)
+        source_session = source_moment.astimezone(MARKET_SOURCE_TIMEZONES[market_key]).date()
+        age = anchor.astimezone(dt.timezone.utc) - source_moment
+        session_fresh = source_session == expected_session
+        clock_fresh = age >= -DYNAMIC_MARKET_MAX_SOURCE_FUTURE_SKEW
+        if phase == "regular":
+            clock_fresh = clock_fresh and age <= DYNAMIC_MARKET_MAX_REGULAR_SOURCE_AGE
+        if session_fresh and clock_fresh:
+            fresh_symbols.append(symbol)
+        else:
+            stale_symbols.append(symbol)
+    selected_count = len(candidates)
+    source_time_count = len(source_timestamps)
+    fresh_count = len(fresh_symbols)
+    return {
+        "discovery_freshness_as_of": anchor.isoformat(timespec="seconds"),
+        "discovery_expected_session": expected_session.isoformat(),
+        "discovery_session_phase": phase,
+        "selected_source_time_count": source_time_count,
+        "selected_source_time_coverage": round(source_time_count / selected_count, 4) if selected_count else 0.0,
+        "selected_source_fresh_count": fresh_count,
+        "selected_source_fresh_coverage": round(fresh_count / selected_count, 4) if selected_count else 0.0,
+        "selected_source_stale_symbols": stale_symbols,
+        "discovery_source_as_of": (
+            dt.datetime.fromtimestamp(max(source_timestamps), dt.timezone.utc)
+            .astimezone(CN_TZ)
+            .isoformat(timespec="seconds")
+            if source_timestamps
+            else None
+        ),
+    }
+
+
+def _blocked_dynamic_security_name(name: str, market_key: str) -> bool:
+    text = str(name or "").strip()
+    upper = text.upper()
+    if market_key == "hk":
+        blocked = ("ETF", "基金", "债", "权证", "牛证", "熊证", "认购", "认沽", "优先股")
+        return any(token in upper for token in blocked)
+    if any(token in text for token in ("空白支票", "交易所交易基金")):
+        return True
+    if re.search(r"\b(?:ETF|ETN|SPAC)\b", upper):
+        return True
+    if re.search(r"\b(?:WARRANTS?|RIGHTS?|UNITS?|PREFERRED|PFD|FUND)\b", upper):
+        return True
+    fund_sponsors = (
+        "ISHARES",
+        "PROSHARES",
+        "DIREXION",
+        "SPDR",
+        "VANECK",
+        "GRAYSCALE",
+        "GLOBAL X ",
+        "WISDOMTREE",
+        "GUGGENHEIM STRATEGIC OPPORTUNITIES",
+    )
+    crypto_trust = "TRUST" in upper and any(
+        token in upper for token in ("BITCOIN", "ETHEREUM", "ETHER", "CRYPTO")
+    )
+    return (
+        "ACQUISITION CORP" in upper
+        or "ACQUISITION CO" in upper
+        or any(token in upper for token in fund_sponsors)
+        or crypto_trust
+    )
+
+
+def _dynamic_hk_candidate(item: dict, query_route: str, observed_at: str) -> tuple[dict | None, str | None]:
+    symbol = canonical_dynamic_market_symbol(item.get("symbol") or "", "hk")
+    if not symbol:
+        return None, "invalid_symbol"
+    name = str(item.get("name") or item.get("engname") or "").strip()
+    if not name or _blocked_dynamic_security_name(name, "hk"):
+        return None, "security_type"
+    price = safe_float(item.get("lasttrade"))
+    volume = safe_float(item.get("volume"))
+    amount = safe_float(item.get("amount"))
+    market_cap = safe_float(item.get("market_cap"))
+    turnover_pct = nullable_float(item.get("turnover_pct"))
+    volume_ratio = nullable_float(item.get("volume_ratio"))
+    change_pct = safe_float(item.get("changepercent"))
+    if price < 0.5 or volume <= 0 or amount < 20_000_000:
+        return None, "liquidity"
+    if change_pct < -12 or change_pct > 15:
+        return None, "extreme_move"
+    pe = nullable_float(item.get("pe_ratio"))
+    routes = ["liquidity", query_route]
+    if 0.5 <= change_pct <= 8.5:
+        routes.append("momentum")
+    if -8 <= change_pct < 0.5:
+        routes.append("pullback")
+    if query_route == "activity":
+        routes.append("activity")
+    if amount >= 50_000_000 and pe is not None and 0 < pe <= 45:
+        routes.append("quality")
+    metrics = {
+        "price": round(price, 4),
+        "change_pct": round(change_pct, 4),
+        "volume": round(volume, 2),
+        "amount": round(amount, 2),
+        "amount_currency": "HKD",
+        "market_cap": round(market_cap, 2) if market_cap > 0 else None,
+        "pe": pe,
+        "turnover_pct": turnover_pct,
+        "volume_ratio": volume_ratio,
+        "source_ticktime": item.get("ticktime") or None,
+        "source_timestamp": _parse_dynamic_source_timestamp(item.get("ticktime"), "hk"),
+    }
+    return {
+        "symbol": symbol,
+        "name": name,
+        "role": "动态市场横截面普通股",
+        "themes": [],
+        "lens": _dynamic_neutral_lens("hk"),
+        "lens_confidence": "neutral_no_point_in_time_fundamentals",
+        "metadata_origin": "dynamic_market_source",
+        "source_category": None,
+        "market_segment": "gem" if 8000 <= int(symbol.split(".")[0]) <= 8999 else "main_board",
+        "source": "sina_hk_market",
+        "reason": "港股公开市场榜单按当日成交与价格行为动态召回",
+        "recall_routes": list(dict.fromkeys(routes)),
+        "observed_at": observed_at,
+        "recall_metrics": metrics,
+        "candidate_lineage": {"universe_origin": DYNAMIC_MARKET_ORIGIN},
+    }, None
+
+
+def _dynamic_us_candidate(item: dict, query_route: str, observed_at: str) -> tuple[dict | None, str | None]:
+    symbol = canonical_dynamic_market_symbol(item.get("symbol") or "", "us")
+    if not symbol:
+        return None, "invalid_symbol"
+    market = str(item.get("market") or "").strip().upper()
+    if market not in {"NASDAQ", "NYSE", "AMEX"}:
+        return None, "unsupported_exchange"
+    english_name = str(item.get("name") or "").strip()
+    chinese_name = str(item.get("cname") or "").strip()
+    category = str(item.get("category") or "").strip()
+    if not english_name and not chinese_name:
+        return None, "missing_name"
+    if (
+        _blocked_dynamic_security_name(f"{english_name} {chinese_name}", "us")
+        or _blocked_dynamic_security_name(category, "us")
+    ):
+        return None, "security_type"
+    price = safe_float(item.get("price"))
+    volume = safe_float(item.get("volume"))
+    amount = price * volume
+    market_cap = safe_float(item.get("mktcap"))
+    change_pct = safe_float(item.get("chg"))
+    if price < 2 or volume <= 0 or amount < 10_000_000 or market_cap < 100_000_000:
+        return None, "liquidity"
+    if change_pct < -12 or change_pct > 15:
+        return None, "extreme_move"
+    routes = ["liquidity", query_route]
+    if 0.5 <= change_pct <= 12:
+        routes.append("momentum")
+    if -8 <= change_pct < 0.5:
+        routes.append("pullback")
+    if query_route == "activity":
+        routes.append("activity")
+    if market_cap >= 2_000_000_000:
+        routes.append("quality")
+    metrics = {
+        "price": round(price, 4),
+        "change_pct": round(change_pct, 4),
+        "volume": round(volume, 2),
+        "amount": round(amount, 2),
+        "amount_currency": "USD",
+        "market_cap": round(market_cap, 2),
+        "pe": nullable_float(item.get("pe")),
+        "exchange": market,
+    }
+    return {
+        "symbol": symbol,
+        "name": chinese_name or english_name or symbol,
+        "english_name": english_name or None,
+        "role": "动态市场横截面普通股",
+        "themes": [],
+        "lens": _dynamic_neutral_lens("us"),
+        "lens_confidence": "neutral_no_point_in_time_fundamentals",
+        "metadata_origin": "dynamic_market_source",
+        "source_category": category or None,
+        "market_segment": market.lower(),
+        "source": "sina_us_market",
+        "reason": "美股公开市场榜单按当日市值、成交与价格行为动态召回",
+        "recall_routes": list(dict.fromkeys(routes)),
+        "observed_at": observed_at,
+        "recall_metrics": metrics,
+        "candidate_lineage": {"universe_origin": DYNAMIC_MARKET_ORIGIN},
+    }, None
+
+
+def _fetch_sina_hk_dynamic_rows() -> tuple[list[dict], dict]:
+    url = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHKStockData"
+    count_url = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHKStockCount"
+    queries = (
+        ("liquidity", "amount", "0"),
+        ("activity", "volume", "0"),
+        ("momentum", "changepercent", "0"),
+        ("pullback", "changepercent", "1"),
+    )
+    jobs = [(route, sort, asc, page) for route, sort, asc in queries for page in range(1, 6)]
+    observed_at = now_cn().isoformat(timespec="seconds")
+    reported_total = None
+    try:
+        count_response = market_data_get_with_retry(
+            count_url,
+            params={"node": "qbgg_hk"},
+            headers={"User-Agent": UA, "Referer": "https://finance.sina.com.cn/"},
+            timeout=12,
+        )
+        reported_total = int(count_response.json())
+    except (OSError, ValueError, TypeError, requests.RequestException):
+        reported_total = None
+
+    raw_rows: list[tuple[dict, str]] = []
+    completed = 0
+    page_signatures: dict[str, dict[int, tuple[str, ...]]] = {}
+
+    def fetch(job: tuple[str, str, str, int]) -> tuple[str, int, list[dict]]:
+        route, sort, asc, page = job
+        response = market_data_get_with_retry(
+            url,
+            params={"page": page, "num": 100, "sort": sort, "asc": asc, "node": "qbgg_hk"},
+            headers={"User-Agent": UA, "Referer": "https://finance.sina.com.cn/"},
+            timeout=15,
+        )
+        payload = response.json()
+        if not isinstance(payload, list) or len(payload) < 50:
+            raise ValueError("Sina HK ranking response is not a list")
+        return route, page, payload
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {executor.submit(fetch, job): job for job in jobs}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                route, page, payload = future.result()
+            except Exception:
+                continue
+            completed += 1
+            page_signatures.setdefault(route, {})[page] = tuple(
+                str(item.get("symbol") or "") for item in payload if isinstance(item, dict)
+            )
+            raw_rows.extend((item, route) for item in payload if isinstance(item, dict))
+
+    raw_rows.sort(key=lambda pair: (str(pair[0].get("symbol") or ""), pair[1]))
+    rows: list[dict] = []
+    excluded: dict[str, int] = {}
+    for item, route in raw_rows:
+        candidate, reason = _dynamic_hk_candidate(item, route, observed_at)
+        if candidate:
+            rows.append(candidate)
+        elif reason:
+            excluded[reason] = excluded.get(reason, 0) + 1
+    return rows, {
+        "discovery_source": "Sina Finance HK public market rankings",
+        "discovery_retrieved_at": observed_at,
+        "discovery_source_as_of": None,
+        "discovery_reported_total": reported_total,
+        "discovery_requested_pages": len(jobs),
+        "discovery_completed_pages": completed,
+        "discovery_pagination_complete": (
+            completed == len(jobs) and _dynamic_page_signatures_are_unique(page_signatures)
+        ),
+        "discovery_page_signatures_unique": _dynamic_page_signatures_are_unique(page_signatures),
+        "raw_discovery_size": len(raw_rows),
+        "excluded_counts": excluded,
+    }
+
+
+def _parse_sina_us_jsonp(raw: str) -> dict:
+    start = str(raw or "").find("{")
+    end = str(raw or "").rfind(")")
+    if start < 0 or end <= start:
+        raise ValueError("Sina US JSONP wrapper is invalid")
+    payload = json.loads(raw[start:end])
+    if not isinstance(payload, dict):
+        raise ValueError("Sina US ranking payload is invalid")
+    return payload
+
+
+def _dynamic_page_signatures_are_unique(signatures: dict[str, dict[int, tuple[str, ...]]]) -> bool:
+    return all(
+        len(pages) == len(set(pages.values()))
+        for pages in signatures.values()
+    )
+
+
+def _fetch_sina_us_dynamic_rows() -> tuple[list[dict], dict]:
+    url = "https://stock.finance.sina.com.cn/usstock/api/jsonp.php/IO.XSRV2.CallbackList['xuangu']/US_CategoryService.getList"
+    queries = (("quality", "mktcap"), ("activity", "volume"), ("momentum", "chg"))
+    jobs = [(route, sort, page) for route, sort in queries for page in range(1, 16)]
+    observed_at = now_cn().isoformat(timespec="seconds")
+    raw_rows: list[tuple[dict, str]] = []
+    completed = 0
+    reported_totals: list[int] = []
+    page_signatures: dict[str, dict[int, tuple[str, ...]]] = {}
+
+    def fetch(job: tuple[str, str, int]) -> tuple[str, int, dict]:
+        route, sort, page = job
+        response = market_data_get_with_retry(
+            url,
+            params={"page": page, "num": 20, "sort": sort, "asc": 0, "market": "", "id": ""},
+            headers={"User-Agent": UA, "Referer": "https://finance.sina.com.cn/"},
+            timeout=15,
+        )
+        payload = _parse_sina_us_jsonp(response.text)
+        if len(payload.get("data") or []) < 20:
+            raise ValueError("Sina US ranking page is unexpectedly short")
+        return route, page, payload
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(fetch, job): job for job in jobs}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                route, page, payload = future.result()
+            except Exception:
+                continue
+            completed += 1
+            try:
+                reported_totals.append(int(payload.get("count")))
+            except (TypeError, ValueError):
+                pass
+            page_rows = [item for item in (payload.get("data") or []) if isinstance(item, dict)]
+            page_signatures.setdefault(route, {})[page] = tuple(
+                str(item.get("symbol") or "") for item in page_rows
+            )
+            raw_rows.extend((item, route) for item in page_rows)
+
+    raw_rows.sort(key=lambda pair: (str(pair[0].get("symbol") or ""), pair[1]))
+    rows: list[dict] = []
+    excluded: dict[str, int] = {}
+    for item, route in raw_rows:
+        candidate, reason = _dynamic_us_candidate(item, route, observed_at)
+        if candidate:
+            rows.append(candidate)
+        elif reason:
+            excluded[reason] = excluded.get(reason, 0) + 1
+    return rows, {
+        "discovery_source": "Sina Finance US public market rankings",
+        "discovery_retrieved_at": observed_at,
+        "discovery_source_as_of": None,
+        "discovery_reported_total": max(reported_totals) if reported_totals else None,
+        "discovery_requested_pages": len(jobs),
+        "discovery_completed_pages": completed,
+        "discovery_pagination_complete": bool(
+            completed == len(jobs)
+            and _dynamic_page_signatures_are_unique(page_signatures)
+            and len(set(reported_totals)) <= 1
+        ),
+        "discovery_page_signatures_unique": _dynamic_page_signatures_are_unique(page_signatures),
+        "discovery_reported_totals_consistent": len(set(reported_totals)) <= 1,
+        "raw_discovery_size": len(raw_rows),
+        "excluded_counts": excluded,
+    }
+
+
+def _fetch_eastmoney_dynamic_rows(market_key: str) -> tuple[list[dict], dict]:
+    """Fetch a bounded common-equity cross-section from Eastmoney's delay host."""
+
+    if market_key == "hk":
+        market_filter = "m:128+t:3,m:128+t:4"
+    elif market_key == "us":
+        market_filter = ",".join(
+            f"m:{market}+t:{security_type}"
+            for market in (105, 106, 107)
+            for security_type in (1, 3)
+        )
+    else:
+        raise ValueError(f"unsupported dynamic market: {market_key}")
+    routes = (
+        ("liquidity", "f6", "1"),
+        ("activity", "f10", "1"),
+        ("momentum", "f3", "1"),
+        ("pullback", "f3", "0"),
+        ("quality", "f20", "1"),
+    )
+    jobs = [(route, field, order, page) for route, field, order in routes for page in (1, 2)]
+    observed_at = now_cn().isoformat(timespec="seconds")
+    fields = "f2,f3,f5,f6,f8,f9,f10,f12,f13,f14,f20,f21,f23,f24,f25,f26,f62,f115,f124"
+    raw_rows: list[tuple[dict, str]] = []
+    completed = 0
+    reported_totals: list[int] = []
+    page_signatures: dict[str, dict[int, tuple[str, ...]]] = {}
+
+    def fetch(job: tuple[str, str, str, int]) -> tuple[str, int, dict]:
+        route, field, order, page = job
+        response = market_data_get_with_retry(
+            "https://push2delay.eastmoney.com/api/qt/clist/get",
+            params={
+                "pn": page,
+                "pz": 100,
+                "po": order,
+                "np": 1,
+                "fltt": 2,
+                "invt": 2,
+                "fid": field,
+                "fs": market_filter,
+                "fields": fields,
+            },
+            headers={"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"},
+            timeout=15,
+        )
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+            raise ValueError("Eastmoney market response is invalid")
+        diff = payload["data"].get("diff")
+        if not isinstance(diff, list) or len(diff) < 100:
+            raise ValueError("Eastmoney market page is unexpectedly short")
+        return route, page, payload["data"]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(fetch, job): job for job in jobs}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                route, page, data = future.result()
+            except Exception:
+                continue
+            completed += 1
+            try:
+                reported_totals.append(int(data.get("total")))
+            except (TypeError, ValueError):
+                pass
+            page_rows = [item for item in (data.get("diff") or []) if isinstance(item, dict)]
+            page_signatures.setdefault(route, {})[page] = tuple(
+                str(item.get("f12") or "") for item in page_rows
+            )
+            raw_rows.extend((item, route) for item in page_rows)
+
+    raw_rows.sort(key=lambda pair: (str(pair[0].get("f12") or ""), pair[1]))
+    rows: list[dict] = []
+    excluded: dict[str, int] = {}
+    source_times: list[int] = []
+    market_names = {105: "NASDAQ", 106: "NYSE", 107: "AMEX"}
+    for item, route in raw_rows:
+        timestamp = int(safe_float(item.get("f124")))
+        if timestamp > 0:
+            source_times.append(timestamp)
+        if market_key == "hk":
+            normalized = {
+                "symbol": item.get("f12"),
+                "name": item.get("f14"),
+                "lasttrade": item.get("f2"),
+                "volume": item.get("f5"),
+                "amount": item.get("f6"),
+                "changepercent": item.get("f3"),
+                "pe_ratio": item.get("f9"),
+                "market_cap": item.get("f20"),
+                "turnover_pct": item.get("f8"),
+                "volume_ratio": item.get("f10"),
+                "ticktime": timestamp or None,
+            }
+            candidate, reason = _dynamic_hk_candidate(normalized, route, observed_at)
+        else:
+            normalized = {
+                "symbol": item.get("f12"),
+                "name": item.get("f14"),
+                "cname": item.get("f14"),
+                "category": "",
+                "price": item.get("f2"),
+                "volume": item.get("f5"),
+                "mktcap": item.get("f20"),
+                "chg": item.get("f3"),
+                "pe": item.get("f9"),
+                "market": market_names.get(int(safe_float(item.get("f13"))), ""),
+            }
+            candidate, reason = _dynamic_us_candidate(normalized, route, observed_at)
+        if candidate:
+            candidate["source"] = f"eastmoney_delay_{market_key}_market"
+            candidate["reason"] = f"{market_key.upper()} 延迟市场横截面按成交、活跃度、动量、回踩和规模动态召回"
+            candidate["recall_metrics"].update(
+                {
+                    "turnover_pct": nullable_float(item.get("f8")),
+                    "volume_ratio": nullable_float(item.get("f10")),
+                    "float_market_cap": nullable_float(item.get("f21")),
+                    "pb": nullable_float(item.get("f23")),
+                    "medium_return_pct": nullable_float(item.get("f24")),
+                    "listing_date": item.get("f26") or None,
+                    "main_net_flow": nullable_float(item.get("f62")),
+                    "source_timestamp": timestamp or None,
+                }
+            )
+            if safe_float(item.get("f10")) >= 1.2 or safe_float(item.get("f8")) >= 1.5:
+                candidate["recall_routes"] = list(
+                    dict.fromkeys([*(candidate.get("recall_routes") or []), "activity"])
+                )
+            rows.append(candidate)
+        elif reason:
+            excluded[reason] = excluded.get(reason, 0) + 1
+    source_as_of = (
+        dt.datetime.fromtimestamp(max(source_times), CN_TZ).isoformat(timespec="seconds")
+        if source_times
+        else None
+    )
+    return rows, {
+        "discovery_source": "Eastmoney delayed common-equity cross-section",
+        "discovery_retrieved_at": observed_at,
+        "discovery_source_as_of": source_as_of,
+        "discovery_reported_total": max(reported_totals) if reported_totals else None,
+        "discovery_requested_pages": len(jobs),
+        "discovery_completed_pages": completed,
+        "discovery_pagination_complete": bool(
+            completed == len(jobs)
+            and _dynamic_page_signatures_are_unique(page_signatures)
+            and len(set(reported_totals)) <= 1
+        ),
+        "discovery_page_signatures_unique": _dynamic_page_signatures_are_unique(page_signatures),
+        "discovery_reported_totals_consistent": len(set(reported_totals)) <= 1,
+        "raw_discovery_size": len(raw_rows),
+        "excluded_counts": excluded,
+    }
+
+
+def _merge_dynamic_market_rows(rows: list[dict], market_key: str) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for item in rows:
+        symbol = canonical_dynamic_market_symbol(item.get("symbol") or "", market_key)
+        if not symbol:
+            continue
+        candidate = dict(item)
+        candidate["symbol"] = symbol
+        candidate["candidate_lineage"] = {"universe_origin": DYNAMIC_MARKET_ORIGIN}
+        candidate["sources"] = list(
+            dict.fromkeys([*(candidate.get("sources") or []), candidate.get("source")])
+        )
+        if symbol not in merged:
+            merged[symbol] = candidate
+            continue
+        current = merged[symbol]
+        current["sources"] = list(
+            dict.fromkeys([*(current.get("sources") or []), *(candidate.get("sources") or [])])
+        )
+        current["recall_routes"] = list(
+            dict.fromkeys([*(current.get("recall_routes") or []), *(candidate.get("recall_routes") or [])])
+        )
+        current_metrics = current.setdefault("recall_metrics", {})
+        for key, value in (candidate.get("recall_metrics") or {}).items():
+            if current_metrics.get(key) in (None, "", 0) and value not in (None, "", 0):
+                current_metrics[key] = value
+    result = list(merged.values())
+    for candidate in result:
+        ensure_candidate_lineage(candidate, market_key)
+    return result
+
+
+def _dynamic_candidate_priority(candidate: dict, maxima: dict[str, float]) -> float:
+    metrics = candidate.get("recall_metrics") or {}
+    amount = max(0.0, safe_float(metrics.get("amount")))
+    market_cap = max(0.0, safe_float(metrics.get("market_cap")))
+    volume = max(0.0, safe_float(metrics.get("volume")))
+    change_pct = safe_float(metrics.get("change_pct"))
+    amount_score = math.log1p(amount) / max(maxima.get("amount", 1.0), 1.0)
+    cap_score = math.log1p(market_cap) / max(maxima.get("market_cap", 1.0), 1.0)
+    volume_score = math.log1p(volume) / max(maxima.get("volume", 1.0), 1.0)
+    move_score = max(0.0, 1.0 - abs(change_pct - 2.0) / 14.0)
+    route_count = len(set(candidate.get("recall_routes") or []))
+    score = 38 * amount_score + 15 * cap_score + 12 * volume_score + 25 * move_score + min(10, route_count * 2)
+    return round(score, 4)
+
+
+def _dynamic_route_sort_key(candidate: dict, route: str) -> tuple:
+    metrics = candidate.get("recall_metrics") or {}
+    amount = safe_float(metrics.get("amount"))
+    market_cap = safe_float(metrics.get("market_cap"))
+    volume = safe_float(metrics.get("volume"))
+    change_pct = safe_float(metrics.get("change_pct"))
+    turnover_pct = safe_float(metrics.get("turnover_pct"))
+    volume_ratio = safe_float(metrics.get("volume_ratio"))
+    if route == "momentum":
+        route_value = 1.0 - min(abs(change_pct - 3.0), 12.0) / 12.0
+    elif route == "pullback":
+        route_value = 1.0 - min(abs(change_pct + 2.0), 10.0) / 10.0
+    elif route == "activity":
+        route_value = volume_ratio * 3.0 + turnover_pct * 0.25 + math.log1p(max(amount, 0.0)) / 10.0
+    elif route == "quality":
+        route_value = math.log1p(max(market_cap, amount, 0.0))
+    else:
+        route_value = math.log1p(max(amount, 0.0))
+    return (route_value, candidate.get("recall_priority_score", 0), amount, str(candidate.get("symbol") or ""))
+
+
+def _dynamic_recall_manifest(selected: list[dict], market_key: str) -> list[dict]:
+    manifest = []
+    for rank, candidate in enumerate(selected, 1):
+        lineage = ensure_candidate_lineage(candidate, market_key)
+        manifest.append(
+            {
+                "symbol": candidate.get("symbol"),
+                "recall_rank": rank,
+                "recall_score": candidate.get("recall_priority_score"),
+                "primary_route": candidate.get("selection_route") or lineage.get("primary_route"),
+                "recall_routes": [item.get("route") for item in lineage.get("recall_routes") or []],
+                "source": candidate.get("source"),
+                "sources": list(candidate.get("sources") or [candidate.get("source")]),
+                "observed_at": candidate.get("observed_at"),
+                "recall_metrics": dict(candidate.get("recall_metrics") or {}),
+            }
+        )
+    return manifest
+
+
+def select_dynamic_market_pool(
+    rows: list[dict], market_key: str, target: int | None = None
+) -> tuple[list[dict], dict]:
+    if market_key not in {"hk", "us"}:
+        raise ValueError(f"unsupported dynamic market: {market_key}")
+    target = int(target or {"hk": HK_RECALL_TARGET, "us": US_RECALL_TARGET}[market_key])
+    candidates = _merge_dynamic_market_rows(rows, market_key)
+    maxima = {
+        key: max((math.log1p(max(0.0, safe_float((row.get("recall_metrics") or {}).get(key)))) for row in candidates), default=1.0)
+        for key in ("amount", "market_cap", "volume")
+    }
+    for candidate in candidates:
+        candidate["recall_priority_score"] = _dynamic_candidate_priority(candidate, maxima)
+    route_targets = dict(DYNAMIC_MARKET_ROUTE_TARGETS[market_key])
+    # Allocate the narrower activity/quality routes first; liquidity is a
+    # universal safety route and therefore remains the final fair-fill bucket.
+    allocation_order = ("activity", "quality", "momentum", "pullback", "liquidity")
+    selected: list[dict] = []
+    selected_symbols: set[str] = set()
+    for route in allocation_order:
+        matches = [
+            row
+            for row in candidates
+            if route in set(row.get("recall_routes") or []) and row.get("symbol") not in selected_symbols
+        ]
+        matches.sort(key=lambda row: _dynamic_route_sort_key(row, route), reverse=True)
+        for candidate in matches[: max(0, int(route_targets.get(route, 0)))]:
+            candidate["selection_route"] = route
+            selected.append(candidate)
+            selected_symbols.add(str(candidate.get("symbol") or ""))
+    if len(selected) < target:
+        ranked = sorted(candidates, key=lambda row: (-safe_float(row.get("recall_priority_score")), str(row.get("symbol") or "")))
+        for candidate in ranked:
+            symbol = str(candidate.get("symbol") or "")
+            if not symbol or symbol in selected_symbols:
+                continue
+            candidate["selection_route"] = "liquidity"
+            selected.append(candidate)
+            selected_symbols.add(symbol)
+            if len(selected) >= target:
+                break
+    selected = selected[:target]
+    selected.sort(key=lambda row: (-safe_float(row.get("recall_priority_score")), str(row.get("symbol") or "")))
+    route_counts = {route: 0 for route in route_targets}
+    route_hit_counts = {route: 0 for route in route_targets}
+    for candidate in selected:
+        primary = str(candidate.get("selection_route") or "liquidity")
+        route_counts[primary] = route_counts.get(primary, 0) + 1
+        hits = set(candidate.get("recall_routes") or [])
+        for route in route_hit_counts:
+            if route in hits:
+                route_hit_counts[route] += 1
+    route_shortfalls = {
+        route: quota - route_counts.get(route, 0)
+        for route, quota in route_targets.items()
+        if route_counts.get(route, 0) < quota
+    }
+    coverage = {
+        "recall_policy_version": DYNAMIC_MARKET_RECALL_POLICY_VERSION,
+        "universe_origin": DYNAMIC_MARKET_ORIGIN,
+        "universe_scope": "provider_bounded_common_equity_cross_section",
+        "coverage_claim": "bounded_dynamic_scan",
+        "eligible_discovery_size": len(candidates),
+        "min_eligible_discovery_size": DYNAMIC_MARKET_MIN_ELIGIBLE[market_key],
+        "recall_target": target,
+        "recall_selected_size": len(selected),
+        "recall_shortfall": max(0, target - len(selected)),
+        "route_targets": route_targets,
+        "route_counts": route_counts,
+        "route_hit_counts": route_hit_counts,
+        "route_shortfalls": route_shortfalls,
+        "recall_manifest": _dynamic_recall_manifest(selected, market_key),
+    }
+    return selected, coverage
+
+
+def _load_dynamic_market_cache(
+    market_key: str,
+    max_age_hours: float = 24.0 * 14,
+    *,
+    as_of: dt.datetime | None = None,
+) -> tuple[list[dict], dict] | None:
+    try:
+        payload = json.loads(DYNAMIC_MARKET_CACHE.read_text(encoding="utf-8"))
+        section = ((payload.get("markets") or {}).get(market_key) or {})
+        retrieved_at = dt.datetime.fromisoformat(str(section.get("cached_at") or ""))
+        if retrieved_at.tzinfo is None or retrieved_at.utcoffset() is None:
+            return None
+        age_hours = ((as_of or now_cn()) - retrieved_at.astimezone(CN_TZ)).total_seconds() / 3600
+        rows = section.get("candidates") or []
+        coverage = section.get("coverage") or {}
+        target = {"hk": HK_RECALL_TARGET, "us": US_RECALL_TARGET}[market_key]
+        if age_hours < 0 or age_hours > max_age_hours or len(rows) != target:
+            return None
+    except (OSError, ValueError, TypeError):
+        return None
+    cached_rows = [dict(row) for row in rows if isinstance(row, dict)]
+    for row in cached_rows:
+        lineage = dict(row.get("candidate_lineage") or {})
+        lineage["universe_origin"] = DYNAMIC_MARKET_CACHE_ORIGIN
+        row["candidate_lineage"] = lineage
+    cached_coverage = dict(coverage)
+    source_time_coverage = _dynamic_source_time_coverage(cached_rows, market_key, as_of=as_of)
+    if source_time_coverage.get("selected_source_fresh_coverage", 0.0) < DYNAMIC_MARKET_MIN_SCORE_COVERAGE:
+        return None
+    cached_coverage.update(
+        {
+            "universe_origin": DYNAMIC_MARKET_CACHE_ORIGIN,
+            "discovery_cache_age_hours": round(age_hours, 2),
+            "discovery_cache_used": True,
+            **source_time_coverage,
+        }
+    )
+    return cached_rows, cached_coverage
+
+
+def _save_dynamic_market_cache(market_key: str, candidates: list[dict], coverage: dict) -> None:
+    try:
+        payload = json.loads(DYNAMIC_MARKET_CACHE.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            payload = {}
+    except (OSError, ValueError):
+        payload = {}
+    payload.setdefault("markets", {})[market_key] = {
+        "cached_at": now_cn().isoformat(timespec="seconds"),
+        "candidates": candidates,
+        "coverage": coverage,
+    }
+    try:
+        DYNAMIC_MARKET_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = DYNAMIC_MARKET_CACHE.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+        temp_path.replace(DYNAMIC_MARKET_CACHE)
+    except OSError:
+        pass
+
+
+def _complete_dynamic_market_coverage(
+    selected: list[dict],
+    coverage: dict,
+    discovery: dict,
+    market_key: str,
+    *,
+    as_of: dt.datetime | None = None,
+) -> dict:
+    completed = {**coverage, **discovery}
+    completed["deduped_discovery_size"] = completed.get("eligible_discovery_size", 0)
+    completed["source_counts"] = recall_source_counts(selected, market_key) if selected else {}
+    completed.update(_dynamic_source_time_coverage(selected, market_key, as_of=as_of))
+    return completed
+
+
+def _dynamic_market_discovery_is_live_complete(coverage: dict, market_key: str) -> bool:
+    return bool(
+        coverage.get("discovery_pagination_complete")
+        and coverage.get("eligible_discovery_size", 0) >= DYNAMIC_MARKET_MIN_ELIGIBLE[market_key]
+        and coverage.get("recall_selected_size") == coverage.get("recall_target")
+        and coverage.get("selected_source_fresh_coverage", 0.0) >= DYNAMIC_MARKET_MIN_SCORE_COVERAGE
+    )
+
+
+def load_dynamic_market_pool(
+    market_key: str, *, as_of: dt.datetime | None = None
+) -> tuple[list[dict], dict]:
+    if market_key not in {"hk", "us"}:
+        raise ValueError(f"unsupported dynamic market: {market_key}")
+
+    attempts: list[tuple[list[dict], dict]] = []
+    attempts.append(_fetch_eastmoney_dynamic_rows(market_key))
+    for rows, discovery in attempts:
+        selected, coverage = select_dynamic_market_pool(rows, market_key)
+        coverage = _complete_dynamic_market_coverage(
+            selected, coverage, discovery, market_key, as_of=as_of
+        )
+        live_complete = _dynamic_market_discovery_is_live_complete(coverage, market_key)
+        if live_complete:
+            _save_dynamic_market_cache(market_key, selected, coverage)
+            return selected, coverage
+
+    sina_rows, sina_discovery = (
+        _fetch_sina_hk_dynamic_rows() if market_key == "hk" else _fetch_sina_us_dynamic_rows()
+    )
+    selected, coverage = select_dynamic_market_pool(sina_rows, market_key)
+    coverage = _complete_dynamic_market_coverage(
+        selected, coverage, sina_discovery, market_key, as_of=as_of
+    )
+    live_complete = _dynamic_market_discovery_is_live_complete(coverage, market_key)
+    if live_complete:
+        _save_dynamic_market_cache(market_key, selected, coverage)
+        return selected, coverage
+
+    primary_rows, primary_discovery = attempts[0]
+    combined_rows = [*primary_rows, *sina_rows]
+    selected, coverage = select_dynamic_market_pool(combined_rows, market_key)
+    coverage.update(
+        {
+            "discovery_source": "Eastmoney delayed + Sina Finance partial fallback",
+            "discovery_retrieved_at": now_cn().isoformat(timespec="seconds"),
+            "discovery_source_as_of": primary_discovery.get("discovery_source_as_of"),
+            "discovery_reported_total": max(
+                int(primary_discovery.get("discovery_reported_total") or 0),
+                int(sina_discovery.get("discovery_reported_total") or 0),
+            ) or None,
+            "discovery_requested_pages": int(primary_discovery.get("discovery_requested_pages") or 0)
+            + int(sina_discovery.get("discovery_requested_pages") or 0),
+            "discovery_completed_pages": int(primary_discovery.get("discovery_completed_pages") or 0)
+            + int(sina_discovery.get("discovery_completed_pages") or 0),
+            "discovery_pagination_complete": False,
+            "raw_discovery_size": int(primary_discovery.get("raw_discovery_size") or 0)
+            + int(sina_discovery.get("raw_discovery_size") or 0),
+            "deduped_discovery_size": coverage.get("eligible_discovery_size", 0),
+            "source_counts": recall_source_counts(selected, market_key) if selected else {},
+            "excluded_counts": {
+                "primary": primary_discovery.get("excluded_counts") or {},
+                "fallback": sina_discovery.get("excluded_counts") or {},
+            },
+        }
+    )
+    coverage.update(_dynamic_source_time_coverage(selected, market_key, as_of=as_of))
+    cached = _load_dynamic_market_cache(market_key, as_of=as_of)
+    if cached is not None:
+        cached_rows, cached_coverage = cached
+        cached_coverage["live_discovery_failure"] = {
+            "completed_pages": coverage.get("discovery_completed_pages"),
+            "requested_pages": coverage.get("discovery_requested_pages"),
+            "eligible_discovery_size": coverage.get("eligible_discovery_size"),
+        }
+        return cached_rows, cached_coverage
+    return selected, coverage
 
 
 def now_cn() -> dt.datetime:
@@ -1906,16 +2831,28 @@ def build_factor_groups(candidate: dict, weights: dict) -> dict:
     ]
 
     amount_yi = safe_float(candidate.get("amount_yi"))
+    market_liquidity_percentile = candidate.get("market_liquidity_percentile")
+    has_market_liquidity_percentile = _finite_number(market_liquidity_percentile)
     turnover_pct = safe_float(candidate.get("turnover_pct"))
     vol_ratio = safe_float(candidate.get("vol_ratio"))
     dragon_net = safe_float(candidate.get("dragon_net_wan"))
     liquidity_features = [
         _feature(
             "liquidity.amount",
-            amount_yi if amount_yi else None,
-            82 if amount_yi >= 10 else 68 if amount_yi >= 3 else 35,
-            "成交额只在流动性组计分一次",
-            used=amount_yi > 0,
+            (
+                {"market_percentile": round(safe_float(market_liquidity_percentile), 4), "currency": candidate.get("amount_currency")}
+                if has_market_liquidity_percentile
+                else amount_yi if amount_yi else None
+            ),
+            (
+                35 + safe_float(market_liquidity_percentile) * 60
+                if has_market_liquidity_percentile
+                else 82 if amount_yi >= 10 else 68 if amount_yi >= 3 else 35
+            ),
+            "港美用本轮市场内成交额分位；A股用亿元成交额"
+            if has_market_liquidity_percentile
+            else "成交额只在流动性组计分一次",
+            used=has_market_liquidity_percentile or amount_yi > 0,
         ),
         _feature(
             "liquidity.turnover",
@@ -1951,6 +2888,19 @@ def build_factor_groups(candidate: dict, weights: dict) -> dict:
             used=bool(dimension_values),
         )
     ]
+    market_cap_percentile = candidate.get("market_cap_percentile")
+    if _finite_number(market_cap_percentile):
+        quality_features.append(
+            _feature(
+                "quality.market_cap_percentile",
+                {
+                    "market_percentile": round(safe_float(market_cap_percentile), 4),
+                    "currency": candidate.get("amount_currency"),
+                },
+                35 + safe_float(market_cap_percentile) * 55,
+                "本轮动态候选池内市值分位，不跨币种直接比金额",
+            )
+        )
     financing_warnings = [item for item in (candidate.get("risk_flags") or []) if "稀释" in item or "融资" in item]
     quality_features.append(
         _feature(
@@ -2569,8 +3519,13 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
         reasons: list[str] = []
         if pool_degraded:
             reasons.append("POOL_COVERAGE_INCOMPLETE")
-        if origin == "curated_static":
+        expected_origin = "dynamic_snapshot" if market_key == "a_share" else DYNAMIC_MARKET_ORIGIN
+        if origin in {"curated_static", "curated_fallback"}:
             reasons.append("CURATED_STATIC_UNIVERSE")
+        elif origin == DYNAMIC_MARKET_CACHE_ORIGIN:
+            reasons.append("DYNAMIC_DISCOVERY_CACHE_USED")
+        elif origin != expected_origin:
+            reasons.append("DYNAMIC_RECALL_CONTRACT_INCOMPLETE")
         if not regime or regime == "unknown":
             reasons.append("MARKET_CONTEXT_MISSING")
         quote_coverage = quote_health.get("quote_coverage")
@@ -2764,10 +3719,24 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
 
 
 def enrich_snapshot_v2(snapshot: dict) -> dict:
+    source_universe_version = snapshot.get("universe_version")
+    published_markets = snapshot.get("markets") or {}
+    has_dynamic_hk_us = all(
+        str((((published_markets.get(market_key) or {}).get("stats") or {}).get("universe_origin") or ""))
+        in {DYNAMIC_MARKET_ORIGIN, DYNAMIC_MARKET_CACHE_ORIGIN}
+        for market_key in ("hk", "us")
+    )
+    effective_universe_version = (
+        str(source_universe_version)
+        if source_universe_version
+        else UNIVERSE_VERSION
+        if has_dynamic_hk_us
+        else "recall-v2-4-a300-full-score"
+    )
     snapshot["schema_version"] = SCHEMA_VERSION
     snapshot["selector_mode"] = SELECTOR_MODE
     snapshot["weights_version"] = V2_WEIGHTS_VERSION
-    snapshot["universe_version"] = UNIVERSE_VERSION
+    snapshot["universe_version"] = effective_universe_version
     snapshot.setdefault("automation", automation_metadata())
     target_date = str(snapshot.get("target_date") or snapshot.get("generated_at") or now_cn().date().isoformat())[:10]
     snapshot["target_date"] = target_date
@@ -2819,10 +3788,15 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
         candidates = _section_candidate_pool(section)
         enrich_market_candidates(candidates, market_key, market_context)
         section["market_regime"] = classify_market_regime(market_key, market_context, candidates)
-        if market_key in ("hk", "us"):
-            (section.setdefault("stats", {}))["universe_origin"] = "curated_static"
-        else:
-            (section.setdefault("stats", {}))["universe_origin"] = "dynamic_snapshot"
+        stats = section.setdefault("stats", {})
+        if "universe_origin" not in stats:
+            stats["universe_origin"] = (
+                DYNAMIC_MARKET_ORIGIN
+                if market_key in ("hk", "us") and source_universe_version == UNIVERSE_VERSION
+                else "curated_static"
+                if market_key in ("hk", "us")
+                else "dynamic_snapshot"
+            )
     if not markets and isinstance(snapshot.get("decision"), dict):
         candidates = _decision_candidates(snapshot["decision"])
         enrich_market_candidates(candidates, "a_share", global_market)
@@ -2875,6 +3849,33 @@ def requests_get_with_retry(url: str, **kwargs):
     if last_error is not None:
         raise last_error
     raise RuntimeError("request failed without an error")
+
+
+def market_data_get_with_retry(url: str, **kwargs):
+    """Fetch public ranking data without inheriting a broken desktop proxy.
+
+    GitHub-hosted runners normally have no proxy.  Local macOS environments
+    often do; using a short-lived direct session keeps scheduled and local
+    generation behavior aligned while retaining the same bounded retries.
+    """
+
+    last_error: Exception | None = None
+    for attempt in range(NETWORK_RETRY_ATTEMPTS):
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            response = session.get(url, **kwargs)
+            response.raise_for_status()
+            return response
+        except (requests.RequestException, OSError) as exc:
+            last_error = exc
+            if attempt + 1 < NETWORK_RETRY_ATTEMPTS:
+                time.sleep(_retry_delay(attempt))
+        finally:
+            session.close()
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("market data request failed without an error")
 
 
 def urlopen_with_retry(request, *, timeout: int):
@@ -4083,6 +5084,67 @@ def cached_market_kline(market_key: str, symbol: str) -> list[dict]:
     return []
 
 
+def _load_hk_us_kline_cache(market_key: str) -> dict[str, list[dict]]:
+    try:
+        payload = json.loads(HK_US_KLINE_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("version") != "hk-us-daily-kline-v1":
+        return {}
+    section = ((payload.get("markets") or {}).get(market_key) or {})
+    rows_by_symbol = section.get("rows") if isinstance(section, dict) else None
+    if not isinstance(rows_by_symbol, dict):
+        return {}
+    return {
+        str(symbol): rows[-90:]
+        for symbol, rows in rows_by_symbol.items()
+        if isinstance(symbol, str) and isinstance(rows, list) and rows
+    }
+
+
+def _save_hk_us_kline_cache(market_key: str, rows_by_symbol: dict[str, list[dict]]) -> None:
+    if not rows_by_symbol:
+        return
+    try:
+        payload = json.loads(HK_US_KLINE_CACHE.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("version") != "hk-us-daily-kline-v1":
+            payload = {"version": "hk-us-daily-kline-v1", "markets": {}}
+    except (OSError, ValueError, TypeError):
+        payload = {"version": "hk-us-daily-kline-v1", "markets": {}}
+    payload.setdefault("markets", {})[market_key] = {
+        "updated_at": now_cn().isoformat(timespec="seconds"),
+        "rows": {
+            symbol: rows[-90:]
+            for symbol, rows in sorted(rows_by_symbol.items())
+            if rows
+        },
+    }
+    try:
+        HK_US_KLINE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = HK_US_KLINE_CACHE.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        temp_path.replace(HK_US_KLINE_CACHE)
+    except OSError:
+        return
+
+
+def _hk_us_cached_kline_is_usable(rows: list[dict], market_key: str, expected_session: dt.date) -> bool:
+    if len(rows) < 32:
+        return False
+    try:
+        last_session = dt.date.fromisoformat(str(rows[-1].get("date") or "")[:10])
+        missing_sessions = session_dates(
+            market_key,
+            last_session + dt.timedelta(days=1),
+            expected_session,
+        )
+    except Exception:
+        return False
+    return last_session == expected_session or (
+        len(missing_sessions) == 1 and missing_sessions[0] == expected_session
+    )
+
+
 def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}"
     params = {"range": "6mo", "interval": "1d", "includePrePost": "false"}
@@ -4135,11 +5197,31 @@ def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
     return rows[-limit:]
 
 
-def yahoo_kline_map(symbols: list[str], limit: int = 90) -> dict[str, list[dict]]:
+def yahoo_kline_map(
+    symbols: list[str],
+    limit: int = 90,
+    market_key: str | None = None,
+    *,
+    as_of: dt.datetime | None = None,
+) -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {}
     unique = list(dict.fromkeys(symbols))
     if not unique:
         return result
+    cached = _load_hk_us_kline_cache(market_key) if market_key in {"hk", "us"} else {}
+    expected_session = (
+        expected_quote_session(market_key, as_of or now_cn())
+        if market_key in {"hk", "us"}
+        else None
+    )
+
+    def usable(rows: list[dict]) -> bool:
+        if not rows:
+            return False
+        if market_key not in {"hk", "us"}:
+            return True
+        return _hk_us_cached_kline_is_usable(rows, market_key, expected_session)
+
     workers = min(16, max(1, len(unique)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(yahoo_chart_kline, symbol, limit): symbol for symbol in unique}
@@ -4149,7 +5231,7 @@ def yahoo_kline_map(symbols: list[str], limit: int = 90) -> dict[str, list[dict]
                 rows = future.result()
             except Exception:
                 rows = []
-            if rows:
+            if usable(rows):
                 result[symbol] = rows
     # Yahoo occasionally drops a small random subset under concurrency. Retry
     # only those symbols at low concurrency so a transient miss does not turn
@@ -4166,8 +5248,24 @@ def yahoo_kline_map(symbols: list[str], limit: int = 90) -> dict[str, list[dict]
                     rows = future.result()
                 except Exception:
                     rows = []
-                if rows:
+                if usable(rows):
                     result[symbol] = rows
+    if market_key in {"hk", "us"}:
+        for symbol in unique:
+            if symbol in result:
+                continue
+            rows = cached.get(symbol) or []
+            if usable(rows):
+                result[symbol] = rows[-limit:]
+        # Retain only the current dynamic pool. Membership is rebuilt every
+        # run, so keeping every historical symbol would make the Actions cache
+        # grow forever without improving the next 200/300-name score pass.
+        merged_cache = {
+            symbol: (result.get(symbol) or cached.get(symbol) or [])[-limit:]
+            for symbol in unique
+            if result.get(symbol) or cached.get(symbol)
+        }
+        _save_hk_us_kline_cache(market_key, merged_cache)
     return result
 
 
@@ -4988,6 +6086,30 @@ def quote_from_kline(kline: list[dict]) -> dict:
     }
 
 
+def attach_dynamic_market_percentiles(candidates: list[dict]) -> None:
+    """Attach comparable within-market factors without mixing HKD and USD."""
+
+    for metric_key, output_key in (
+        ("amount", "market_liquidity_percentile"),
+        ("market_cap", "market_cap_percentile"),
+    ):
+        values = sorted(
+            {
+                safe_float((candidate.get("recall_metrics") or {}).get(metric_key))
+                for candidate in candidates
+                if safe_float((candidate.get("recall_metrics") or {}).get(metric_key)) > 0
+            }
+        )
+        if not values:
+            continue
+        denominator = max(1, len(values) - 1)
+        rank_by_value = {value: rank / denominator for rank, value in enumerate(values)}
+        for candidate in candidates:
+            value = safe_float((candidate.get("recall_metrics") or {}).get(metric_key))
+            if value > 0:
+                candidate[output_key] = round(rank_by_value[value], 4)
+
+
 def daily_bar_source_as_of(market_key: str, date_text: str | None) -> str | None:
     """Return an explicit exchange-local close timestamp for a daily bar."""
     try:
@@ -5076,8 +6198,16 @@ def live_stock_payload(market_key: str, code: str) -> dict:
     }
 
 
-def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
+def score_serenity_candidates(
+    market_key: str,
+    candidates: list[dict],
+    *,
+    as_of: dt.datetime | None = None,
+) -> dict:
     policy = SERENITY_MARKET_POLICY.get(market_key, SERENITY_MARKET_POLICY["hk"])
+    freshness_as_of = as_of or now_cn()
+    if market_key in {"hk", "us"}:
+        attach_dynamic_market_percentiles(candidates)
     symbols = [item["symbol"] for item in candidates]
     if market_key in ("hk", "us"):
         # The two datasets are independent. Fetching them concurrently cuts a
@@ -5085,13 +6215,18 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         # endpoint's own bounded worker pool.
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             realtime_future = executor.submit(yahoo_realtime_quotes, symbols)
-            kline_future = executor.submit(yahoo_kline_map, symbols)
+            kline_future = executor.submit(
+                yahoo_kline_map,
+                symbols,
+                90,
+                market_key,
+                as_of=freshness_as_of,
+            )
             realtime_map = realtime_future.result()
             kline_map = kline_future.result()
     else:
         realtime_map = {}
         kline_map = {}
-    freshness_as_of = now_cn()
     freshness_by_symbol = {
         symbol: yahoo_quote_freshness(
             market_key,
@@ -5100,13 +6235,29 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         )
         for symbol in symbols
     }
+    expected_kline_session = (
+        expected_quote_session(market_key, freshness_as_of)
+        if market_key in {"hk", "us"}
+        else None
+    )
     final = []
     for candidate in candidates:
         symbol = candidate["symbol"]
         if market_key == "a_share":
             kline = stock_kline(symbol)
         else:
-            kline = kline_map.get(symbol) or cached_market_kline(market_key, symbol)
+            kline = kline_map.get(symbol) or []
+            if not _hk_us_cached_kline_is_usable(
+                kline, market_key, expected_kline_session
+            ):
+                historical_kline = cached_market_kline(market_key, symbol)
+                kline = (
+                    historical_kline
+                    if _hk_us_cached_kline_is_usable(
+                        historical_kline, market_key, expected_kline_session
+                    )
+                    else []
+                )
         if len(kline) < 32:
             continue
         quote = quote_from_kline(kline)
@@ -5188,6 +6339,12 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
         stop_loss = entry_price * (0.925 if market_key == "us" else 0.94)
         take_profit = entry_price * (1 + min(est["high_pct"], 12) / 100)
         reasons = []
+        if market_key in {"hk", "us"}:
+            reasons.append(
+                "动态召回: "
+                + " / ".join(candidate.get("recall_routes") or ["liquidity"])
+                + f"；召回优先分 {safe_float(candidate.get('recall_priority_score')):.1f}"
+            )
         reasons.extend(lens_reasons[:4])
         if candidate.get("themes"):
             reasons.append("产业链主题: " + "、".join(candidate["themes"][:4]))
@@ -5212,9 +6369,16 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
                 "realtime": live_quote["realtime"],
                 "quote_freshness": freshness,
                 "amount_yi": 0,
-                "turnover_pct": 0,
+                "amount_local": safe_float((candidate.get("recall_metrics") or {}).get("amount")),
+                "amount_currency": (candidate.get("recall_metrics") or {}).get("amount_currency"),
+                "market_liquidity_percentile": candidate.get("market_liquidity_percentile"),
+                "market_cap_local": nullable_float((candidate.get("recall_metrics") or {}).get("market_cap")),
+                "market_cap_percentile": candidate.get("market_cap_percentile"),
+                "turnover_pct": safe_float((candidate.get("recall_metrics") or {}).get("turnover_pct")),
                 "vol_ratio": round(quote["vol_ratio"], 2),
                 "float_mcap_yi": 0,
+                "dynamic_recall_score": candidate.get("recall_priority_score"),
+                "recall_metrics": dict(candidate.get("recall_metrics") or {}),
                 "reason_tags": "、".join(candidate.get("themes") or []),
                 "theme_tags": candidate.get("themes") or [],
                 "candidate_lineage": candidate.get("candidate_lineage"),
@@ -5263,22 +6427,30 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
     ]
     quote_coverage = round(quote_count / requested_count, 4) if requested_count else 0.0
     realtime_coverage = round(realtime_count / requested_count, 4) if requested_count else 0.0
+    warning_codes: list[str] = []
     if requested_count == 0:
         quote_status = "unavailable"
         reason_codes = ["QUOTE_INPUT_EMPTY"]
     elif quote_count == 0:
         quote_status = "unavailable"
         reason_codes = ["YAHOO_QUOTE_UNAVAILABLE"]
-    elif quote_count < requested_count:
+    elif quote_coverage < DYNAMIC_MARKET_MIN_SCORE_COVERAGE:
         quote_status = "partial"
         reason_codes = ["YAHOO_QUOTE_PARTIAL"]
     else:
         quote_status = "available"
         reason_codes = []
-    if realtime_count < requested_count:
+        if quote_count < requested_count:
+            warning_codes.append("YAHOO_QUOTE_PARTIAL_WITHIN_TOLERANCE")
+    if realtime_coverage < DYNAMIC_MARKET_MIN_SCORE_COVERAGE:
         reason_codes.append("YAHOO_REALTIME_PARTIAL")
+    elif realtime_count < requested_count:
+        warning_codes.append("YAHOO_REALTIME_PARTIAL_WITHIN_TOLERANCE")
     if stale_realtime_symbols:
-        reason_codes.append("YAHOO_REALTIME_STALE")
+        if realtime_coverage < DYNAMIC_MARKET_MIN_SCORE_COVERAGE:
+            reason_codes.append("YAHOO_REALTIME_STALE")
+        else:
+            warning_codes.append("YAHOO_REALTIME_STALE_WITHIN_TOLERANCE")
     freshness_reference_session = (
         expected_quote_session(market_key, freshness_as_of).isoformat()
         if market_key in {"hk", "us"}
@@ -5301,6 +6473,7 @@ def score_serenity_candidates(market_key: str, candidates: list[dict]) -> dict:
             "freshness_policy": YAHOO_QUOTE_FRESHNESS_POLICY,
             "freshness_reference_session": freshness_reference_session,
             "reason_codes": reason_codes,
+            "warning_codes": warning_codes,
         },
     }
 
@@ -5323,8 +6496,20 @@ def make_serenity_decision(
     candidates: list[dict],
     market_key: str,
     quote_health: dict | None = None,
+    pool_health: dict | None = None,
 ) -> dict:
     legacy_order = list(candidates)
+    if pool_health and str(pool_health.get("status") or "").lower() != "healthy":
+        return {
+            "action": "NO_TRADE",
+            "title": "动态候选池降级，暂停推荐",
+            "message": f"{market_key.upper()} 本轮市场发现、召回或评分覆盖不完整；保留研究结果但不生成可执行推荐。",
+            "primary": None,
+            "blocked_candidate": legacy_order[0] if legacy_order else None,
+            "watchlist": legacy_order[:8],
+            "data_state": "DEGRADED",
+            "blocker_codes": ["POOL_COVERAGE_INSUFFICIENT"],
+        }
     if not legacy_order:
         return {
             "action": "NO_TRADE",
@@ -5341,11 +6526,7 @@ def make_serenity_decision(
         realtime_coverage = safe_float(
             quote_health.get("realtime_coverage", quote_coverage)
         )
-        if (
-            quote_status != "available"
-            or quote_coverage < 0.98
-            or realtime_coverage < 0.98
-        ):
+        if quote_status not in {"available", "partial"} or quote_coverage < 0.98 or realtime_coverage < 0.98:
             return {
                 "action": "NO_TRADE",
                 "title": "行情覆盖不足，暂停推荐",
@@ -5790,6 +6971,113 @@ def a_share_pool_health(
     }
 
 
+def dynamic_market_pool_health(
+    market_key: str,
+    coverage: dict,
+    quote_health: dict,
+    *,
+    scored_count: int,
+    as_of: dt.datetime | None = None,
+) -> dict:
+    """Fail closed when a HK/US discovery or full-score stage is incomplete."""
+
+    target = {"hk": HK_RECALL_TARGET, "us": US_RECALL_TARGET}[market_key]
+    minimum = DYNAMIC_MARKET_MIN_ELIGIBLE[market_key]
+    selected = int(coverage.get("recall_selected_size") or 0)
+    eligible = int(coverage.get("eligible_discovery_size") or 0)
+    raw = int(coverage.get("raw_discovery_size") or 0)
+    manifest = coverage.get("recall_manifest") or []
+    origin = str(coverage.get("universe_origin") or "")
+    requested = int(quote_health.get("requested_count") or 0)
+    quote_count = int(quote_health.get("quote_count") or 0)
+    realtime_count = int(quote_health.get("realtime_count") or 0)
+    quote_coverage = round(quote_count / selected, 4) if selected else 0.0
+    realtime_coverage = round(realtime_count / selected, 4) if selected else 0.0
+    score_coverage = round(max(0, int(scored_count)) / selected, 4) if selected else 0.0
+    reason_codes: list[str] = []
+    warning_codes: list[str] = []
+
+    if origin == DYNAMIC_MARKET_CACHE_ORIGIN:
+        reason_codes.append("DYNAMIC_DISCOVERY_CACHE_USED")
+    elif origin != DYNAMIC_MARKET_ORIGIN:
+        reason_codes.append("DYNAMIC_RECALL_CONTRACT_INCOMPLETE")
+    if not coverage.get("discovery_pagination_complete"):
+        reason_codes.append("DYNAMIC_DISCOVERY_PARTIAL")
+    source_as_of = coverage.get("discovery_source_as_of")
+    source_time_count = int(coverage.get("selected_source_time_count") or 0)
+    source_fresh_count = int(coverage.get("selected_source_fresh_count") or 0)
+    source_fresh_coverage = round(source_fresh_count / selected, 4) if selected else 0.0
+    expected_session = expected_quote_session(market_key, as_of or now_cn())
+    if not source_as_of or source_time_count == 0:
+        # A fresh Yahoo quote can validate an already selected symbol, but it
+        # cannot prove that a timestamp-free ranking was rebuilt this session.
+        # Keep such fallback discoveries research-only and retry the source.
+        reason_codes.append("DYNAMIC_DISCOVERY_SOURCE_TIME_UNAVAILABLE")
+    elif coverage.get("discovery_expected_session") != expected_session.isoformat():
+        reason_codes.append("DYNAMIC_DISCOVERY_STALE")
+    elif source_fresh_coverage < DYNAMIC_MARKET_MIN_SCORE_COVERAGE:
+        reason_codes.append("DYNAMIC_DISCOVERY_STALE")
+    if raw < eligible or eligible < selected:
+        reason_codes.append("DYNAMIC_RECALL_CONTRACT_INCOMPLETE")
+    if eligible < minimum:
+        reason_codes.append("DYNAMIC_DISCOVERY_BELOW_MINIMUM")
+    if selected != target or coverage.get("recall_target") != target:
+        reason_codes.append("DYNAMIC_RECALL_TARGET_NOT_MET")
+    manifest_symbols = [str(row.get("symbol") or "") for row in manifest if isinstance(row, dict)]
+    manifest_valid = bool(
+        len(manifest) == selected
+        and len(manifest_symbols) == selected
+        and len(set(manifest_symbols)) == selected
+        and all(
+            row.get("recall_rank") == index
+            and safe_float(row.get("recall_score")) >= 0
+            and row.get("primary_route")
+            and row.get("source")
+            and row.get("observed_at")
+            and isinstance(row.get("recall_routes"), list)
+            and bool(row.get("recall_routes"))
+            and isinstance(row.get("recall_metrics"), dict)
+            for index, row in enumerate(manifest, 1)
+            if isinstance(row, dict)
+        )
+    )
+    if not manifest_valid:
+        reason_codes.append("DYNAMIC_RECALL_MANIFEST_INVALID")
+    route_counts = coverage.get("route_counts") or {}
+    if sum(int(value or 0) for value in route_counts.values()) != selected:
+        reason_codes.append("DYNAMIC_RECALL_CONTRACT_INCOMPLETE")
+    if coverage.get("route_shortfalls"):
+        warning_codes.append("DYNAMIC_ROUTE_QUOTA_PARTIAL")
+    if requested != selected or quote_coverage < DYNAMIC_MARKET_MIN_SCORE_COVERAGE:
+        reason_codes.append("DYNAMIC_QUOTE_COVERAGE_BELOW_MINIMUM")
+    if score_coverage < DYNAMIC_MARKET_MIN_SCORE_COVERAGE:
+        reason_codes.append("DYNAMIC_SCORE_COVERAGE_BELOW_MINIMUM")
+    if realtime_coverage < DYNAMIC_MARKET_MIN_SCORE_COVERAGE:
+        reason_codes.append("DYNAMIC_REALTIME_COVERAGE_BELOW_MINIMUM")
+    return {
+        "status": "degraded" if reason_codes else "healthy",
+        "reason_codes": list(dict.fromkeys(reason_codes)),
+        "warning_codes": warning_codes,
+        "universe_origin": origin or None,
+        "target_count": target,
+        "selected_count": selected,
+        "eligible_discovery_count": eligible,
+        "min_eligible_discovery_count": minimum,
+        "raw_discovery_count": raw,
+        "source_time_count": source_time_count,
+        "source_fresh_count": source_fresh_count,
+        "source_fresh_coverage": source_fresh_coverage,
+        "source_expected_session": coverage.get("discovery_expected_session"),
+        "quote_count": quote_count,
+        "quote_coverage": quote_coverage,
+        "realtime_count": realtime_count,
+        "realtime_coverage": realtime_coverage,
+        "deep_scored_count": max(0, int(scored_count)),
+        "deep_score_coverage": score_coverage,
+        "min_score_coverage": DYNAMIC_MARKET_MIN_SCORE_COVERAGE,
+    }
+
+
 def make_decision(candidates: list[dict], market: dict, pool_health: dict | None = None) -> dict:
     legacy_order = list(candidates)
     pool_health = pool_health or {"status": "healthy", "reason_codes": []}
@@ -5930,10 +7218,11 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         recall_coverage=recall_coverage,
     )
     decision = make_decision(scored["candidates"], market, pool_health=pool_health)
-    hk_universe = market_universe("hk")
-    us_universe = market_universe("us")
-    hk_scored = score_serenity_candidates("hk", hk_universe)
-    us_scored = score_serenity_candidates("us", us_universe)
+    hk_us_as_of = now_cn()
+    hk_universe, hk_recall = load_dynamic_market_pool("hk", as_of=hk_us_as_of)
+    us_universe, us_recall = load_dynamic_market_pool("us", as_of=hk_us_as_of)
+    hk_scored = score_serenity_candidates("hk", hk_universe, as_of=hk_us_as_of)
+    us_scored = score_serenity_candidates("us", us_universe, as_of=hk_us_as_of)
     hk_market_context = market_context_from_benchmark("hk")
     us_market_context = market_context_from_benchmark("us")
     enrich_market_candidates(hk_scored["candidates"], "hk", hk_market_context)
@@ -5950,6 +7239,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "realtime_coverage": 0.0,
         "freshness_policy": YAHOO_QUOTE_FRESHNESS_POLICY,
         "reason_codes": ["QUOTE_INPUT_EMPTY"],
+        "warning_codes": [],
     }
     hk_quote_health = hk_scored.get("quote_health") or {
         **empty_yahoo_health,
@@ -5959,11 +7249,25 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         **empty_yahoo_health,
         "freshness_reference_session": expected_quote_session("us", generated_at).isoformat(),
     }
+    hk_pool_health = dynamic_market_pool_health(
+        "hk",
+        hk_recall,
+        hk_quote_health,
+        scored_count=hk_scored["scored_size"],
+        as_of=hk_us_as_of,
+    )
+    us_pool_health = dynamic_market_pool_health(
+        "us",
+        us_recall,
+        us_quote_health,
+        scored_count=us_scored["scored_size"],
+        as_of=hk_us_as_of,
+    )
     hk_decision = make_serenity_decision(
-        hk_scored["candidates"], "hk", quote_health=hk_quote_health
+        hk_scored["candidates"], "hk", quote_health=hk_quote_health, pool_health=hk_pool_health
     )
     us_decision = make_serenity_decision(
-        us_scored["candidates"], "us", quote_health=us_quote_health
+        us_scored["candidates"], "us", quote_health=us_quote_health, pool_health=us_pool_health
     )
     trade_windows = market_trade_windows(generated_at, horizon_sessions=FORECAST_TRADE_DAYS)
     forecast_end = max(
@@ -6023,20 +7327,22 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "hk": {
             "key": "hk",
             "label": "港股",
-            "description": "港股实时价/盘前盘后状态 + UZI评审团 + 两周趋势结构和风险过滤。",
+            "description": "港股公开市场榜单动态召回 200 只，再以 Yahoo 行情、Chan/CZSC、Serenity 与 UZI 全量深评。",
             "decision": hk_decision,
             "_candidate_pool": hk_scored["candidates"],
+            "pool_health": hk_pool_health,
             "quote_health": hk_quote_health,
             "market_context": hk_market_context,
             "stats": {
+                **hk_recall,
                 "raw_pool_size": hk_scored["raw_pool_size"],
                 "universe_size": len(hk_universe),
                 "recall_target": HK_RECALL_TARGET,
                 "recall_selected_size": len(hk_universe),
                 "recall_shortfall": max(0, HK_RECALL_TARGET - len(hk_universe)),
-                "source_counts": recall_source_counts(hk_universe, "hk"),
+                "source_counts": hk_recall.get("source_counts") or recall_source_counts(hk_universe, "hk"),
                 "event_pool_size": 0,
-                "broad_pool_size": 0,
+                "broad_pool_size": int(hk_recall.get("eligible_discovery_size") or 0),
                 "valid_quote_size": int(hk_quote_health.get("quote_count") or 0),
                 "deep_scored_size": hk_scored["scored_size"],
                 "scored_size": hk_scored["scored_size"],
@@ -6046,20 +7352,22 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         "us": {
             "key": "us",
             "label": "美股",
-            "description": "美股盘前/盘中/盘后实时价 + UZI评审团 + CPO/光子、HBM、neocloud、电力瓶颈。",
+            "description": "美股公开市场榜单动态召回 300 只，再以 Yahoo 行情、Chan/CZSC、Serenity 与 UZI 全量深评。",
             "decision": us_decision,
             "_candidate_pool": us_scored["candidates"],
+            "pool_health": us_pool_health,
             "quote_health": us_quote_health,
             "market_context": us_market_context,
             "stats": {
+                **us_recall,
                 "raw_pool_size": us_scored["raw_pool_size"],
                 "universe_size": len(us_universe),
                 "recall_target": US_RECALL_TARGET,
                 "recall_selected_size": len(us_universe),
                 "recall_shortfall": max(0, US_RECALL_TARGET - len(us_universe)),
-                "source_counts": recall_source_counts(us_universe, "us"),
+                "source_counts": us_recall.get("source_counts") or recall_source_counts(us_universe, "us"),
                 "event_pool_size": 0,
-                "broad_pool_size": 0,
+                "broad_pool_size": int(us_recall.get("eligible_discovery_size") or 0),
                 "valid_quote_size": int(us_quote_health.get("quote_count") or 0),
                 "deep_scored_size": us_scored["scored_size"],
                 "scored_size": us_scored["scored_size"],

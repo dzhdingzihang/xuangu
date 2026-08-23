@@ -99,7 +99,156 @@ def snapshot_fixture() -> dict:
     }
 
 
+def dynamic_hk_us_snapshot_fixture() -> dict:
+    """Build a complete v2.5 fixture with auditable HK/US dynamic manifests."""
+
+    snapshot = snapshot_fixture()
+    snapshot["universe_version"] = server.UNIVERSE_VERSION
+    for market_key, primary_symbol in (("hk", "0700.HK"), ("us", "NVDA")):
+        target = {"hk": server.HK_RECALL_TARGET, "us": server.US_RECALL_TARGET}[market_key]
+        minimum = server.DYNAMIC_MARKET_MIN_ELIGIBLE[market_key]
+        route_targets = dict(server.DYNAMIC_MARKET_ROUTE_TARGETS[market_key])
+        primary_routes = [
+            route
+            for route, count in route_targets.items()
+            for _ in range(count)
+        ]
+        symbols = [primary_symbol]
+        if market_key == "hk":
+            symbols.extend(f"{number:04d}.HK" for number in range(1, target + 1) if number != 700)
+        else:
+            symbols.extend(f"DYN{number:03d}" for number in range(1, target))
+        symbols = symbols[:target]
+        source_as_of = (
+            "2026-08-19T16:00:00+08:00"
+            if market_key == "hk"
+            else "2026-08-19T04:00:00+08:00"
+        )
+        source_timestamp = int(dt.datetime.fromisoformat(source_as_of).timestamp())
+        manifest = [
+            {
+                "symbol": symbol,
+                "recall_rank": rank,
+                "recall_score": round(100 - rank / 10, 4),
+                "primary_route": primary_routes[rank - 1],
+                "recall_routes": [primary_routes[rank - 1]],
+                "source": f"eastmoney_delay_{market_key}_market",
+                "observed_at": "2026-08-19T16:10:00+08:00",
+                "recall_metrics": {
+                    "price": 10 + rank / 100,
+                    "amount": 100_000_000 + rank,
+                    "volume": 1_000_000 + rank,
+                    "change_pct": 1.0,
+                    "source_timestamp": source_timestamp,
+                },
+            }
+            for rank, symbol in enumerate(symbols, 1)
+        ]
+        stats = snapshot["markets"][market_key]["stats"]
+        stats.update(
+            {
+                "universe_origin": server.DYNAMIC_MARKET_ORIGIN,
+                "universe_scope": "provider_bounded_common_equity_cross_section",
+                "coverage_claim": "bounded_dynamic_scan",
+                "recall_policy_version": server.DYNAMIC_MARKET_RECALL_POLICY_VERSION,
+                "discovery_source": "Eastmoney delayed common-equity cross-section",
+                "discovery_retrieved_at": "2026-08-19T16:10:00+08:00",
+                "discovery_freshness_as_of": "2026-08-19T16:10:00+08:00",
+                "discovery_source_as_of": source_as_of,
+                "discovery_expected_session": "2026-08-19" if market_key == "hk" else "2026-08-18",
+                "discovery_session_phase": "post" if market_key == "hk" else "pre",
+                "selected_source_time_count": target,
+                "selected_source_time_coverage": 1.0,
+                "selected_source_fresh_count": target,
+                "selected_source_fresh_coverage": 1.0,
+                "selected_source_stale_symbols": [],
+                "discovery_pagination_complete": True,
+                "discovery_reported_total": 2_913 if market_key == "hk" else 5_965,
+                "discovery_requested_pages": 10,
+                "discovery_completed_pages": 10,
+                "raw_discovery_size": minimum + 100,
+                "deduped_discovery_size": minimum + 25,
+                "eligible_discovery_size": minimum + 25,
+                "min_eligible_discovery_size": minimum,
+                "route_targets": route_targets,
+                "route_counts": route_targets,
+                "route_hit_counts": route_targets,
+                "route_shortfalls": {},
+                "excluded_counts": {"security_type": 5},
+                "recall_manifest": manifest,
+                "raw_pool_size": target,
+                "universe_size": target,
+                "valid_quote_size": target,
+                "deep_scored_size": target,
+                "scored_size": target,
+                "source_counts": {f"eastmoney_delay_{market_key}_market": target},
+            }
+        )
+        snapshot["markets"][market_key]["pool_health"] = {
+            "status": "healthy",
+            "reason_codes": [],
+            "warning_codes": [],
+            "universe_origin": server.DYNAMIC_MARKET_ORIGIN,
+            "target_count": target,
+            "selected_count": target,
+            "eligible_discovery_count": minimum + 25,
+            "min_eligible_discovery_count": minimum,
+            "raw_discovery_count": minimum + 100,
+            "quote_count": target,
+            "quote_coverage": 1.0,
+            "realtime_count": target,
+            "realtime_coverage": 1.0,
+            "deep_scored_count": target,
+            "deep_score_coverage": 1.0,
+            "min_score_coverage": server.DYNAMIC_MARKET_MIN_SCORE_COVERAGE,
+        }
+        snapshot["markets"][market_key]["decision"]["primary"]["candidate_lineage"] = {
+            "universe_origin": server.DYNAMIC_MARKET_ORIGIN,
+        }
+    return server.enrich_snapshot_v2(snapshot)
+
+
 class SnapshotContractTests(unittest.TestCase):
+    def test_dynamic_hk_us_snapshot_contract_is_auditable(self) -> None:
+        enriched = dynamic_hk_us_snapshot_fixture()
+
+        self.assertEqual(validate_snapshot(enriched), [])
+        for market_key, target in (("hk", 200), ("us", 300)):
+            stats = enriched["markets"][market_key]["stats"]
+            self.assertEqual(stats["universe_origin"], server.DYNAMIC_MARKET_ORIGIN)
+            self.assertEqual(len(stats["recall_manifest"]), target)
+            self.assertEqual(len({row["symbol"] for row in stats["recall_manifest"]}), target)
+
+    def test_dynamic_hk_us_contract_rejects_manifest_and_origin_spoofing(self) -> None:
+        missing_manifest_row = dynamic_hk_us_snapshot_fixture()
+        missing_manifest_row["markets"]["hk"]["stats"]["recall_manifest"].pop()
+        self.assertIn(
+            "markets.hk.stats.recall_manifest size is invalid",
+            validate_snapshot(missing_manifest_row),
+        )
+
+        unknown_origin = dynamic_hk_us_snapshot_fixture()
+        unknown_origin["markets"]["us"]["stats"]["universe_origin"] = "dynamicish"
+        errors = validate_snapshot(unknown_origin)
+        self.assertIn("markets.us.stats.universe_origin is not a dynamic origin", errors)
+        self.assertIn("global_decision.market_states.us.reason_codes are incomplete", errors)
+
+        injected_candidate = dynamic_hk_us_snapshot_fixture()
+        injected_candidate["markets"]["us"]["decision"]["primary"]["code"] = "STATIC"
+        injected_candidate["markets"]["us"]["decision"]["primary"]["symbol"] = "STATIC"
+        self.assertIn(
+            "markets.us candidate is not present in dynamic recall_manifest",
+            validate_snapshot(injected_candidate),
+        )
+
+    def test_dynamic_hk_us_version_keeps_a_share_full_score_contract(self) -> None:
+        enriched = dynamic_hk_us_snapshot_fixture()
+        del enriched["markets"]["a_share"]["stats"]["base_scored_size"]
+
+        errors = validate_snapshot(enriched)
+
+        self.assertTrue(any("base_scored_size" in error for error in errors))
+
     def test_automation_metadata_uses_workflow_environment(self) -> None:
         with mock.patch.dict(
             server.os.environ,

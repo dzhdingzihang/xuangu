@@ -27,6 +27,7 @@ def healthy_snapshot(generated_at: str = "2026-08-21T08:25:00+08:00") -> dict:
     targets = {"a_share": 300, "hk": 200, "us": 300}
     snapshot = {
         "generated_at": generated_at,
+        "universe_version": "recall-v2-5-dynamic-hk-us",
         "markets": {
             market: {
                 "quote_health": {
@@ -69,11 +70,34 @@ def healthy_snapshot(generated_at: str = "2026-08-21T08:25:00+08:00") -> dict:
         }
     )
     for market in ("hk", "us"):
+        target = targets[market]
+        minimum = 210 if market == "hk" else 315
         snapshot["markets"][market]["quote_health"].update(
             {
                 "stale_realtime_count": 0,
                 "freshness_policy": "latest_exchange_session_v1",
                 "freshness_reference_session": "2026-08-20",
+            }
+        )
+        snapshot["markets"][market]["pool_health"] = {
+            "status": "healthy",
+            "reason_codes": [],
+            "target_count": target,
+            "selected_count": target,
+        }
+        snapshot["markets"][market]["stats"].update(
+            {
+                "universe_origin": "dynamic_market_snapshot",
+                "discovery_pagination_complete": True,
+                "eligible_discovery_size": minimum + 20,
+                "selected_source_fresh_count": target,
+                "selected_source_fresh_coverage": 1.0,
+                "recall_manifest": [
+                    {"symbol": f"{index + 1:04d}.HK" if market == "hk" else f"US{index + 1:03d}"}
+                    for index in range(target)
+                ],
+                "deep_scored_size": target,
+                "scored_size": target,
             }
         )
     return snapshot
@@ -275,78 +299,13 @@ class ScheduleGateTests(unittest.TestCase):
 
     def test_structural_model_blockers_do_not_cause_endless_fallback(self) -> None:
         slot = dt.datetime.fromisoformat("2026-08-21T08:17:00+08:00")
-        structurally_blocked = {
-            "generated_at": "2026-08-21T08:25:00+08:00",
-            "data_health": {
-                "blocker_codes": [
-                    "TEN_DAY_PROBABILITY_UNCALIBRATED",
-                    "EXTERNAL_EVIDENCE_MISSING",
-                ]
-            },
-            "markets": {
-                "a_share": {
-                    "quote_health": {
-                        "status": "available",
-                        "requested_count": 300,
-                        "quote_count": 300,
-                        "quote_coverage": 1.0,
-                        "reason_codes": [],
-                    },
-                    "pool_health": {"status": "healthy", "reason_codes": []},
-                    "stats": {
-                        "raw_pool_size": 300,
-                        "scored_size": 96,
-                        "base_scored_size": 300,
-                        "technical_attempted_size": 300,
-                        "technical_scored_size": 300,
-                        "technical_kline_complete_size": 300,
-                        "technical_kline_coverage": 1.0,
-                        "deep_score_limit": 96,
-                        "deep_eligible_size": 300,
-                        "deep_attempted_size": 96,
-                        "deep_scored_size": 96,
-                        "deep_kline_coverage": 1.0,
-                        "recall_target": 300,
-                        "recall_selected_size": 300,
-                        "board_counts": {
-                            "sh_main": 90,
-                            "sz_main": 75,
-                            "chinext": 75,
-                            "star": 60,
-                        },
-                    },
-                },
-                "hk": {
-                    "stats": {
-                        "raw_pool_size": 200,
-                        "scored_size": 62,
-                        "recall_target": 200,
-                        "recall_selected_size": 200,
-                    }
-                },
-                "us": {
-                    "stats": {
-                        "raw_pool_size": 300,
-                        "scored_size": 246,
-                        "recall_target": 300,
-                        "recall_selected_size": 300,
-                    }
-                },
-            },
+        structurally_blocked = healthy_snapshot("2026-08-21T08:25:00+08:00")
+        structurally_blocked["data_health"] = {
+            "blocker_codes": [
+                "TEN_DAY_PROBABILITY_UNCALIBRATED",
+                "EXTERNAL_EVIDENCE_MISSING",
+            ]
         }
-        for market in ("hk", "us"):
-            structurally_blocked["markets"][market]["quote_health"] = {
-                "status": "available",
-                "requested_count": structurally_blocked["markets"][market]["stats"]["raw_pool_size"],
-                "quote_count": structurally_blocked["markets"][market]["stats"]["raw_pool_size"],
-                "realtime_count": structurally_blocked["markets"][market]["stats"]["raw_pool_size"],
-                "quote_coverage": 1.0,
-                "realtime_coverage": 1.0,
-                "stale_realtime_count": 0,
-                "freshness_policy": "latest_exchange_session_v1",
-                "freshness_reference_session": "2026-08-20",
-                "reason_codes": [],
-            }
         self.assertEqual(
             self.module.snapshot_data_source_recovery_reasons(structurally_blocked),
             [],
@@ -359,33 +318,28 @@ class ScheduleGateTests(unittest.TestCase):
         self.assertEqual(source, "live")
 
     def test_hk_or_us_empty_scoring_is_recoverable(self) -> None:
-        snapshot = {
-            "markets": {
-                **healthy_snapshot()["markets"],
-                "hk": {
-                    "quote_health": healthy_snapshot()["markets"]["hk"]["quote_health"],
-                    "stats": {
-                        "raw_pool_size": 200,
-                        "scored_size": 0,
-                        "recall_target": 200,
-                        "recall_selected_size": 200,
-                    },
-                },
-                "us": {
-                    "quote_health": healthy_snapshot()["markets"]["us"]["quote_health"],
-                    "stats": {
-                        "raw_pool_size": 300,
-                        "scored_size": 100,
-                        "recall_target": 300,
-                        "recall_selected_size": 300,
-                    },
-                },
-            }
-        }
+        snapshot = healthy_snapshot()
+        snapshot["markets"]["hk"]["stats"]["scored_size"] = 0
+        snapshot["markets"]["hk"]["stats"]["deep_scored_size"] = 0
+
         self.assertEqual(
-            self.module.snapshot_data_source_recovery_reasons(snapshot),
-            ["HK_SCORING_EMPTY"],
+            set(self.module.snapshot_data_source_recovery_reasons(snapshot)),
+            {"HK_SCORE_COVERAGE_BELOW_MINIMUM", "HK_SCORING_EMPTY"},
         )
+
+    def test_hk_us_dynamic_contract_is_recomputed_instead_of_trusting_pool_label(self) -> None:
+        mutations = (
+            ("discovery_pagination_complete", False),
+            ("eligible_discovery_size", 200),
+            ("selected_source_fresh_coverage", 0.97),
+            ("recall_manifest", []),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                snapshot = healthy_snapshot()
+                snapshot["markets"]["hk"]["stats"][field] = value
+                reasons = self.module.snapshot_data_source_recovery_reasons(snapshot)
+                self.assertIn("HK_DYNAMIC_CONTRACT_INVALID", reasons)
 
     def test_recall_target_shortfall_forces_scheduled_recovery(self) -> None:
         snapshot = healthy_snapshot()

@@ -89,6 +89,24 @@ jobs:
           restore-keys: |
             a-share-d1-v1-
 
+      - name: Restore HK/US dynamic recall cache
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        uses: actions/cache/restore@v4
+        with:
+          path: data/runtime-cache/hk_us_dynamic_recall.json
+          key: hk-us-dynamic-recall-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            hk-us-dynamic-recall-v1-
+
+      - name: Restore HK/US daily K-line cache
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        uses: actions/cache/restore@v4
+        with:
+          path: data/runtime-cache/hk_us_daily.json
+          key: hk-us-d1-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            hk-us-d1-v1-
+
       - name: Generate smart pick snapshot
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
         env:
@@ -136,6 +154,20 @@ jobs:
         with:
           path: data/runtime-cache/a_share_daily.json
           key: a-share-d1-v1-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save validated HK/US dynamic recall cache
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        uses: actions/cache/save@v4
+        with:
+          path: data/runtime-cache/hk_us_dynamic_recall.json
+          key: hk-us-dynamic-recall-v1-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save validated HK/US daily K-line cache
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        uses: actions/cache/save@v4
+        with:
+          path: data/runtime-cache/hk_us_daily.json
+          key: hk-us-d1-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Prepare immutable snapshot recovery bundle
         id: snapshot_bundle

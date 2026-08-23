@@ -8,11 +8,18 @@ import math
 import pathlib
 import re
 import sys
+from zoneinfo import ZoneInfo
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from market_calendar import CALENDAR_VERSION, calendar_id, expected_quote_session, market_trade_windows
+from market_calendar import (
+    CALENDAR_VERSION,
+    calendar_id,
+    expected_quote_session,
+    market_trade_windows,
+    quote_session_phase,
+)
 
 
 VALID_MODEL_STATUSES = {"available", "unavailable"}
@@ -24,6 +31,26 @@ MARKET_RECALL_TARGETS = {"a_share": 300, "hk": 200, "us": 300}
 A_SHARE_BOARD_TARGETS = {"sh_main": 90, "sz_main": 75, "chinext": 75, "star": 60}
 A_SHARE_ROUTE_TARGETS = {"event": 40, "momentum": 80, "pullback": 65, "liquidity": 85, "history": 30}
 EXPANDED_RECALL_UNIVERSE_VERSION = "recall-v2-4-a300-full-score"
+DYNAMIC_HK_US_UNIVERSE_VERSION = "recall-v2-5-dynamic-hk-us"
+FULL_A_SHARE_SCORE_UNIVERSE_VERSIONS = {
+    EXPANDED_RECALL_UNIVERSE_VERSION,
+    DYNAMIC_HK_US_UNIVERSE_VERSION,
+}
+DYNAMIC_MARKET_ORIGIN = "dynamic_market_snapshot"
+DYNAMIC_MARKET_CACHE_ORIGIN = "dynamic_market_snapshot_cache"
+DYNAMIC_MARKET_RECALL_POLICY_VERSION = "hk-us-cross-section-v1"
+DYNAMIC_MARKET_ROUTE_TARGETS = {
+    "hk": {"momentum": 45, "pullback": 35, "activity": 35, "quality": 30, "liquidity": 55},
+    "us": {"momentum": 70, "pullback": 50, "activity": 45, "quality": 45, "liquidity": 90},
+}
+DYNAMIC_MARKET_MIN_ELIGIBLE = {"hk": 210, "us": 315}
+DYNAMIC_MARKET_SOURCE_TIMEZONES = {
+    "hk": ZoneInfo("Asia/Hong_Kong"),
+    "us": ZoneInfo("America/New_York"),
+}
+DYNAMIC_DISCOVERY_MAX_GENERATION_LAG = dt.timedelta(hours=6)
+DYNAMIC_DISCOVERY_MAX_REGULAR_SOURCE_AGE = dt.timedelta(minutes=45)
+DYNAMIC_DISCOVERY_MAX_SOURCE_FUTURE_SKEW = dt.timedelta(minutes=5)
 A_SHARE_DEEP_SCORE_LIMIT = 96
 YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
 
@@ -57,6 +84,48 @@ def timezone_aware_iso_datetime(value) -> bool:
     except ValueError:
         return False
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def parse_aware_datetime(value) -> dt.datetime | None:
+    if not timezone_aware_iso_datetime(value):
+        return None
+    text = str(value).strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    return dt.datetime.fromisoformat(text)
+
+
+def dynamic_manifest_source_freshness(
+    manifest: list[dict], market_key: str, anchor_value
+) -> dict:
+    anchor = parse_aware_datetime(anchor_value)
+    if anchor is None:
+        return {"time_count": 0, "fresh_count": 0, "expected_session": None}
+    expected_session = expected_quote_session(market_key, anchor)
+    phase = quote_session_phase(market_key, anchor)
+    time_count = 0
+    fresh_count = 0
+    for row in manifest:
+        if not isinstance(row, dict):
+            continue
+        timestamp = ((row.get("recall_metrics") or {}).get("source_timestamp"))
+        if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool) or timestamp <= 0:
+            continue
+        time_count += 1
+        source_moment = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc)
+        source_session = source_moment.astimezone(DYNAMIC_MARKET_SOURCE_TIMEZONES[market_key]).date()
+        age = anchor.astimezone(dt.timezone.utc) - source_moment
+        clock_fresh = age >= -DYNAMIC_DISCOVERY_MAX_SOURCE_FUTURE_SKEW
+        if phase == "regular":
+            clock_fresh = clock_fresh and age <= DYNAMIC_DISCOVERY_MAX_REGULAR_SOURCE_AGE
+        if source_session == expected_session and clock_fresh:
+            fresh_count += 1
+    return {
+        "time_count": time_count,
+        "fresh_count": fresh_count,
+        "expected_session": expected_session.isoformat(),
+        "phase": phase,
+    }
 
 
 def safe_snapshot_key(value) -> bool:
@@ -165,7 +234,7 @@ def decision_candidates(decision: dict) -> list[dict]:
     return result
 
 
-def derive_market_coverage_state(section: dict) -> tuple[str, list[str]]:
+def derive_market_coverage_state(section: dict, market_key: str | None = None) -> tuple[str, list[str]]:
     """Recompute the minimum safe market state from published source fields."""
 
     section = section or {}
@@ -197,8 +266,17 @@ def derive_market_coverage_state(section: dict) -> tuple[str, list[str]]:
     reasons: list[str] = []
     if pool_degraded:
         reasons.append("POOL_COVERAGE_INCOMPLETE")
-    if origin == "curated_static":
+    market_key = str(market_key or section.get("key") or "")
+    expected_origin = "dynamic_snapshot" if market_key == "a_share" else DYNAMIC_MARKET_ORIGIN
+    if origin in {"curated_static", "curated_fallback"}:
         reasons.append("CURATED_STATIC_UNIVERSE")
+    elif origin == DYNAMIC_MARKET_CACHE_ORIGIN:
+        reasons.append("DYNAMIC_DISCOVERY_CACHE_USED")
+    elif origin != expected_origin:
+        reasons.append("DYNAMIC_RECALL_CONTRACT_INCOMPLETE")
+    if market_key in {"hk", "us"} and origin == DYNAMIC_MARKET_ORIGIN and not pool:
+        pool_degraded = True
+        reasons.append("DYNAMIC_RECALL_CONTRACT_INCOMPLETE")
     if not regime or regime == "unknown":
         reasons.append("MARKET_CONTEXT_MISSING")
     if not quote_ready:
@@ -291,9 +369,22 @@ def validate_snapshot(snapshot: dict) -> list[str]:
             errors.append(f"markets.{market_key} is missing")
             continue
         section = markets[market_key] or {}
-        derived_market_states[market_key] = derive_market_coverage_state(section)
+        derived_market_states[market_key] = derive_market_coverage_state(section, market_key)
         stats = section.get("stats") if isinstance(section.get("stats"), dict) else {}
-        expanded_recall_contract = snapshot.get("universe_version") == EXPANDED_RECALL_UNIVERSE_VERSION
+        expanded_recall_contract = snapshot.get("universe_version") in FULL_A_SHARE_SCORE_UNIVERSE_VERSIONS
+        origin_declares_dynamic = stats.get("universe_origin") in {
+            DYNAMIC_MARKET_ORIGIN,
+            DYNAMIC_MARKET_CACHE_ORIGIN,
+        }
+        dynamic_market_contract = market_key in {"hk", "us"} and (
+            snapshot.get("universe_version") == DYNAMIC_HK_US_UNIVERSE_VERSION
+            or origin_declares_dynamic
+        )
+        if origin_declares_dynamic and snapshot.get("universe_version") != DYNAMIC_HK_US_UNIVERSE_VERSION:
+            errors.append(
+                f"markets.{market_key}.stats dynamic origin requires universe_version "
+                f"{DYNAMIC_HK_US_UNIVERSE_VERSION}"
+            )
         recall_contract_present = "recall_target" in stats or "recall_selected_size" in stats
         if expanded_recall_contract:
             required_recall_fields = {
@@ -554,6 +645,365 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                 )
                 if not finite_number(realtime_coverage) or realtime_coverage != expected_realtime_coverage:
                     errors.append(f"markets.{market_key}.quote_health.realtime_coverage is inconsistent")
+            if dynamic_market_contract:
+                required_dynamic_fields = {
+                    "universe_origin",
+                    "universe_scope",
+                    "coverage_claim",
+                    "recall_policy_version",
+                    "discovery_source",
+                    "discovery_retrieved_at",
+                    "discovery_source_as_of",
+                    "discovery_pagination_complete",
+                    "discovery_reported_total",
+                    "discovery_freshness_as_of",
+                    "discovery_expected_session",
+                    "discovery_session_phase",
+                    "selected_source_time_count",
+                    "selected_source_time_coverage",
+                    "selected_source_fresh_count",
+                    "selected_source_fresh_coverage",
+                    "selected_source_stale_symbols",
+                    "raw_discovery_size",
+                    "deduped_discovery_size",
+                    "eligible_discovery_size",
+                    "min_eligible_discovery_size",
+                    "route_targets",
+                    "route_counts",
+                    "route_hit_counts",
+                    "route_shortfalls",
+                    "excluded_counts",
+                    "recall_manifest",
+                }
+                missing_dynamic = sorted(required_dynamic_fields - set(stats))
+                if missing_dynamic:
+                    errors.append(
+                        f"markets.{market_key}.stats dynamic recall fields missing: "
+                        + ",".join(missing_dynamic)
+                    )
+                origin = stats.get("universe_origin")
+                if origin not in {DYNAMIC_MARKET_ORIGIN, DYNAMIC_MARKET_CACHE_ORIGIN}:
+                    errors.append(f"markets.{market_key}.stats.universe_origin is not a dynamic origin")
+                if stats.get("universe_scope") != "provider_bounded_common_equity_cross_section":
+                    errors.append(f"markets.{market_key}.stats.universe_scope is invalid")
+                if stats.get("coverage_claim") != "bounded_dynamic_scan":
+                    errors.append(f"markets.{market_key}.stats.coverage_claim is invalid")
+                if stats.get("recall_policy_version") != DYNAMIC_MARKET_RECALL_POLICY_VERSION:
+                    errors.append(f"markets.{market_key}.stats.recall_policy_version is invalid")
+                if not isinstance(stats.get("discovery_source"), str) or not stats.get("discovery_source", "").strip():
+                    errors.append(f"markets.{market_key}.stats.discovery_source is invalid")
+                retrieved_at = parse_aware_datetime(stats.get("discovery_retrieved_at"))
+                generated_moment = parse_aware_datetime(window_anchor)
+                if retrieved_at is None:
+                    errors.append(f"markets.{market_key}.stats.discovery_retrieved_at is invalid")
+                elif generated_moment is not None:
+                    retrieval_age = generated_moment.astimezone(dt.timezone.utc) - retrieved_at.astimezone(dt.timezone.utc)
+                    max_lag = (
+                        dt.timedelta(days=14)
+                        if stats.get("universe_origin") == DYNAMIC_MARKET_CACHE_ORIGIN
+                        else DYNAMIC_DISCOVERY_MAX_GENERATION_LAG
+                    )
+                    if abs(retrieval_age) > max_lag:
+                        errors.append(f"markets.{market_key}.stats.discovery_retrieved_at is stale or future")
+                source_as_of = stats.get("discovery_source_as_of")
+                if source_as_of is not None and not timezone_aware_iso_datetime(source_as_of):
+                    errors.append(f"markets.{market_key}.stats.discovery_source_as_of is invalid")
+                pagination_complete = stats.get("discovery_pagination_complete")
+                if not strict_boolean(pagination_complete):
+                    errors.append(f"markets.{market_key}.stats.discovery_pagination_complete is invalid")
+                for field in ("discovery_requested_pages", "discovery_completed_pages"):
+                    value = stats.get(field)
+                    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                        errors.append(f"markets.{market_key}.stats.{field} is invalid")
+                requested_pages = stats.get("discovery_requested_pages")
+                completed_pages = stats.get("discovery_completed_pages")
+                if (
+                    isinstance(requested_pages, int)
+                    and not isinstance(requested_pages, bool)
+                    and isinstance(completed_pages, int)
+                    and not isinstance(completed_pages, bool)
+                    and (
+                        completed_pages > requested_pages
+                        or (pagination_complete is True and completed_pages != requested_pages)
+                    )
+                ):
+                    errors.append(f"markets.{market_key}.stats discovery pagination is inconsistent")
+                reported_total = stats.get("discovery_reported_total")
+                if reported_total is not None and (
+                    not isinstance(reported_total, int)
+                    or isinstance(reported_total, bool)
+                    or reported_total < 0
+                ):
+                    errors.append(f"markets.{market_key}.stats.discovery_reported_total is invalid")
+                raw_discovery = stats.get("raw_discovery_size")
+                deduped_discovery = stats.get("deduped_discovery_size")
+                eligible_discovery = stats.get("eligible_discovery_size")
+                minimum_discovery = stats.get("min_eligible_discovery_size")
+                if minimum_discovery != DYNAMIC_MARKET_MIN_ELIGIBLE[market_key]:
+                    errors.append(f"markets.{market_key}.stats.min_eligible_discovery_size is invalid")
+                if (
+                    not isinstance(raw_discovery, int)
+                    or isinstance(raw_discovery, bool)
+                    or not isinstance(deduped_discovery, int)
+                    or isinstance(deduped_discovery, bool)
+                    or not isinstance(eligible_discovery, int)
+                    or isinstance(eligible_discovery, bool)
+                    or not isinstance(selected_size, int)
+                    or raw_discovery < deduped_discovery
+                    or deduped_discovery < eligible_discovery
+                    or eligible_discovery < selected_size
+                ):
+                    errors.append(f"markets.{market_key}.stats dynamic discovery counts are invalid")
+                expected_routes = DYNAMIC_MARKET_ROUTE_TARGETS[market_key]
+                route_targets = stats.get("route_targets")
+                route_counts = stats.get("route_counts")
+                route_hit_counts = stats.get("route_hit_counts")
+                route_shortfalls = stats.get("route_shortfalls")
+                if route_targets != expected_routes:
+                    errors.append(f"markets.{market_key}.stats.route_targets is invalid")
+                route_counts_valid = bool(
+                    isinstance(route_counts, dict)
+                    and set(route_counts) == set(expected_routes)
+                    and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in route_counts.values())
+                )
+                if not route_counts_valid or sum(route_counts.values()) != selected_size:
+                    errors.append(f"markets.{market_key}.stats.route_counts is invalid")
+                if route_counts_valid:
+                    expected_shortfalls = {
+                        route: target - route_counts.get(route, 0)
+                        for route, target in expected_routes.items()
+                        if route_counts.get(route, 0) < target
+                    }
+                    if route_shortfalls != expected_shortfalls:
+                        errors.append(f"markets.{market_key}.stats.route_shortfalls is inconsistent")
+                route_hits_valid = bool(
+                    isinstance(route_hit_counts, dict)
+                    and set(route_hit_counts) == set(expected_routes)
+                    and all(
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value >= 0
+                        and (not isinstance(selected_size, int) or value <= selected_size)
+                        and (not route_counts_valid or value >= route_counts.get(route, 0))
+                        for route, value in route_hit_counts.items()
+                    )
+                )
+                if not route_hits_valid:
+                    errors.append(f"markets.{market_key}.stats.route_hit_counts is invalid")
+                excluded_counts = stats.get("excluded_counts")
+                if not isinstance(excluded_counts, dict):
+                    errors.append(f"markets.{market_key}.stats.excluded_counts is invalid")
+                manifest = stats.get("recall_manifest")
+                manifest_contract_valid = True
+                manifest_symbol_set: set[str] = set()
+                if not isinstance(manifest, list) or len(manifest) != selected_size:
+                    errors.append(f"markets.{market_key}.stats.recall_manifest size is invalid")
+                    manifest_contract_valid = False
+                else:
+                    manifest_symbols = []
+                    manifest_scores = []
+                    for index, row in enumerate(manifest, 1):
+                        if not isinstance(row, dict):
+                            errors.append(f"markets.{market_key}.stats.recall_manifest[{index - 1}] is invalid")
+                            manifest_contract_valid = False
+                            continue
+                        symbol = normalize_live_code(market_key, row.get("symbol"))
+                        manifest_symbols.append(symbol)
+                        manifest_scores.append(row.get("recall_score"))
+                        if (
+                            not symbol
+                            or row.get("recall_rank") != index
+                            or not finite_number(row.get("recall_score"))
+                            or row.get("recall_score", -1) < 0
+                            or row.get("primary_route") not in expected_routes
+                            or not isinstance(row.get("recall_routes"), list)
+                            or not row.get("recall_routes")
+                            or row.get("primary_route") not in row.get("recall_routes", [])
+                            or any(route not in expected_routes for route in row.get("recall_routes", []))
+                            or not row.get("source")
+                            or not timezone_aware_iso_datetime(row.get("observed_at"))
+                            or not isinstance(row.get("recall_metrics"), dict)
+                        ):
+                            errors.append(f"markets.{market_key}.stats.recall_manifest[{index - 1}] is invalid")
+                            manifest_contract_valid = False
+                    if None in manifest_symbols or len(set(manifest_symbols)) != len(manifest_symbols):
+                        errors.append(f"markets.{market_key}.stats.recall_manifest symbols are invalid")
+                        manifest_contract_valid = False
+                    manifest_symbol_set = {symbol for symbol in manifest_symbols if symbol}
+                    if all(finite_number(score) for score in manifest_scores) and any(
+                        manifest_scores[index] > manifest_scores[index - 1]
+                        for index in range(1, len(manifest_scores))
+                    ):
+                        errors.append(f"markets.{market_key}.stats.recall_manifest scores are not ranked")
+                        manifest_contract_valid = False
+
+                freshness_anchor = stats.get("discovery_freshness_as_of")
+                parsed_freshness_anchor = parse_aware_datetime(freshness_anchor)
+                if parsed_freshness_anchor is None:
+                    errors.append(f"markets.{market_key}.stats.discovery_freshness_as_of is invalid")
+                elif generated_moment is not None and abs(
+                    generated_moment.astimezone(dt.timezone.utc)
+                    - parsed_freshness_anchor.astimezone(dt.timezone.utc)
+                ) > DYNAMIC_DISCOVERY_MAX_GENERATION_LAG:
+                    errors.append(f"markets.{market_key}.stats.discovery_freshness_as_of is stale or future")
+                if (
+                    stats.get("universe_origin") == DYNAMIC_MARKET_ORIGIN
+                    and retrieved_at is not None
+                    and parsed_freshness_anchor is not None
+                    and abs(
+                        retrieved_at.astimezone(dt.timezone.utc)
+                        - parsed_freshness_anchor.astimezone(dt.timezone.utc)
+                    ) > dt.timedelta(hours=1)
+                ):
+                    errors.append(f"markets.{market_key}.stats discovery freshness anchor is inconsistent")
+                freshness = dynamic_manifest_source_freshness(
+                    manifest if isinstance(manifest, list) else [], market_key, freshness_anchor
+                )
+                manifest_source_timestamps = [
+                    (row.get("recall_metrics") or {}).get("source_timestamp")
+                    for row in (manifest if isinstance(manifest, list) else [])
+                    if isinstance(row, dict)
+                    and isinstance((row.get("recall_metrics") or {}).get("source_timestamp"), (int, float))
+                    and not isinstance((row.get("recall_metrics") or {}).get("source_timestamp"), bool)
+                    and (row.get("recall_metrics") or {}).get("source_timestamp") > 0
+                ]
+                parsed_source_as_of = parse_aware_datetime(source_as_of)
+                if manifest_source_timestamps:
+                    if (
+                        parsed_source_as_of is None
+                        or abs(parsed_source_as_of.timestamp() - max(manifest_source_timestamps)) > 1
+                    ):
+                        errors.append(f"markets.{market_key}.stats.discovery_source_as_of does not match manifest")
+                elif source_as_of is not None:
+                    errors.append(f"markets.{market_key}.stats.discovery_source_as_of has no manifest evidence")
+                source_time_count = stats.get("selected_source_time_count")
+                source_fresh_count = stats.get("selected_source_fresh_count")
+                expected_source_time_coverage = (
+                    round(freshness["time_count"] / selected_size, 4)
+                    if isinstance(selected_size, int) and selected_size > 0
+                    else 0.0
+                )
+                expected_source_fresh_coverage = (
+                    round(freshness["fresh_count"] / selected_size, 4)
+                    if isinstance(selected_size, int) and selected_size > 0
+                    else 0.0
+                )
+                if (
+                    source_time_count != freshness["time_count"]
+                    or source_fresh_count != freshness["fresh_count"]
+                    or stats.get("selected_source_time_coverage") != expected_source_time_coverage
+                    or stats.get("selected_source_fresh_coverage") != expected_source_fresh_coverage
+                    or stats.get("discovery_expected_session") != freshness["expected_session"]
+                    or stats.get("discovery_session_phase") != freshness.get("phase")
+                ):
+                    errors.append(f"markets.{market_key}.stats selected source freshness is inconsistent")
+                stale_symbols = stats.get("selected_source_stale_symbols")
+                if not isinstance(stale_symbols, list) or len(stale_symbols) != selected_size - freshness["fresh_count"]:
+                    errors.append(f"markets.{market_key}.stats.selected_source_stale_symbols is inconsistent")
+                pool_health = section.get("pool_health")
+                if not isinstance(pool_health, dict):
+                    errors.append(f"markets.{market_key}.pool_health is required")
+                else:
+                    if pool_health.get("target_count") != recall_target or pool_health.get("selected_count") != selected_size:
+                        errors.append(f"markets.{market_key}.pool_health recall counts are inconsistent")
+                    if pool_health.get("quote_count") != valid_quote_size or pool_health.get("deep_scored_count") != deep_scored_size:
+                        errors.append(f"markets.{market_key}.pool_health score counts are inconsistent")
+                    if (
+                        pool_health.get("universe_origin") != origin
+                        or pool_health.get("eligible_discovery_count") != eligible_discovery
+                        or pool_health.get("min_eligible_discovery_count") != minimum_discovery
+                        or pool_health.get("raw_discovery_count") != raw_discovery
+                    ):
+                        errors.append(f"markets.{market_key}.pool_health discovery counts are inconsistent")
+                    expected_quote_coverage = (
+                        round(valid_quote_size / selected_size, 4)
+                        if isinstance(selected_size, int)
+                        and selected_size > 0
+                        and isinstance(valid_quote_size, int)
+                        else 0.0
+                    )
+                    expected_score_coverage = (
+                        round(deep_scored_size / selected_size, 4)
+                        if isinstance(selected_size, int)
+                        and selected_size > 0
+                        and isinstance(deep_scored_size, int)
+                        else 0.0
+                    )
+                    if pool_health.get("quote_coverage") != expected_quote_coverage:
+                        errors.append(f"markets.{market_key}.pool_health.quote_coverage is inconsistent")
+                    if pool_health.get("deep_score_coverage") != expected_score_coverage:
+                        errors.append(f"markets.{market_key}.pool_health.deep_score_coverage is inconsistent")
+                    quote_health = section.get("quote_health") if isinstance(section.get("quote_health"), dict) else {}
+                    realtime_count_value = quote_health.get("realtime_count")
+                    expected_realtime_coverage = (
+                        round(realtime_count_value / selected_size, 4)
+                        if isinstance(selected_size, int)
+                        and selected_size > 0
+                        and isinstance(realtime_count_value, int)
+                        and not isinstance(realtime_count_value, bool)
+                        else 0.0
+                    )
+                    if (
+                        pool_health.get("realtime_count") != realtime_count_value
+                        or pool_health.get("realtime_coverage") != expected_realtime_coverage
+                    ):
+                        errors.append(f"markets.{market_key}.pool_health realtime coverage is inconsistent")
+                    if pool_health.get("min_score_coverage") != 0.98:
+                        errors.append(f"markets.{market_key}.pool_health.min_score_coverage is invalid")
+
+                    derived_pool_reasons = []
+                    if origin == DYNAMIC_MARKET_CACHE_ORIGIN:
+                        derived_pool_reasons.append("DYNAMIC_DISCOVERY_CACHE_USED")
+                    elif origin != DYNAMIC_MARKET_ORIGIN:
+                        derived_pool_reasons.append("DYNAMIC_RECALL_CONTRACT_INCOMPLETE")
+                    if pagination_complete is not True:
+                        derived_pool_reasons.append("DYNAMIC_DISCOVERY_PARTIAL")
+                    if freshness["time_count"] == 0:
+                        derived_pool_reasons.append("DYNAMIC_DISCOVERY_SOURCE_TIME_UNAVAILABLE")
+                    elif expected_source_fresh_coverage < 0.98:
+                        derived_pool_reasons.append("DYNAMIC_DISCOVERY_STALE")
+                    if not isinstance(eligible_discovery, int) or eligible_discovery < DYNAMIC_MARKET_MIN_ELIGIBLE[market_key]:
+                        derived_pool_reasons.append("DYNAMIC_DISCOVERY_BELOW_MINIMUM")
+                    if selected_size != recall_target:
+                        derived_pool_reasons.append("DYNAMIC_RECALL_TARGET_NOT_MET")
+                    if not manifest_contract_valid:
+                        derived_pool_reasons.append("DYNAMIC_RECALL_MANIFEST_INVALID")
+                    if quote_health.get("requested_count") != selected_size or expected_quote_coverage < 0.98:
+                        derived_pool_reasons.append("DYNAMIC_QUOTE_COVERAGE_BELOW_MINIMUM")
+                    if expected_score_coverage < 0.98:
+                        derived_pool_reasons.append("DYNAMIC_SCORE_COVERAGE_BELOW_MINIMUM")
+                    if expected_realtime_coverage < 0.98:
+                        derived_pool_reasons.append("DYNAMIC_REALTIME_COVERAGE_BELOW_MINIMUM")
+                    published_status = str(pool_health.get("status") or "").lower()
+                    published_reasons = pool_health.get("reason_codes")
+                    published_reasons = set(published_reasons) if isinstance(published_reasons, list) else set()
+                    if published_status not in {"healthy", "degraded"}:
+                        errors.append(f"markets.{market_key}.pool_health.status is invalid")
+                    expected_status = "degraded" if derived_pool_reasons else "healthy"
+                    if published_status != expected_status:
+                        errors.append(f"markets.{market_key}.pool_health.status understates derived health")
+                    missing_pool_reasons = set(derived_pool_reasons) - published_reasons
+                    if missing_pool_reasons:
+                        errors.append(
+                            f"markets.{market_key}.pool_health.reason_codes are incomplete: "
+                            + ",".join(sorted(missing_pool_reasons))
+                        )
+                    if origin == DYNAMIC_MARKET_CACHE_ORIGIN and published_status != "degraded":
+                        errors.append(f"markets.{market_key}.cached dynamic origin must be degraded")
+
+                for candidate in decision_candidates((section.get("decision") or {})):
+                    lineage_origin = ((candidate.get("candidate_lineage") or {}).get("universe_origin"))
+                    if lineage_origin != origin:
+                        errors.append(
+                            f"markets.{market_key} candidate lineage origin does not match market origin"
+                        )
+                    candidate_code = normalize_live_code(
+                        market_key, candidate.get("code") or candidate.get("symbol")
+                    )
+                    if candidate_code not in manifest_symbol_set:
+                        errors.append(
+                            f"markets.{market_key} candidate is not present in dynamic recall_manifest"
+                        )
         trade_window = section.get("trade_window") or {}
         if trade_window.get("calendar_id") != calendar_id(market_key):
             errors.append(f"markets.{market_key}.trade_window.calendar_id is invalid")

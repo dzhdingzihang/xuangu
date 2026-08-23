@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import json
+import pathlib
 import re
 import tempfile
 import unittest
@@ -324,7 +326,7 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertEqual(coverage["route_shortfalls"]["event"], missing_event_count)
         self.assertEqual(coverage["backfill_count"], missing_event_count)
 
-    def test_curated_hk_us_universes_have_exact_unique_targets(self) -> None:
+    def test_legacy_curated_hk_us_universes_remain_reproducible(self) -> None:
         for market_key, target in (("hk", 200), ("us", 300)):
             with self.subTest(market_key=market_key):
                 rows = server.market_universe(market_key)
@@ -350,6 +352,283 @@ class SelectorV2Tests(unittest.TestCase):
                     self.assertNotIn("SIVE.ST", symbols)
                     self.assertNotIn("SOI", symbols)
                     self.assertIn("SEI", symbols)
+
+    def test_dynamic_hk_us_pool_is_exact_unique_and_auditable(self) -> None:
+        for market_key, target, total in (("hk", 200, 230), ("us", 300, 340)):
+            with self.subTest(market_key=market_key):
+                rows = []
+                for index in range(total):
+                    symbol = f"{index + 1:04d}.HK" if market_key == "hk" else f"U{index:03d}"
+                    rows.append(
+                        {
+                            "symbol": symbol,
+                            "name": symbol,
+                            "source": "fixture_market",
+                            "reason": "fixture dynamic cross-section",
+                            "observed_at": "2026-08-21T16:10:00+08:00",
+                            "recall_routes": ["liquidity", "momentum", "pullback", "activity", "quality"],
+                            "recall_metrics": {
+                                "amount": 100_000_000 + index * 1_000_000,
+                                "market_cap": 2_000_000_000 + index * 10_000_000,
+                                "volume": 1_000_000 + index * 1_000,
+                                "change_pct": (index % 9) - 3,
+                            },
+                            "themes": [],
+                            "lens": server._dynamic_neutral_lens(market_key),
+                            "candidate_lineage": {"universe_origin": server.DYNAMIC_MARKET_ORIGIN},
+                        }
+                    )
+                selected, coverage = server.select_dynamic_market_pool(rows, market_key)
+                symbols = [row["symbol"] for row in selected]
+                self.assertEqual(len(symbols), target)
+                self.assertEqual(len(set(symbols)), target)
+                self.assertEqual(sum(coverage["route_counts"].values()), target)
+                self.assertEqual(len(coverage["recall_manifest"]), target)
+                self.assertEqual(
+                    {row["candidate_lineage"]["universe_origin"] for row in selected},
+                    {"dynamic_market_snapshot"},
+                )
+                self.assertTrue(all(not row.get("themes") for row in selected))
+                self.assertTrue(all(row.get("lens_confidence") is None for row in selected))
+
+    def test_dynamic_membership_changes_when_market_cross_section_changes(self) -> None:
+        def row(index: int, amount: float) -> dict:
+            symbol = f"T{index:03d}"
+            return {
+                "symbol": symbol,
+                "name": symbol,
+                "source": "fixture_market",
+                "reason": "fixture",
+                "observed_at": "2026-08-21T16:10:00+08:00",
+                "recall_routes": ["liquidity"],
+                "recall_metrics": {"amount": amount, "market_cap": amount * 10, "volume": amount / 10, "change_pct": 1},
+                "themes": [],
+                "lens": server._dynamic_neutral_lens("us"),
+                "candidate_lineage": {"universe_origin": server.DYNAMIC_MARKET_ORIGIN},
+            }
+
+        first = [row(index, 1_000_000 + index) for index in range(301)]
+        second = copy.deepcopy(first)
+        second[0]["recall_metrics"]["amount"] = 10_000_000_000
+        first_selected, _ = server.select_dynamic_market_pool(first, "us")
+        second_selected, _ = server.select_dynamic_market_pool(second, "us")
+        self.assertNotEqual(
+            {item["symbol"] for item in first_selected},
+            {item["symbol"] for item in second_selected},
+        )
+
+    def test_dynamic_security_filters_exclude_non_common_products(self) -> None:
+        observed = "2026-08-21T16:10:00+08:00"
+        valid_us, _ = server._dynamic_us_candidate(
+            {"symbol": "BRK_B", "name": "Berkshire Hathaway", "market": "NYSE", "price": 500, "volume": 100000, "mktcap": 1e12, "chg": 1},
+            "quality",
+            observed,
+        )
+        etf, etf_reason = server._dynamic_us_candidate(
+            {"symbol": "QQQ", "name": "Nasdaq 100 ETF", "market": "NASDAQ", "price": 500, "volume": 100000, "mktcap": 1e12, "chg": 1},
+            "quality",
+            observed,
+        )
+        fund, fund_reason = server._dynamic_hk_candidate(
+            {"symbol": "02800", "name": "盈富基金", "lasttrade": 25, "volume": 2e6, "amount": 5e7, "changepercent": 1},
+            "liquidity",
+            observed,
+        )
+        crypto_etf, crypto_etf_reason = server._dynamic_us_candidate(
+            {"symbol": "IBIT", "name": "iShares Bitcoin Trust ETF", "market": "NASDAQ", "price": 50, "volume": 1000000, "mktcap": 10e9, "chg": 1},
+            "quality",
+            observed,
+        )
+        closed_end_fund, closed_end_reason = server._dynamic_us_candidate(
+            {"symbol": "GOF", "name": "Guggenheim Strategic Opportunities Fund", "market": "NYSE", "price": 15, "volume": 1000000, "mktcap": 2e9, "chg": 1},
+            "quality",
+            observed,
+        )
+        hk_main, _ = server._dynamic_hk_candidate(
+            {"symbol": "09988", "name": "阿里巴巴-W", "lasttrade": 100, "volume": 2e6, "amount": 2e8, "changepercent": 1},
+            "liquidity",
+            observed,
+        )
+        self.assertEqual(valid_us["symbol"], "BRK-B")
+        self.assertIsNone(etf)
+        self.assertEqual(etf_reason, "security_type")
+        self.assertIsNone(fund)
+        self.assertEqual(fund_reason, "security_type")
+        self.assertIsNone(crypto_etf)
+        self.assertEqual(crypto_etf_reason, "security_type")
+        self.assertIsNone(closed_end_fund)
+        self.assertEqual(closed_end_reason, "security_type")
+        self.assertEqual(hk_main["market_segment"], "main_board")
+
+    def test_dynamic_pool_health_uses_exact_98_percent_boundary(self) -> None:
+        as_of = dt.datetime.fromisoformat("2026-08-23T10:00:00+08:00")
+        source_timestamp = int(dt.datetime.fromisoformat("2026-08-22T04:00:00+08:00").timestamp())
+        rows = []
+        for index in range(320):
+            rows.append(
+                {
+                    "symbol": f"B{index:03d}",
+                    "name": f"B{index:03d}",
+                    "source": "fixture_market",
+                    "reason": "fixture",
+                    "observed_at": "2026-08-21T16:10:00+08:00",
+                    "recall_routes": ["liquidity", "momentum", "pullback", "activity", "quality"],
+                    "recall_metrics": {"amount": 1e8 + index, "market_cap": 2e9 + index, "volume": 1e6 + index, "change_pct": 1, "source_timestamp": source_timestamp},
+                    "themes": [],
+                    "lens": server._dynamic_neutral_lens("us"),
+                    "candidate_lineage": {"universe_origin": server.DYNAMIC_MARKET_ORIGIN},
+                }
+            )
+        selected, coverage = server.select_dynamic_market_pool(rows, "us")
+        coverage.update({"raw_discovery_size": 320, "discovery_pagination_complete": True})
+        coverage.update(server._dynamic_source_time_coverage(selected, "us", as_of=as_of))
+        healthy = server.dynamic_market_pool_health(
+            "us",
+            coverage,
+            {"requested_count": 300, "quote_count": 294, "realtime_count": 294},
+            scored_count=294,
+            as_of=as_of,
+        )
+        degraded = server.dynamic_market_pool_health(
+            "us",
+            coverage,
+            {"requested_count": 300, "quote_count": 293, "realtime_count": 293},
+            scored_count=293,
+            as_of=as_of,
+        )
+        self.assertEqual(healthy["status"], "healthy")
+        self.assertEqual(degraded["status"], "degraded")
+        self.assertIn("DYNAMIC_SCORE_COVERAGE_BELOW_MINIMUM", degraded["reason_codes"])
+
+    def test_dynamic_pool_without_verifiable_source_time_is_degraded(self) -> None:
+        rows = [
+            {
+                "symbol": f"{index + 1:04d}.HK",
+                "name": f"HK{index + 1:04d}",
+                "source": "fixture_market",
+                "reason": "fixture",
+                "observed_at": "2026-08-21T16:10:00+08:00",
+                "recall_routes": ["liquidity", "momentum", "pullback", "activity", "quality"],
+                "recall_metrics": {
+                    "amount": 100_000_000 + index,
+                    "market_cap": 2_000_000_000 + index,
+                    "volume": 1_000_000 + index,
+                    "change_pct": 1,
+                },
+                "themes": [],
+                "lens": server._dynamic_neutral_lens("hk"),
+                "candidate_lineage": {"universe_origin": server.DYNAMIC_MARKET_ORIGIN},
+            }
+            for index in range(230)
+        ]
+        selected, coverage = server.select_dynamic_market_pool(rows, "hk")
+        coverage.update({"raw_discovery_size": 230, "discovery_pagination_complete": True})
+        coverage.update(server._dynamic_source_time_coverage(selected, "hk"))
+
+        health = server.dynamic_market_pool_health(
+            "hk",
+            coverage,
+            {"requested_count": 200, "quote_count": 200, "realtime_count": 200},
+            scored_count=200,
+        )
+
+        self.assertEqual(health["status"], "degraded")
+        self.assertIn("DYNAMIC_DISCOVERY_SOURCE_TIME_UNAVAILABLE", health["reason_codes"])
+
+    def test_dynamic_source_failure_never_backfills_the_legacy_static_pool(self) -> None:
+        unavailable = {
+            "discovery_source": "fixture unavailable",
+            "discovery_retrieved_at": "2026-08-23T10:00:00+08:00",
+            "discovery_source_as_of": None,
+            "discovery_reported_total": None,
+            "discovery_requested_pages": 10,
+            "discovery_completed_pages": 0,
+            "discovery_pagination_complete": False,
+            "raw_discovery_size": 0,
+            "excluded_counts": {},
+        }
+        with (
+            mock.patch.object(server, "_fetch_eastmoney_dynamic_rows", return_value=([], unavailable)),
+            mock.patch.object(server, "_fetch_sina_hk_dynamic_rows", return_value=([], unavailable)),
+            mock.patch.object(server, "_load_dynamic_market_cache", return_value=None),
+            mock.patch.object(server, "market_universe", side_effect=AssertionError("static pool used")),
+        ):
+            selected, coverage = server.load_dynamic_market_pool("hk")
+
+        self.assertEqual(selected, [])
+        self.assertEqual(coverage["recall_selected_size"], 0)
+        self.assertEqual(coverage["universe_origin"], server.DYNAMIC_MARKET_ORIGIN)
+
+    def test_friday_dynamic_cache_remains_session_valid_on_monday_premarket(self) -> None:
+        friday_source = dt.datetime.fromisoformat("2026-08-21T16:00:00+08:00")
+        monday_premarket = dt.datetime.fromisoformat("2026-08-24T08:00:00+08:00")
+        candidates = [
+            {
+                "symbol": f"{index + 1:04d}.HK",
+                "name": f"HK{index + 1:04d}",
+                "source": "fixture",
+                "recall_metrics": {"source_timestamp": int(friday_source.timestamp())},
+                "candidate_lineage": {"universe_origin": server.DYNAMIC_MARKET_ORIGIN},
+            }
+            for index in range(200)
+        ]
+        payload = {
+            "markets": {
+                "hk": {
+                    "cached_at": friday_source.isoformat(),
+                    "candidates": candidates,
+                    "coverage": {"recall_target": 200, "recall_selected_size": 200},
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_path = pathlib.Path(temporary) / "hk_us_dynamic_recall.json"
+            cache_path.write_text(json.dumps(payload), encoding="utf-8")
+            with (
+                mock.patch.object(server, "DYNAMIC_MARKET_CACHE", cache_path),
+                mock.patch.object(server, "now_cn", return_value=monday_premarket),
+            ):
+                loaded = server._load_dynamic_market_cache("hk")
+
+        self.assertIsNotNone(loaded)
+        cached_rows, coverage = loaded
+        self.assertEqual(len(cached_rows), 200)
+        self.assertEqual(coverage["universe_origin"], server.DYNAMIC_MARKET_CACHE_ORIGIN)
+        self.assertEqual(coverage["selected_source_fresh_coverage"], 1.0)
+
+    def test_dynamic_market_amount_and_cap_use_within_market_percentiles(self) -> None:
+        rows = [
+            {"recall_metrics": {"amount": 10, "market_cap": 100}},
+            {"recall_metrics": {"amount": 20, "market_cap": 300}},
+            {"recall_metrics": {"amount": 30, "market_cap": 200}},
+        ]
+
+        server.attach_dynamic_market_percentiles(rows)
+
+        self.assertEqual([row["market_liquidity_percentile"] for row in rows], [0.0, 0.5, 1.0])
+        self.assertEqual([row["market_cap_percentile"] for row in rows], [0.0, 1.0, 0.5])
+
+    def test_dynamic_pagination_rejects_duplicate_page_signatures(self) -> None:
+        self.assertFalse(
+            server._dynamic_page_signatures_are_unique(
+                {"liquidity": {1: ("AAA", "BBB"), 2: ("AAA", "BBB")}}
+            )
+        )
+        self.assertTrue(
+            server._dynamic_page_signatures_are_unique(
+                {"liquidity": {1: ("AAA", "BBB"), 2: ("CCC", "DDD")}}
+            )
+        )
+
+    def test_degraded_dynamic_pool_blocks_market_recommendation(self) -> None:
+        decision = server.make_serenity_decision(
+            [decision_ready_candidate("NVDA")],
+            "us",
+            quote_health={"status": "available", "quote_coverage": 1.0, "realtime_coverage": 1.0},
+            pool_health={"status": "degraded", "reason_codes": ["DYNAMIC_RECALL_TARGET_NOT_MET"]},
+        )
+        self.assertEqual(decision["action"], "NO_TRADE")
+        self.assertIn("POOL_COVERAGE_INSUFFICIENT", decision["blocker_codes"])
 
     def test_partial_hk_us_quote_coverage_blocks_market_recommendation(self) -> None:
         candidate = decision_ready_candidate("NVDA")
@@ -445,9 +724,11 @@ class SelectorV2Tests(unittest.TestCase):
                 "fetched_at": "2026-08-21T22:00:05+08:00",
             }
         }
+        current_kline = fixture_kline(40)
+        current_kline[-1] = {**current_kline[-1], "date": "2026-08-21"}
         with (
             mock.patch.object(server, "yahoo_realtime_quotes", return_value=live),
-            mock.patch.object(server, "yahoo_kline_map", return_value={"AAA": fixture_kline(40)}),
+            mock.patch.object(server, "yahoo_kline_map", return_value={"AAA": current_kline}),
             mock.patch.object(server.time, "sleep"),
         ):
             scored = server.score_serenity_candidates("us", universe)
@@ -457,6 +738,53 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertEqual(scored["quote_health"]["quote_count"], 1)
         self.assertEqual(scored["quote_health"]["realtime_count"], 1)
         self.assertEqual(scored["quote_health"]["quote_coverage"], 0.5)
+
+    def test_hk_us_live_daily_kline_rejects_multi_session_stale_rows(self) -> None:
+        stale_rows = fixture_kline(40)
+        stale_rows[-1] = {**stale_rows[-1], "date": "2026-08-18"}
+        as_of = dt.datetime.fromisoformat("2026-08-21T22:00:00+08:00")
+
+        with (
+            mock.patch.object(server, "yahoo_chart_kline", return_value=stale_rows) as fetch,
+            mock.patch.object(server, "_load_hk_us_kline_cache", return_value={}),
+            mock.patch.object(server, "_save_hk_us_kline_cache") as save_cache,
+        ):
+            result = server.yahoo_kline_map(
+                ["AAA"], 90, "us", as_of=as_of
+            )
+
+        self.assertEqual(result, {})
+        self.assertEqual(fetch.call_count, 3)
+        save_cache.assert_called_once_with("us", {})
+
+    def test_hk_us_stale_history_fallback_does_not_count_as_scored(self) -> None:
+        stale_rows = fixture_kline(40)
+        stale_rows[-1] = {**stale_rows[-1], "date": "2026-08-18"}
+        as_of = dt.datetime.fromisoformat("2026-08-21T22:00:00+08:00")
+        universe = [{"symbol": "AAA", "name": "AAA", "themes": [], "lens": {}}]
+        live = {
+            "AAA": {
+                "price": 12.0,
+                "change_pct": 1.0,
+                "session": "regular",
+                "session_label": "盘中",
+                "source": "Yahoo 1m includePrePost",
+                "source_as_of": "2026-08-21T22:00:00+08:00",
+                "fetched_at": "2026-08-21T22:00:05+08:00",
+            }
+        }
+
+        with (
+            mock.patch.object(server, "now_cn", return_value=as_of),
+            mock.patch.object(server, "yahoo_realtime_quotes", return_value=live),
+            mock.patch.object(server, "yahoo_kline_map", return_value={}),
+            mock.patch.object(server, "cached_market_kline", return_value=stale_rows),
+        ):
+            scored = server.score_serenity_candidates("us", universe)
+
+        self.assertEqual(scored["candidates"], [])
+        self.assertEqual(scored["scored_size"], 0)
+        self.assertEqual(scored["quote_health"]["quote_count"], 0)
 
     def test_yahoo_quote_freshness_uses_exchange_session_and_regular_latency(self) -> None:
         as_of = dt.datetime.fromisoformat("2026-08-21T10:00:00+08:00")
@@ -496,6 +824,8 @@ class SelectorV2Tests(unittest.TestCase):
             "CCC.HK": {"price": 0, "change_pct": 1, "session": "regular", "session_label": "盘中", "source_as_of": "2026-08-21T09:55:00+08:00"},
         }
         klines = {symbol: fixture_kline(40) for symbol in ("AAA.HK", "BBB.HK", "CCC.HK")}
+        for rows in klines.values():
+            rows[-1] = {**rows[-1], "date": "2026-08-21"}
         with (
             mock.patch.object(server, "now_cn", return_value=dt.datetime.fromisoformat("2026-08-21T10:00:00+08:00")),
             mock.patch.object(server, "yahoo_realtime_quotes", return_value=live),
@@ -781,8 +1111,36 @@ class SelectorV2Tests(unittest.TestCase):
                 mock.patch.object(server, "index_quotes", return_value={"items": [], "risk": "unknown"}),
                 mock.patch.object(server, "industry_heat", return_value={"top": [], "total": 0}),
                 mock.patch.object(server, "score_candidates", return_value=scored),
-                mock.patch.object(server, "market_universe", return_value=[]),
-                mock.patch.object(server, "score_serenity_candidates", return_value={"candidates": [], "raw_pool_size": 0, "scored_size": 0}),
+                mock.patch.object(
+                    server,
+                    "load_dynamic_market_pool",
+                    side_effect=lambda market, **_kwargs: (
+                        [],
+                        {
+                            "universe_origin": server.DYNAMIC_MARKET_ORIGIN,
+                            "recall_target": 200 if market == "hk" else 300,
+                            "recall_selected_size": 0,
+                            "recall_shortfall": 200 if market == "hk" else 300,
+                            "eligible_discovery_size": 0,
+                            "min_eligible_discovery_size": 210 if market == "hk" else 315,
+                            "raw_discovery_size": 0,
+                            "discovery_pagination_complete": False,
+                            "route_counts": {},
+                            "recall_manifest": [],
+                            "source_counts": {},
+                        },
+                    ),
+                ) as load_dynamic_pool,
+                mock.patch.object(
+                    server,
+                    "score_serenity_candidates",
+                    return_value={"candidates": [], "raw_pool_size": 0, "scored_size": 0},
+                ) as score_dynamic_pool,
+                mock.patch.object(
+                    server,
+                    "dynamic_market_pool_health",
+                    wraps=server.dynamic_market_pool_health,
+                ) as dynamic_pool_health,
                 mock.patch.object(
                     server,
                     "market_context_from_benchmark",
@@ -802,6 +1160,13 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertEqual(snapshot["markets"]["a_share"]["decision"]["action"], "NO_TRADE")
         self.assertEqual(snapshot["markets"]["a_share"]["pool_health"]["status"], "degraded")
         self.assertEqual(set(snapshot["markets"]), {"a_share", "hk", "us"})
+        hk_us_anchors = [
+            call.kwargs.get("as_of")
+            for patched in (load_dynamic_pool, score_dynamic_pool, dynamic_pool_health)
+            for call in patched.call_args_list
+        ]
+        self.assertEqual(len(hk_us_anchors), 6)
+        self.assertTrue(all(anchor is hk_us_anchors[0] for anchor in hk_us_anchors))
 
     def test_zero_broad_pool_forces_degraded_no_trade(self) -> None:
         health = server.a_share_pool_health(

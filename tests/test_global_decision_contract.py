@@ -5,7 +5,7 @@ import unittest
 
 import server
 from scripts.validate_snapshot import validate_snapshot
-from tests.test_snapshot_contract import snapshot_fixture
+from tests.test_snapshot_contract import dynamic_hk_us_snapshot_fixture, snapshot_fixture
 
 
 def valid_no_pick_snapshot() -> dict:
@@ -13,7 +13,7 @@ def valid_no_pick_snapshot() -> dict:
 
 
 def valid_executable_snapshot() -> dict:
-    snapshot = valid_no_pick_snapshot()
+    snapshot = dynamic_hk_us_snapshot_fixture()
     model = snapshot["analysis_models"]["ten_day_return"]
     model.update(
         {
@@ -25,10 +25,14 @@ def valid_executable_snapshot() -> dict:
             "probability": 0.63,
         }
     )
-    for section in snapshot["markets"].values():
-        section["stats"]["universe_origin"] = "dynamic_snapshot"
+    for market_key, section in snapshot["markets"].items():
+        section["stats"]["universe_origin"] = (
+            "dynamic_snapshot" if market_key == "a_share" else server.DYNAMIC_MARKET_ORIGIN
+        )
         section["market_regime"] = {"state": "trend_risk_on"}
-        section["pool_health"] = {"state": "READY", "reason_codes": []}
+        section.setdefault("pool_health", {}).update(
+            {"status": "healthy", "reason_codes": []}
+        )
         section["quote_health"] = {
             **section.get("quote_health", {}),
             "status": "available",
@@ -74,9 +78,11 @@ def executable_builder_input() -> dict:
     predictions = []
     utilities = {"a_share": 0.01, "hk": 0.02, "us": 0.04}
     for market_key, section in snapshot["markets"].items():
-        section["stats"]["universe_origin"] = "dynamic_snapshot"
+        section["stats"]["universe_origin"] = (
+            "dynamic_snapshot" if market_key == "a_share" else server.DYNAMIC_MARKET_ORIGIN
+        )
         section["market_regime"] = {"state": "trend_risk_on"}
-        section["pool_health"] = {"state": "READY", "reason_codes": []}
+        section["pool_health"] = {"status": "healthy", "reason_codes": []}
         section["quote_health"] = {
             **section.get("quote_health", {}),
             "status": "available",

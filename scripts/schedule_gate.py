@@ -41,6 +41,17 @@ RECOVERABLE_SOURCE_REASON_CODES = {
     "YAHOO_QUOTE_PARTIAL",
     "YAHOO_QUOTE_UNAVAILABLE",
     "YAHOO_REALTIME_STALE",
+    "DYNAMIC_DISCOVERY_CACHE_USED",
+    "DYNAMIC_DISCOVERY_PARTIAL",
+    "DYNAMIC_DISCOVERY_STALE",
+    "DYNAMIC_DISCOVERY_SOURCE_TIME_UNAVAILABLE",
+    "DYNAMIC_DISCOVERY_BELOW_MINIMUM",
+    "DYNAMIC_RECALL_TARGET_NOT_MET",
+    "DYNAMIC_RECALL_MANIFEST_INVALID",
+    "DYNAMIC_RECALL_CONTRACT_INCOMPLETE",
+    "DYNAMIC_QUOTE_COVERAGE_BELOW_MINIMUM",
+    "DYNAMIC_SCORE_COVERAGE_BELOW_MINIMUM",
+    "DYNAMIC_REALTIME_COVERAGE_BELOW_MINIMUM",
 }
 MARKET_RECALL_TARGETS = {
     "a_share": 300,
@@ -57,6 +68,9 @@ A_SHARE_DEEP_SCORE_LIMIT = 96
 A_SHARE_MIN_TECHNICAL_SCORE_COVERAGE = 0.98
 A_SHARE_MIN_DEEP_SCORE_COVERAGE = 0.98
 YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
+DYNAMIC_MARKET_ORIGIN = "dynamic_market_snapshot"
+DYNAMIC_HK_US_UNIVERSE_VERSION = "recall-v2-5-dynamic-hk-us"
+DYNAMIC_MARKET_MIN_ELIGIBLE = {"hk": 210, "us": 315}
 
 
 def as_cn_time(value: dt.datetime) -> dt.datetime:
@@ -120,23 +134,26 @@ def snapshot_data_source_recovery_reasons(snapshot: dict) -> list[str]:
     if not isinstance(markets, dict):
         return ["MARKETS_MISSING_OR_INVALID"]
 
-    a_share = markets.get("a_share")
-    a_share = a_share if isinstance(a_share, dict) else {}
-    pool_health = a_share.get("pool_health")
-    pool_health = pool_health if isinstance(pool_health, dict) else {}
-    pool_reason_codes = pool_health.get("reason_codes")
-    published_codes = (
-        {str(code) for code in pool_reason_codes}
-        if isinstance(pool_reason_codes, list)
-        else set()
-    )
-    reasons.extend(sorted(published_codes & RECOVERABLE_SOURCE_REASON_CODES))
-
     for market in ("a_share", "hk", "us"):
         section = markets.get(market)
         if not isinstance(section, dict):
             reasons.append(f"{market.upper()}_MARKET_MISSING_OR_INVALID")
             continue
+        pool_health = section.get("pool_health")
+        pool_health = pool_health if isinstance(pool_health, dict) else {}
+        pool_reason_codes = pool_health.get("reason_codes")
+        published_pool_codes = (
+            {str(code) for code in pool_reason_codes}
+            if isinstance(pool_reason_codes, list)
+            else set()
+        )
+        reasons.extend(sorted(published_pool_codes & RECOVERABLE_SOURCE_REASON_CODES))
+        if market in {"hk", "us"}:
+            origin = str(((section.get("stats") or {}).get("universe_origin") or ""))
+            if origin != DYNAMIC_MARKET_ORIGIN:
+                reasons.append(f"{market.upper()}_DYNAMIC_ORIGIN_UNAVAILABLE")
+            if not pool_health:
+                reasons.append(f"{market.upper()}_POOL_HEALTH_UNKNOWN")
         quote_health = section.get("quote_health")
         if not isinstance(quote_health, dict) or not quote_health:
             reasons.append(f"{market.upper()}_QUOTE_HEALTH_UNKNOWN")
@@ -216,6 +233,71 @@ def snapshot_data_source_recovery_reasons(snapshot: dict) -> list[str]:
             or selected_size < expected_target
         ):
             reasons.append(f"{market.upper()}_POOL_TARGET_NOT_MET")
+        if market in {"hk", "us"}:
+            prefix = market.upper()
+            quote_count = quote_health.get("quote_count")
+            realtime_count = quote_health.get("realtime_count")
+            deep_scored = stats.get("deep_scored_size")
+            eligible_discovery = stats.get("eligible_discovery_size")
+            manifest = stats.get("recall_manifest")
+            manifest_symbols = [
+                str(row.get("symbol") or "").strip().upper()
+                for row in manifest
+                if isinstance(row, dict)
+            ] if isinstance(manifest, list) else []
+            minimum_complete = math.ceil(expected_target * 0.98)
+            pool_status = str(pool_health.get("status") or "").lower()
+            contract_invalid = bool(
+                snapshot.get("universe_version") != DYNAMIC_HK_US_UNIVERSE_VERSION
+                or stats.get("universe_origin") != DYNAMIC_MARKET_ORIGIN
+                or stats.get("discovery_pagination_complete") is not True
+                or not isinstance(eligible_discovery, int)
+                or isinstance(eligible_discovery, bool)
+                or eligible_discovery < DYNAMIC_MARKET_MIN_ELIGIBLE[market]
+                or selected_size != expected_target
+                or len(manifest_symbols) != expected_target
+                or len(set(manifest_symbols)) != expected_target
+                or not all(manifest_symbols)
+                or stats.get("selected_source_fresh_coverage", 0) < 0.98
+                or stats.get("selected_source_fresh_count", 0) < minimum_complete
+                or pool_status not in {"healthy", "degraded"}
+            )
+            if contract_invalid:
+                reasons.append(f"{prefix}_DYNAMIC_CONTRACT_INVALID")
+            quote_shape_invalid = bool(
+                not isinstance(quote_count, int)
+                or isinstance(quote_count, bool)
+                or not isinstance(requested_count, int)
+                or isinstance(requested_count, bool)
+                or requested_count != expected_target
+                or quote_count < minimum_complete
+                or quote_coverage != round(quote_count / expected_target, 4)
+            )
+            if quote_shape_invalid:
+                reasons.append(f"{prefix}_QUOTE_COVERAGE_BELOW_MINIMUM")
+            realtime_shape_invalid = bool(
+                not isinstance(realtime_count, int)
+                or isinstance(realtime_count, bool)
+                or realtime_count < minimum_complete
+                or quote_health.get("realtime_coverage")
+                != (
+                    round(realtime_count / expected_target, 4)
+                    if isinstance(realtime_count, int) and not isinstance(realtime_count, bool)
+                    else -1
+                )
+            )
+            if realtime_shape_invalid:
+                reasons.append(f"{prefix}_REALTIME_COVERAGE_BELOW_MINIMUM")
+            score_shape_invalid = bool(
+                not isinstance(deep_scored, int)
+                or isinstance(deep_scored, bool)
+                or deep_scored < minimum_complete
+                or stats.get("scored_size") != deep_scored
+            )
+            if score_shape_invalid:
+                reasons.append(f"{prefix}_SCORE_COVERAGE_BELOW_MINIMUM")
+            if pool_status != "healthy" or published_pool_codes:
+                reasons.append(f"{prefix}_POOL_HEALTH_DEGRADED")
         if market == "a_share":
             board_counts = stats.get("board_counts")
             if (

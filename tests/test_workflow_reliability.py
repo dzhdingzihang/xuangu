@@ -130,6 +130,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
             "Asia/Shanghai",
             "data_mode=scheduled_snapshot",
             "device_dependency=false",
+            "每次定时或手动快照生成任务",
             "不依赖 Render、Futu OpenD、个人电脑",
             "不是 100% 准点保证",
         ):

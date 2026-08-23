@@ -33,6 +33,20 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("评分与排序不在浏览器重算", self.js)
         self.assertIn('candidate.execution_state === "BLOCKED"', self.js)
 
+    def test_hk_us_dynamic_cross_section_is_visible_without_full_market_overclaim(self) -> None:
+        self.assertIn("dynamic_market_snapshot", self.js)
+        self.assertIn("本轮公开横截面重新筛选", self.js)
+        self.assertIn("动态市场池", self.js)
+        self.assertIn("eligible_discovery_size", self.js)
+        self.assertIn("三市场有界动态召回", self.js)
+        self.assertIn("版本化静态池（旧快照）", self.js)
+        self.assertIn("使用上次健康动态池缓存，本轮没有完成市场重扫", self.js)
+        self.assertIn("这是旧快照的版本化静态池", self.js)
+        self.assertIn('if (origin === "dynamic_market_snapshot")', self.js)
+        self.assertIn('if (origin === "dynamic_market_snapshot_cache")', self.js)
+        self.assertNotIn("只版本化策展池，每轮重新取价和排序", self.js)
+        self.assertNotIn("全市场扫描完整", self.js)
+
     def test_cloud_snapshot_timing_is_visible(self) -> None:
         self.assertIn('id="snapshotAsOf"', self.html)
         self.assertIn('id="nextRefreshTime"', self.html)
