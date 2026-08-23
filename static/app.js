@@ -1387,21 +1387,123 @@ function shadowOutcomeStatus(item) {
   return status === "PENDING" || status === "SETTLED" ? status : "";
 }
 
-function shadowLedgerStats(items = state.history) {
-  return items.reduce((counts, item) => {
-    const status = shadowOutcomeStatus(item);
-    if (status === "PENDING") counts.shadow_pending += 1;
-    if (status === "SETTLED") counts.shadow_settled += 1;
-    return counts;
-  }, { shadow_pending: 0, shadow_settled: 0 });
-}
-
 function shadowOutcomeTag(item) {
   const status = shadowOutcomeStatus(item);
   if (!status) return "";
-  const label = status === "PENDING" ? "研究跟踪 PENDING" : "研究跟踪 SETTLED";
+  const label = status === "PENDING" ? "Shadow·PENDING" : "Shadow·SETTLED";
   const title = "影子研究台账；不计入可执行绩效、胜率或收益";
   return `<span class="status-pill ${status === "SETTLED" ? "primary" : "warning"}" title="${title}">${label}</span>`;
+}
+
+function historyFormalStatus(item) {
+  if (historyKind(item) !== "global_10d_v1") return { code: "LEGACY", label: "Legacy", tone: "muted" };
+  const action = String(item?.global_decision?.action || "").toUpperCase();
+  if (action === "NO_VALID_PICK") return { code: "ABSTAINED", label: "主动放弃", tone: "muted" };
+  if (action !== "REVIEW_EXECUTABLE_PICK" || !item?.global_decision?.primary) {
+    return { code: "INVALID", label: "结算无效", tone: "negative" };
+  }
+  const outcomeStatus = String(item?.outcome?.status || "").toUpperCase();
+  const formalStatus = String(item?.formal_sample_status || "").toUpperCase();
+  const validationStatus = String(item?.outcome_validation?.status || "").toUpperCase();
+  const explicitlyInvalid = item?.outcome_valid === false
+    || item?.outcome?.valid === false
+    || item?.outcome_validation?.valid === false
+    || item?.outcome_validation?.conflict === true
+    || ["INVALID_CONTRACT", "OUTCOME_INVALID", "SETTLED_INVALID"].includes(formalStatus)
+    || ["INVALID", "EXCLUDED", "CONFLICT"].includes(validationStatus);
+  if (explicitlyInvalid) return { code: "INVALID", label: "结算无效", tone: "negative" };
+  if (formalStatus === "SETTLED_VALID"
+    && validationStatus === "VALID"
+    && item?.outcome_validation?.valid === true) {
+    return { code: "SETTLED", label: "可执行·已结算", tone: "positive" };
+  }
+  if (formalStatus === "PENDING" || validationStatus === "PENDING") {
+    return { code: "PENDING", label: "可执行·待结算", tone: "warning" };
+  }
+  if (formalStatus === "MISSING" || validationStatus === "MISSING") {
+    return { code: "MISSING", label: "可执行·缺结算", tone: "warning" };
+  }
+  // Legacy manifests may contain a raw ledger status without the strict
+  // row-level validation contract.  Keep those visible, but never green-light
+  // a settlement merely because its raw status says SETTLED.
+  if (outcomeStatus === "PENDING") return { code: "PENDING", label: "可执行·待结算", tone: "warning" };
+  if (outcomeStatus === "SETTLED") return { code: "UNVERIFIED", label: "已结算·待校验", tone: "warning" };
+  if (!item?.outcome) return { code: "MISSING", label: "可执行·缺结算", tone: "warning" };
+  return { code: "INVALID", label: "结算无效", tone: "negative" };
+}
+
+function historyFormalStatusTag(item) {
+  const status = historyFormalStatus(item);
+  return `<span class="status-pill ${status.tone}" title="正式可执行预测状态；与 Shadow 研究轨独立">${status.label}</span>`;
+}
+
+const HISTORY_PERFORMANCE_METRICS = [
+  { key: "mean_net_return", label: "Top 1 平均净收益", note: "合法可执行样本的十日平均净总回报" },
+  { key: "positive_rate", label: "十日正收益率", note: "R10 > 0 的实际比例" },
+  { key: "top_decile_positive_rate", label: "Top 10% 命中率", note: "校准概率最高十分位的正收益比例" },
+  { key: "selection_rank_ic", label: "历史已选样本 Rank IC", note: "跨历史已选样本的排序相关性" },
+  { key: "brier_score", label: "Brier Score", note: "十日正收益概率的均方误差" },
+  { key: "ece_10bin", label: "ECE（10 桶）", note: "预测概率与实际频率的校准误差" },
+  { key: "expected_shortfall_10pct", label: "10% Expected Shortfall", note: "最差十分位样本的平均净收益" },
+  { key: "settlement_sequence_max_drawdown", label: "结算序列最大回撤", note: "按结算顺序串联，不代表真实组合" },
+  { key: "comparable_sample_count", label: "可比样本数", note: "只统计通过完整合同校验的 SETTLED outcome" },
+];
+
+const HISTORY_PERCENT_METRICS = new Set([
+  "mean_net_return",
+  "positive_rate",
+  "top_decile_positive_rate",
+  "expected_shortfall_10pct",
+  "settlement_sequence_max_drawdown",
+]);
+
+function historyMetricReason(metric) {
+  const reason = String(metric?.reason || "").toUpperCase();
+  const publishedReason = ({
+    NO_VALID_SETTLED_SAMPLE: "没有通过合同校验的已结算样本",
+    MINIMUM_SAMPLE_NOT_MET: "尚未达到最低可靠样本数",
+    RANK_IC_REQUIRES_AT_LEAST_3_SAMPLES: "Rank IC 至少需要 3 个历史已选样本",
+    RANK_IC_ZERO_VARIANCE: "排序分或真实收益没有足够差异",
+  })[reason];
+  if (publishedReason) return publishedReason;
+  if (metric?.reason) return String(metric.reason);
+  return ({
+    NO_SAMPLE: "没有合法可执行结算样本",
+    NOT_APPLICABLE: "当前样本结构不适用",
+    UNAVAILABLE: "服务端未发布该指标合同",
+    INSUFFICIENT_SAMPLE: "样本不足，仅展示早期观察值",
+    READY: "已达到该指标最低样本要求",
+  })[String(metric?.status || "UNAVAILABLE").toUpperCase()] || "指标状态未知";
+}
+
+function historyMetricValue(key, metric) {
+  const hasNumericValue = metric.value !== null && metric.value !== undefined && Number.isFinite(Number(metric.value));
+  const isPublishedZeroSampleCount = key === "comparable_sample_count"
+    && String(metric.status || "").toUpperCase() === "NO_SAMPLE"
+    && hasNumericValue
+    && Number(metric.value) === 0;
+  if (isPublishedZeroSampleCount) return "0";
+  const canDisplay = metric.status === "READY" || metric.status === "INSUFFICIENT_SAMPLE";
+  if (!canDisplay || !hasNumericValue) return "—";
+  const value = Number(metric.value);
+  if (key === "settlement_sequence_max_drawdown") return `${value > 0 ? "−" : ""}${fmt(Math.abs(value) * 100, 2)}%`;
+  if (key === "positive_rate" || key === "top_decile_positive_rate") return `${fmt(value * 100, 2)}%`;
+  if (HISTORY_PERCENT_METRICS.has(key)) return `${value > 0 ? "+" : ""}${fmt(value * 100, 2)}%`;
+  if (key === "comparable_sample_count" || metric.unit === "count") return fmt(value, 0);
+  return fmt(value, 4);
+}
+
+function renderHistoryMetric(definition, metrics, performance) {
+  const metric = metrics?.[definition.key] && typeof metrics[definition.key] === "object"
+    ? metrics[definition.key]
+    : { value: null, n: 0, status: "UNAVAILABLE", reason: "服务端未发布该指标合同" };
+  const status = String(metric.status || "UNAVAILABLE").toUpperCase();
+  const early = status === "INSUFFICIENT_SAMPLE";
+  const statusLabel = ({ READY: "样本达标", INSUFFICIENT_SAMPLE: "早期样本", NO_SAMPLE: "无样本", NOT_APPLICABLE: "不适用", UNAVAILABLE: "不可用" })[status] || "状态未知";
+  const sampleSize = Math.max(0, num(metric.n));
+  const minimum = Math.max(0, num(metric.min_n, num(performance?.minimum_reliable_sample)));
+  const sampleLabel = minimum ? `n=${fmt(sampleSize, 0)} / ${fmt(minimum, 0)}` : `n=${fmt(sampleSize, 0)}`;
+  return `<article class="history-metric-card ${early ? "is-early" : ""}" data-metric-status="${esc(status)}"><header><small>${esc(definition.label)}</small><span class="status-pill ${status === "READY" ? "positive" : early ? "warning" : "muted"}">${esc(statusLabel)}</span></header><strong>${esc(historyMetricValue(definition.key, metric))}</strong><p title="${esc(metric.method || "")}">${esc(definition.note)}</p><footer><span>${esc(sampleLabel)}</span><span>${esc(historyMetricReason(metric))}</span></footer></article>`;
 }
 
 function filteredHistory() {
@@ -1433,15 +1535,17 @@ function historyDetail(item) {
   const rangeNote = summary.estimated_2w_range ? "Legacy 两周规则估计" : summary.estimated_2d_range ? "旧版两日规则估计" : "未保存";
   const globalContract = historyKind(item) === "global_10d_v1";
   const globalPrimary = globalContract ? item.global_decision?.primary : null;
+  const globalAbstained = globalContract && String(item.global_decision?.action || "").toUpperCase() === "NO_VALID_PICK";
+  const headerScope = globalContract ? "跨市场动作" : MARKET_META[state.historyMarket].label;
+  const headerName = globalPrimary?.name || (globalAbstained ? "本轮主动放弃" : summary.name || "本轮无 Legacy 首选");
   const shadowStatus = shadowOutcomeStatus(item);
-  const shadowEvidence = shadowStatus ? `<div class="callout info">${icon("ph-flask")}<div><strong>${shadowStatus === "PENDING" ? "研究跟踪 PENDING" : "研究跟踪 SETTLED"}</strong><br>这是 research_priority 的影子研究台账，仅用于验证研究排序；不计入可执行绩效、胜率或收益。${item.shadow_outcome?.prediction_id ? ` Prediction ID：${esc(item.shadow_outcome.prediction_id)}。` : ""}</div></div>` : "";
-  const officialEvidence = globalPrimary ? `<div class="detail-section"><div class="section-heading"><h3>正式十日预测</h3><span>${esc(item.outcome?.status || "MISSING_OUTCOME")}</span></div><div class="detail-score-grid"><div><small>全局首选</small><strong>${esc(globalPrimary.name || "--")}</strong><span>${esc(globalPrimary.market || "--")} · ${esc(globalPrimary.code || globalPrimary.symbol || "--")}</span></div><div><small>P(R10 &gt; 0)</small><strong>${globalPrimary.probability == null ? "--" : `${fmt(num(globalPrimary.probability) * 100, 1)}%`}</strong><span>已校准模型概率</span></div><div><small>Prediction ID</small><strong class="mono">${esc(globalPrimary.prediction_id || "--")}</strong><span>${esc(globalPrimary.model_id || "--")}</span></div><div><small>Label</small><strong>${esc(globalPrimary.label_version || "--")}</strong><span>结算必须完全匹配</span></div></div></div>` : "";
-  const archiveBadge = `LEGACY ${summary.has_primary ? "BUY" : "NO TRADE"}`;
-  return `<article class="detail-panel history-detail"><header class="detail-header"><div><div class="eyebrow">${historyKindLabel(item)} 档案 · ${esc(itemKey || "--")}</div><h2 class="detail-title">${MARKET_META[state.historyMarket].label} · ${esc(summary.name || "本轮无 Legacy 首选")}</h2><p class="detail-subtitle">信号日 ${esc(item.signal_date || "--")} · ${historyTargetLabel(item)} ${esc(item.target_date || "--")} · 生成 ${esc(dateTime(item.generated_at))}</p></div>${badge(archiveBadge, summary.has_primary ? "warning" : "muted")}</header>
+  const shadowEvidence = shadowStatus ? `<div class="callout info">${icon("ph-flask")}<div><strong>${shadowStatus === "PENDING" ? "Shadow·PENDING" : "Shadow·SETTLED"}</strong><br>这是 research_priority 的影子研究台账，仅用于验证研究排序；不计入可执行绩效、胜率或收益。${item.shadow_outcome?.prediction_id ? ` Prediction ID：${esc(item.shadow_outcome.prediction_id)}。` : ""}</div></div>` : "";
+  const officialEvidence = globalPrimary ? `<div class="detail-section"><div class="section-heading"><h3>正式十日预测</h3>${historyFormalStatusTag(item)}</div><div class="detail-score-grid"><div><small>全局首选</small><strong>${esc(globalPrimary.name || "--")}</strong><span>${esc(globalPrimary.market || "--")} · ${esc(globalPrimary.code || globalPrimary.symbol || "--")}</span></div><div><small>P(R10 &gt; 0)</small><strong>${globalPrimary.probability == null ? "--" : `${fmt(num(globalPrimary.probability) * 100, 1)}%`}</strong><span>已校准模型概率</span></div><div><small>Prediction ID</small><strong class="mono">${esc(globalPrimary.prediction_id || "--")}</strong><span>${esc(globalPrimary.model_id || "--")}</span></div><div><small>Label</small><strong>${esc(globalPrimary.label_version || "--")}</strong><span>结算必须完全匹配</span></div></div></div>` : "";
+  return `<article class="detail-panel history-detail"><header class="detail-header"><div><div class="eyebrow">${historyKindLabel(item)} 档案 · ${esc(itemKey || "--")}</div><h2 class="detail-title">${esc(headerScope)} · ${esc(headerName)}</h2><p class="detail-subtitle">信号日 ${esc(item.signal_date || "--")} · ${historyTargetLabel(item)} ${esc(item.target_date || "--")} · 生成 ${esc(dateTime(item.generated_at))}</p></div><div class="history-row-statuses">${historyFormalStatusTag(item)}${shadowOutcomeTag(item)}</div></header>
     ${officialEvidence}
     ${shadowEvidence}
     <div class="detail-score-grid"><div><small>标的</small><strong>${esc(summary.name || "无")}</strong><span>${esc(summary.code || "--")}</span></div><div><small>Legacy 推荐度</small><strong>${fmt(summary.recommendation_degree ?? summary.confidence, 0)}</strong><span>规则分，非概率</span></div><div><small>参考价</small><strong>${price(summary.entry_price)}</strong><span>当时快照，不代表成交</span></div><div><small>${rangeLabel}</small><strong>${esc(summary.estimated_2w_range || summary.estimated_2d_range || "--")}</strong><span>${rangeNote}</span></div></div>
-    <div class="callout warning">${icon("ph-warning-circle")}<div><strong>${globalContract ? `同日全局动作：${esc(item.global_decision?.action || "--")}；下方为独立 Legacy 市场档案` : "Legacy 规则档案，不属于 global-10d-v1 绩效样本"}</strong><br>快照不含可复现成交、复权退出价、费用与滑点结算，因此不展示“命中率”或伪造收益。</div></div>
+    <div class="callout warning">${icon("ph-warning-circle")}<div><strong>${globalContract ? `同日全局动作：${esc(item.global_decision?.action || "--")}；下方为独立 Legacy 市场档案` : "Legacy 规则档案，不属于 global-10d-v1 绩效样本"}</strong><br>下方 Legacy 记录只保存当时规则证据，因此不展示“命中率”或伪造收益；正式收益仅来自上方通过合同校验的外部结算账本。</div></div>
     ${candidate ? `<div class="detail-section"><div class="section-heading"><h3>完整快照证据</h3><span>已载入</span></div>${factorCards(candidate)}<ul class="evidence-list">${(candidate.reasons || []).slice(0, 5).map((reason) => `<li><h4>${esc(reason)}</h4></li>`).join("")}</ul></div>` : `<div class="detail-section"><button class="primary-button" type="button" data-action="load-history" data-key="${esc(item.snapshot_key || item.cache_key)}">${icon("ph-download-simple")}载入完整快照证据</button></div>`}
   </article>`;
 }
@@ -1472,6 +1576,39 @@ function renderLegacyHistory() {
   requestAnimationFrame(() => drawHistoryChart($("#historyChart"), rows.slice().reverse(), state.historyMarket));
 }
 
+function renderShadowResearchPanel(shadowLedger) {
+  const hasField = (field) => Object.prototype.hasOwnProperty.call(shadowLedger, field);
+  const contractPublished = (hasField("raw_prediction_count") || hasField("raw_count"))
+    && (hasField("prediction_count") || hasField("eligible_count"))
+    && ["pending_count", "settled_count", "excluded_count", "included_in_executable_performance"].every(hasField);
+  const rawCount = Math.max(0, num(shadowLedger.raw_prediction_count ?? shadowLedger.raw_count));
+  const predictionCount = Math.max(0, num(shadowLedger.prediction_count ?? shadowLedger.eligible_count));
+  const pendingCount = Math.max(0, num(shadowLedger.pending_count));
+  const settledCount = Math.max(0, num(shadowLedger.settled_count));
+  const excludedCount = Math.max(0, num(shadowLedger.excluded_count));
+  const isolated = shadowLedger.included_in_executable_performance === false;
+  const publishedReturn = shadowLedger.metrics?.mean_net_return ?? shadowLedger.mean_net_return;
+  const returnMetric = publishedReturn && typeof publishedReturn === "object"
+    ? publishedReturn
+    : Number.isFinite(Number(publishedReturn))
+      ? { value: Number(publishedReturn), n: settledCount, status: "READY" }
+      : { value: null, n: settledCount, status: "UNAVAILABLE", reason: "后端未发布 Shadow 聚合收益" };
+  const returnValue = historyMetricValue("mean_net_return", returnMetric);
+  const countValue = (value) => contractPublished ? fmt(value, 0) : "—";
+  const stateCopy = !contractPublished
+    ? "Shadow 研究合同尚未发布；前端不会把缺失字段解释为 0。"
+    : settledCount
+    ? `已有 ${fmt(settledCount, 0)} 个 Shadow 样本完成结算；收益只描述研究排序轨。`
+    : pendingCount
+      ? `${fmt(pendingCount, 0)} 个 Shadow 样本正在等待第 10 个交易日结算。`
+      : excludedCount
+        ? `${fmt(excludedCount, 0)} 条记录未通过当前准入合同，详见后端诊断。`
+        : "当前尚无可进入 Shadow 研究台账的预测。";
+  const ledgerLabel = !contractPublished ? "CONTRACT UNAVAILABLE" : settledCount ? "SHADOW SETTLED" : pendingCount ? "SHADOW PENDING" : "NO SHADOW SAMPLE";
+  const ledgerTone = !contractPublished ? "negative" : settledCount ? "primary" : pendingCount ? "warning" : "muted";
+  return `<section class="panel shadow-evaluation-panel"><header class="panel-header"><div><h3 class="panel-title">Shadow 研究轨</h3><p class="panel-subtitle">只检验 research_priority 的研究排序；不计入可执行绩效、胜率或收益</p></div><span class="status-pill ${ledgerTone}">${ledgerLabel}</span></header><div class="shadow-ledger-grid"><div><small>原始登记</small><strong>${countValue(rawCount)}</strong><span>未按 prediction_id 去重</span></div><div><small>去重研究样本</small><strong>${countValue(predictionCount)}</strong><span>${contractPublished ? `PENDING ${fmt(pendingCount, 0)} · SETTLED ${fmt(settledCount, 0)}` : "合同未发布"}</span></div><div><small>排除记录</small><strong>${countValue(excludedCount)}</strong><span>未通过当前准入合同，详见后端诊断</span></div><div><small>Shadow 平均净收益</small><strong>${esc(returnValue)}</strong><span>${esc(historyMetricReason(returnMetric))}</span></div></div><footer>${icon("ph-flask")}<span>${esc(stateCopy)} ${isolated ? "后端合同明确标记 included_in_executable_performance=false。" : "隔离字段未发布，因此前端不会把它并入正式指标。"}</span></footer></section>`;
+}
+
 function renderHistory() {
   const root = $("#historyView");
   const currentArchive = $("details.history-archive");
@@ -1483,6 +1620,9 @@ function renderHistory() {
   const rows = filteredHistory();
   const selected = selectedHistoryItem(rows);
   const meta = state.historyMeta || {};
+  const performance = meta.performance && typeof meta.performance === "object" ? meta.performance : {};
+  const metrics = performance.metrics && typeof performance.metrics === "object" ? performance.metrics : {};
+  const shadowLedger = meta.shadow_ledger && typeof meta.shadow_ledger === "object" ? meta.shadow_ledger : {};
   const rawRuns = num(meta.raw_run_count, state.history.length);
   const decisionDays = num(meta.decision_day_count, state.history.length);
   const duplicateRuns = num(meta.duplicate_run_count, Math.max(0, rawRuns - decisionDays));
@@ -1492,46 +1632,59 @@ function renderHistory() {
   const noValidPickDays = num(meta.no_valid_pick_day_count);
   const pending = num(meta.pending_settlement_count);
   const settled = num(meta.settled_sample_count);
-  const { shadow_pending, shadow_settled } = shadowLedgerStats(state.history);
+  const invalidOutcome = num(meta.invalid_settlement_count);
   const missingOutcome = num(meta.missing_outcome_count);
   const returned = num(meta.returned_count, state.history.length);
   const hasMore = meta.has_more === true;
-  const performanceMetrics = [
-    ["Top 1 平均净收益", "真实预测结算后计算"],
-    ["Top 10% 命中率", "R10 > 0 的实际比例"],
-    ["Rank IC", "排序与未来收益相关性"],
-    ["Brier Score", "概率预测误差"],
-    ["ECE", "概率校准误差"],
-    ["10% Expected Shortfall", "尾部损失均值"],
-    ["最大回撤", "按真实执行组合"],
-    ["可比样本数", "只统计合法 SETTLED outcome"],
-  ];
-  const coverageSentence = `${fmt(rawRuns, 0)} 次原始运行已合并为 ${fmt(decisionDays, 0)} 个决策日；${fmt(contractDays, 0)} 日属于 global-10d-v1，${fmt(legacyDays, 0)} 日仅为 Legacy 档案。`;
+  const minimumReliableSample = Math.max(0, num(performance.minimum_reliable_sample, 20));
+  const cohortIndependentDays = num(performance.cohort_independent_day_count);
+  const cohortModelId = performance.cohort_model_id ? String(performance.cohort_model_id) : "";
+  const cohortLabelVersion = performance.cohort_label_version ? String(performance.cohort_label_version) : "";
+  const sampleStatus = String(performance.sample_status || "UNAVAILABLE").toUpperCase();
+  const metricsExpandedByDefault = sampleStatus !== "NO_SAMPLE" || !window.matchMedia?.("(max-width: 760px)")?.matches;
+  const comparableMetric = metrics.comparable_sample_count || {};
+  const comparableSampleCount = Number.isFinite(Number(comparableMetric.value)) ? Number(comparableMetric.value) : settled;
+  const performanceState = ({
+    READY: { label: "READY", tone: "positive", title: "十日预测样本已达到最低可靠门槛" },
+    EARLY_SAMPLE: { label: "EARLY SAMPLE", tone: "warning", title: "已有可核验样本，但仍处于早期观察期" },
+    NO_SAMPLE: { label: "NO SAMPLE", tone: "negative", title: "暂无已结算的可执行预测样本" },
+    UNAVAILABLE: { label: "CONTRACT UNAVAILABLE", tone: "negative", title: "历史绩效合同暂不可用" },
+  })[sampleStatus] || { label: sampleStatus || "UNKNOWN", tone: "negative", title: "历史绩效状态无法识别" };
+  const cohortCopy = sampleStatus === "READY"
+    ? `${fmt(comparableSampleCount, 0)} 个合法样本已达到最低可靠门槛 ${fmt(minimumReliableSample, 0)}。`
+    : sampleStatus === "EARLY_SAMPLE"
+      ? `${fmt(comparableSampleCount, 0)} / ${fmt(minimumReliableSample, 0)} 个合法样本；指标只作早期观察，不作为稳定胜率。`
+      : sampleStatus === "NO_SAMPLE"
+        ? (cohortIndependentDays ? `${fmt(cohortIndependentDays, 0)} 个当前模型独立决策日中，待结算 ${fmt(pending, 0)} 个、缺结算 ${fmt(missingOutcome, 0)} 个、无效结算 ${fmt(invalidOutcome, 0)} 个。` : `${fmt(contractDays, 0)} 个正式合同决策日中，主动放弃 ${fmt(noValidPickDays, 0)} 日，因此没有买入预测可结算。`)
+        : "API 尚未发布 history-performance-v1；前端不会用每日归档自行拼算收益。";
+  const cohortSentence = cohortModelId && cohortLabelVersion
+    ? `当前绩效 cohort 为 ${cohortModelId} / ${cohortLabelVersion}，按 target_date 仅保留最晚发布预测。`
+    : "当前尚无可执行模型 cohort；不会用 Legacy 或 Shadow 记录补位。";
+  const coverageSentence = `${fmt(rawRuns, 0)} 次原始运行已合并为 ${fmt(decisionDays, 0)} 个决策日；${fmt(contractDays, 0)} 日属于 global-10d-v1，${fmt(legacyDays, 0)} 日仅为 Legacy 档案。${cohortSentence}`;
   root.innerHTML = `
-    <div class="principle-strip"><span><b>评估原则</b> 原始运行、每日决策、Legacy 档案、shadow research ledger 和 global-10d 预测分开计数；只有合法可执行结算样本才进入收益指标。</span><small class="${settled ? "positive" : "negative"}">当前：${fmt(settled, 0)} 个可执行已结算样本</small></div>
-    <section class="evaluation-not-ready">
-      <div><span class="status-pill ${settled ? "positive" : "negative"}">${settled ? "SETTLED COHORT" : "NO_SETTLED_SAMPLE · 0"}</span><h2>${settled ? "已有可核验的十日预测结算样本" : "暂无已结算的可执行预测样本"}</h2><p>${esc(coverageSentence)}</p><strong>${executable ? `${fmt(executable, 0)} 个可执行预测中，待结算 ${fmt(pending, 0)} 个、缺结算字段 ${fmt(missingOutcome, 0)} 个。` : `${fmt(contractDays, 0)} 个正式合同决策日中，NO_VALID_PICK 为 ${fmt(noValidPickDays, 0)} 日，因此没有买入预测可结算。`}</strong></div>
-      <aside><h3>为什么当前不算收益</h3><ol><li>Legacy 快照不是十日模型预测</li><li>NO_VALID_PICK 是放弃，不是亏损样本</li><li>研究优先项不进入买入分母</li><li>结算必须包含成交、费用与复权口径</li><li>只有 outcome.status = SETTLED 才进入指标</li></ol></aside>
+    <div class="principle-strip"><span><b>评估原则</b> 正式可执行绩效与 Shadow 研究轨完全分开；所有指标只读取后端发布的合法结算合同。</span><small class="${performanceState.tone}">${esc(performance.schema_version || "PERFORMANCE_CONTRACT_MISSING")}</small></div>
+    <section class="evaluation-not-ready is-${esc(sampleStatus.toLowerCase())}">
+      <div><span class="status-pill ${performanceState.tone}">${esc(performanceState.label)}</span>${sampleStatus === "EARLY_SAMPLE" ? `<span class="status-pill warning early-sample-badge">早期样本</span>` : ""}<h2>${esc(performanceState.title)}</h2><p>${esc(coverageSentence)}</p><strong>${esc(cohortCopy)}</strong></div>
+      <aside><h3>正式样本门槛</h3><ol><li>仅限 global-10d-v1 可执行预测</li><li>按不可变 prediction_id 去重</li><li>进出场、费用、复权与日历必须完整</li><li>NO_VALID_PICK 是主动放弃，不计为亏损</li><li>Shadow 研究轨永不进入正式分母</li></ol></aside>
     </section>
     ${renderKpis([
       { icon: "ph-files", label: "原始运行", value: fmt(rawRuns, 0), meta: "全部不可变运行记录" },
       { icon: "ph-calendar-dots", label: "决策日", value: fmt(decisionDays, 0), meta: `已合并 ${fmt(duplicateRuns, 0)} 次日内重复` },
       { icon: "ph-seal-check", label: "正式合同日", value: fmt(contractDays, 0), tone: contractDays ? "primary" : "negative", meta: "global-10d-v1" },
       { icon: "ph-archive", label: "Legacy 历史日", value: fmt(legacyDays, 0), tone: "warning", meta: "仅作规则档案" },
-      { icon: "ph-crosshair", label: "可执行预测", value: fmt(executable, 0), meta: "研究优先项不计入" },
-      { icon: "ph-hourglass", label: "待结算", value: fmt(pending, 0), meta: "明确标记 PENDING" },
+      { icon: "ph-crosshair", label: "可执行预测", value: fmt(executable, 0), meta: `当前 cohort ${fmt(cohortIndependentDays, 0)} 个独立决策日` },
+      { icon: "ph-hourglass", label: "待结算", value: fmt(pending, 0), meta: "正式预测 PENDING" },
       { icon: "ph-check-circle", label: "已结算样本", value: fmt(settled, 0), tone: settled ? "positive" : "negative", meta: "完整 outcome 合同" },
-      { icon: "ph-flask", label: "研究跟踪 PENDING", value: fmt(shadow_pending, 0), tone: "warning", meta: "影子研究台账，不进入绩效" },
-      { icon: "ph-test-tube", label: "研究跟踪 SETTLED", value: fmt(shadow_settled, 0), tone: shadow_settled ? "primary" : "", meta: "不计入可执行绩效、胜率或收益" },
-      { icon: "ph-prohibit", label: "真实放弃日", value: fmt(noValidPickDays, 0), meta: "NO_VALID_PICK 不算亏损" },
+      { icon: "ph-prohibit", label: "主动放弃日", value: fmt(noValidPickDays, 0), meta: "NO_VALID_PICK 不算亏损" },
     ])}
-    <div class="evaluation-tabs" aria-label="评估维度"><button class="is-active" type="button">10日表现</button><button type="button" disabled>概率校准</button><button type="button" disabled>分市场表现</button><button type="button" disabled>版本对比</button><button type="button" disabled>失效分析</button><span>不展示胜率或模拟收益 · 指标只读取合法 SETTLED outcome</span></div>
-    <section class="evaluation-metric-grid">${performanceMetrics.map(([label, note]) => `<article><small>${esc(label)}</small><strong>${settled ? "待聚合" : "无样本"}</strong><p>${esc(note)}</p></article>`).join("")}</section>
+    <div class="evaluation-tabs" aria-label="评估维度"><button class="is-active" type="button">10日表现</button><button type="button" disabled>概率校准</button><button type="button" disabled>分市场表现</button><button type="button" disabled>版本对比</button><button type="button" disabled>失效分析</button><span>真实合同指标 · 非浏览器回填 · 非模拟收益</span></div>
+    <details class="history-metrics-details ${sampleStatus === "NO_SAMPLE" ? "is-no-sample" : ""}" ${metricsExpandedByDefault ? "open" : ""}><summary>${icon("ph-chart-bar")}<span>查看指标定义</span><small>${fmt(HISTORY_PERFORMANCE_METRICS.length, 0)} 项 · ${sampleStatus === "NO_SAMPLE" ? "当前无可计算样本" : performanceState.label}</small>${icon("ph-caret-down")}</summary><section class="evaluation-metric-grid">${HISTORY_PERFORMANCE_METRICS.map((definition) => renderHistoryMetric(definition, metrics, performance)).join("")}</section></details>
+    ${renderShadowResearchPanel(shadowLedger)}
     <section class="panel evaluation-method"><header class="panel-header"><div><h3 class="panel-title">历史检验如何回答“今天买哪只更可能在两周内赚得最多”</h3><p class="panel-subtitle">评估既看收益排序，也看概率是否可信、风险是否可承受</p></div></header><div><article><b>01｜点时数据</b><p>当时可见的价格、财务与事件，禁止未来函数。</p></article><article><b>02｜净总回报</b><p>包含股息、扣除税费、点差、滑点与汇兑成本。</p></article><article><b>03｜概率校准</b><p>检验 P(R10&gt;0) 是否与真实频率一致。</p></article><article><b>04｜失效分析</b><p>按市场、行情状态、成本和事件类型拆解。</p></article></div></section>
     <details class="history-archive" ${state.historyArchiveOpen ? "open" : ""}><summary>${icon("ph-archive")} 查看每日决策快照（${hasMore ? `已载入 ${fmt(returned, 0)} / ` : ""}${fmt(decisionDays, 0)} 个决策日）</summary><div class="history-archive-body">
-      <div class="callout info">${icon("ph-info")}<div><strong>${fmt(rawRuns, 0)} 次原始运行 → ${fmt(decisionDays, 0)} 个每日代表快照</strong><br>同一 target_date 优先展示正式 global-10d 合同，同类保留最后一次运行；绩效样本另按不可变 prediction_id 去重。</div></div>
+      <div class="callout info">${icon("ph-info")}<div><strong>${fmt(rawRuns, 0)} 次原始运行 → ${fmt(decisionDays, 0)} 个每日代表快照</strong><br>同一 target_date 优先展示正式 global-10d 合同，同类保留最后一次运行；绩效另限定当前模型与标签版本，并在每个 target_date 只保留最晚发布的可执行预测。</div></div>
       <div class="filter-strip"><div class="filter-group"><span>市场</span><div class="segmented-button">${MARKET_ORDER.map((market) => `<button data-action="history-market" data-market="${market}" aria-pressed="${state.historyMarket === market}">${MARKET_META[market].label}</button>`).join("")}</div></div><label>动作<select id="historyAction"><option value="all">全部</option><option value="buy">有 Legacy 首选</option><option value="no_trade">不交易</option></select></label><label class="search-field">${icon("ph-magnifying-glass")}<input id="historySearch" type="search" value="${esc(state.historyQuery)}" placeholder="搜索日期 / 公司 / 代码" aria-label="搜索历史"></label></div>
-      <div class="master-detail history-master-detail"><section class="panel"><header class="panel-header"><div><h3 class="panel-title">每日档案列表</h3><p class="panel-subtitle">明确区分信号日、Legacy 归档日、计划执行日、研究跟踪和 global 合同</p></div></header>${rows.length ? `<div class="snapshot-list">${rows.map((item) => { const summary = historyMarketSummary(item); const official = item.global_decision?.primary; const key = item.snapshot_key || item.cache_key; const displayName = official?.name || summary.name || "本轮无 Legacy 首选"; const displayCode = official?.code || official?.symbol || summary.code || summary.message || "无首选"; const displayScore = official ? `${fmt(num(official.probability) * 100, 0)}%` : summary.has_primary ? fmt(summary.recommendation_degree ?? summary.confidence, 0) : "NO"; return `<button class="snapshot-row ${key === state.historyKey ? "is-selected" : ""}" type="button" data-action="select-history" data-key="${esc(key)}"><time>${historyTargetLabel(item, true)} ${esc(item.target_date || "--")}<small>信号 ${esc(item.signal_date || "--")} · ${esc(dateTime(item.generated_at, false))}</small></time><span><b>${esc(displayName)}</b><small>${esc(historyKindLabel(item))} · ${esc(displayCode)} ${shadowOutcomeTag(item)}</small></span><strong>${displayScore}</strong>${icon("ph-caret-right")}</button>`; }).join("")}</div>` : `<div class="empty-state">${icon("ph-funnel-x")}<h3>没有匹配快照</h3></div>`}</section><div>${historyDetail(selected)}</div></div>
+      <div class="master-detail history-master-detail"><section class="panel"><header class="panel-header"><div><h3 class="panel-title">每日档案列表</h3><p class="panel-subtitle">正式预测状态与 Shadow 研究状态独立展示</p></div></header>${rows.length ? `<div class="snapshot-list">${rows.map((item) => { const summary = historyMarketSummary(item); const official = item.global_decision?.primary; const globalAbstained = historyKind(item) === "global_10d_v1" && String(item.global_decision?.action || "").toUpperCase() === "NO_VALID_PICK"; const key = item.snapshot_key || item.cache_key; const displayName = official?.name || (globalAbstained ? "本轮主动放弃" : summary.name || "本轮无 Legacy 首选"); const displayCode = official?.code || official?.symbol || (globalAbstained ? item.global_decision?.blocker_codes?.[0] || "NO_VALID_PICK" : summary.code || summary.message || "无首选"); const displayScore = official ? `${fmt(num(official.probability) * 100, 0)}%` : summary.has_primary && !globalAbstained ? fmt(summary.recommendation_degree ?? summary.confidence, 0) : "NO"; return `<button class="snapshot-row ${key === state.historyKey ? "is-selected" : ""}" type="button" data-action="select-history" data-key="${esc(key)}"><time>${historyTargetLabel(item, true)} ${esc(item.target_date || "--")}<small>信号 ${esc(item.signal_date || "--")} · ${esc(dateTime(item.generated_at, false))}</small></time><span><b>${esc(displayName)}</b><small>${esc(historyKindLabel(item))} · ${esc(displayCode)}</small><span class="history-row-statuses">${historyFormalStatusTag(item)}${shadowOutcomeTag(item)}</span></span><strong>${displayScore}</strong>${icon("ph-caret-right")}</button>`; }).join("")}</div>` : `<div class="empty-state">${icon("ph-funnel-x")}<h3>没有匹配快照</h3></div>`}</section><div>${historyDetail(selected)}</div></div>
     </div></details>`;
   const actionSelect = $("#historyAction");
   if (actionSelect) actionSelect.value = state.historyAction;
@@ -1859,7 +2012,16 @@ function handleClick(event) {
   if (action === "event-market") { state.eventFilters.market = market; renderEvents(); return; }
   if (action === "select-event") { state.eventKey = key; renderEvents(); return; }
   if (action === "history-market") { state.historyMarket = market; state.historyKey = ""; state.historySnapshot = null; state.historySnapshotKey = ""; renderHistory(); return; }
-  if (action === "select-history") { state.historyKey = key; state.historySnapshot = null; state.historySnapshotKey = ""; renderHistory(); return; }
+  if (action === "select-history") {
+    state.historyKey = key;
+    state.historySnapshot = null;
+    state.historySnapshotKey = "";
+    renderHistory();
+    if (window.matchMedia?.("(max-width: 760px)")?.matches) {
+      requestAnimationFrame(() => $(".history-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
+    return;
+  }
   if (action === "load-history") { loadHistorySnapshot(key); return; }
 }
 

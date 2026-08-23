@@ -182,7 +182,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertIn("ledger_present", workflow)
         self.assertIn("archive ledger_present does not match ledger_files", workflow)
         self.assertIn("immutable archive snapshot sha256", workflow)
-        self.assertIn('pathlib.Path("data/outcomes").glob("*.json")', workflow)
+        self.assertIn('pathlib.Path("data/outcomes").rglob("*.json")', workflow)
         self.assertIn('rglob(pattern)', workflow)
         self.assertIn("actions/upload-artifact@v4", workflow)
         self.assertIn("actions/download-artifact@v4", workflow)

@@ -4,9 +4,16 @@ from __future__ import annotations
 import json
 import pathlib
 import shutil
+import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import history_evaluation
+
+
 PUBLIC = ROOT / "public"
 STATIC = ROOT / "static"
 PICKS = ROOT / "data" / "picks"
@@ -69,8 +76,12 @@ def public_outcome(outcome: dict | None) -> dict | None:
         "label_version",
         "sampling_policy",
         "scheduled_slot",
+        "source_snapshot",
         "market",
         "code",
+        "probability",
+        "expected_net_utility",
+        "tail_risk",
         "entry_trade_date",
         "forecast_end_trade_date",
         "horizon_trade_sessions",
@@ -79,6 +90,7 @@ def public_outcome(outcome: dict | None) -> dict | None:
         "calendar_id",
         "calendar_version",
         "currency",
+        "fx_rate_source",
         "entry_at",
         "entry_price",
         "entry_source",
@@ -96,17 +108,39 @@ def public_outcome(outcome: dict | None) -> dict | None:
     return {key: outcome.get(key) for key in keys if key in outcome}
 
 
-def matching_shadow_outcome(pick: dict, outcome_map: dict[str, dict]) -> dict | None:
-    priority = ((pick.get("global_decision") or {}).get("research_priority") or {})
-    prediction_id = priority.get("prediction_id") if isinstance(priority, dict) else None
-    outcome = outcome_map.get(str(prediction_id)) if prediction_id else None
-    return public_outcome(outcome) if outcome and outcome.get("track") == "SHADOW_RESEARCH" else None
+def matching_shadow_outcome(
+    pick: dict,
+    outcome_map: dict[str, dict],
+    source_snapshot: str | None = None,
+) -> dict | None:
+    outcome = history_evaluation.matching_outcome(
+        pick,
+        outcome_map,
+        history_evaluation.SHADOW_TRACK,
+        source_snapshot,
+    )
+    return public_outcome(outcome)
+
+
+def matching_executable_outcome(
+    pick: dict,
+    outcome_map: dict[str, dict],
+    source_snapshot: str | None = None,
+) -> dict | None:
+    outcome = history_evaluation.matching_outcome(
+        pick,
+        outcome_map,
+        history_evaluation.EXECUTABLE_TRACK,
+        source_snapshot,
+    )
+    return public_outcome(outcome)
 
 
 def write_public_pick(
     source: pathlib.Path,
     target: pathlib.Path,
-    outcome_map: dict[str, dict] | None = None,
+    shadow_outcome_map: dict[str, dict] | None = None,
+    executable_outcome_map: dict[str, dict] | None = None,
 ) -> None:
     """Publish JSON without leaking machine-specific research metadata."""
     try:
@@ -114,14 +148,46 @@ def write_public_pick(
     except Exception:
         shutil.copy2(source, target)
         return
+    source_snapshot = (
+        str(pick.get("snapshot_key"))
+        if source.name == "latest.json" and pick.get("snapshot_key")
+        else source.name
+    )
     serenity = ((pick.get("research_runtime") or {}).get("serenity_skill") or {})
     if serenity:
         serenity.pop("path", None)
         serenity["skill_metadata_detected"] = bool(serenity.get("installed"))
         serenity["mode"] = "built-in-lens"
-    shadow_outcome = matching_shadow_outcome(pick, outcome_map or {})
+    shadow_outcome = matching_shadow_outcome(
+        pick,
+        shadow_outcome_map or {},
+        source_snapshot,
+    )
+    pick.pop("shadow_outcome", None)
     if shadow_outcome:
         pick["shadow_outcome"] = shadow_outcome
+    # Formal performance is ledger-authoritative.  A snapshot may contain old
+    # embedded outcome evidence, but it must never be published as a formal
+    # settlement unless the isolated executable ledger joins successfully.
+    pick.pop("ten_day_outcome", None)
+    pick.pop("outcome", None)
+    executable_outcome = matching_executable_outcome(
+        pick,
+        executable_outcome_map or {},
+        source_snapshot,
+    )
+    if executable_outcome:
+        pick["outcome"] = executable_outcome
+    evaluation_row = dict(pick)
+    evaluation_row["cache_key"] = source_snapshot
+    evaluation_row["history_kind"] = (
+        "global_10d_v1"
+        if history_evaluation.is_global_ten_day_decision(pick.get("global_decision"))
+        else "legacy_snapshot"
+    )
+    evaluation = history_evaluation.formal_sample_evaluation(evaluation_row)
+    if evaluation is not None:
+        pick.update(evaluation)
     target.write_text(json.dumps(pick, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -248,10 +314,15 @@ def summarize_global_decision(pick: dict) -> dict | None:
             key: primary.get(key)
             for key in (
                 "prediction_id",
+                "status",
                 "label_version",
                 "market",
                 "code",
                 "name",
+                "entry_trade_date",
+                "forecast_end_trade_date",
+                "calendar_id",
+                "calendar_version",
                 "score_kind",
                 "probability",
                 "expected_net_utility",
@@ -278,40 +349,20 @@ def history_kind(global_decision: dict | None) -> str:
     return "legacy_snapshot"
 
 
-def summarize_outcome(pick: dict) -> dict | None:
-    outcome = pick.get("ten_day_outcome") or pick.get("outcome")
-    if not isinstance(outcome, dict):
-        return None
-    keys = (
-        "status",
-        "prediction_id",
-        "model_id",
-        "label_version",
-        "entry_at",
-        "entry_price",
-        "entry_source",
-        "exit_at",
-        "exit_price",
-        "exit_source",
-        "gross_total_return",
-        "net_total_return",
-        "transaction_cost",
-        "corporate_action_adjusted",
-        "calendar_id",
-        "currency",
-        "fx_rate_source",
-        "positive_label",
-        "settled_at",
-    )
-    summary = {key: outcome.get(key) for key in keys if key in outcome}
-    return summary or None
-
-
-def summarize_pick(path: pathlib.Path, outcome_map: dict[str, dict] | None = None) -> dict | None:
+def summarize_pick(
+    path: pathlib.Path,
+    shadow_outcome_map: dict[str, dict] | None = None,
+    executable_outcome_map: dict[str, dict] | None = None,
+) -> dict | None:
     try:
         pick = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+    source_snapshot = (
+        str(pick.get("snapshot_key"))
+        if path.name == "latest.json" and pick.get("snapshot_key")
+        else path.name
+    )
     legacy_summary = summarize_decision(pick.get("decision") or {})
     raw_global_decision = summarize_global_decision(pick)
     kind = history_kind(raw_global_decision)
@@ -350,10 +401,20 @@ def summarize_pick(path: pathlib.Path, outcome_map: dict[str, dict] | None = Non
         "a_share_legacy": legacy_summary,
         "global_decision": global_decision,
     }
-    outcome = summarize_outcome(pick)
-    if outcome:
-        summary["outcome"] = outcome
-    shadow_outcome = matching_shadow_outcome(pick, outcome_map or {})
+    # Do not admit snapshot-embedded outcomes into formal performance.  Only a
+    # track-aware join from data/outcomes/executable is authoritative.
+    executable_outcome = matching_executable_outcome(
+        pick,
+        executable_outcome_map or {},
+        source_snapshot,
+    )
+    if executable_outcome:
+        summary["outcome"] = executable_outcome
+    shadow_outcome = matching_shadow_outcome(
+        pick,
+        shadow_outcome_map or {},
+        source_snapshot,
+    )
     if shadow_outcome:
         summary["shadow_outcome"] = shadow_outcome
     analysis_models = summarize_analysis_models(pick)
@@ -375,7 +436,7 @@ def summarize_pick(path: pathlib.Path, outcome_map: dict[str, dict] | None = Non
             decision_summary["market_regime"] = regime_summary
             summary["markets"][key] = decision_summary
             summary["market_regimes"][key] = regime_summary
-    return summary
+    return history_evaluation.annotate_formal_sample(summary)
 
 
 def main() -> None:
@@ -391,14 +452,36 @@ def main() -> None:
     for stale in public_picks.glob("*.json"):
         stale.unlink()
 
-    outcome_map = read_outcome_map()
+    outcome_root = ROOT / "data" / "outcomes"
+    shadow_inventory = history_evaluation.load_ledger_inventory(
+        outcome_root,
+        history_evaluation.SHADOW_TRACK,
+    )
+    executable_inventory = history_evaluation.load_ledger_inventory(
+        outcome_root / "executable",
+        history_evaluation.EXECUTABLE_TRACK,
+    )
+    shadow_outcome_map = shadow_inventory["records"]
+    executable_outcome_map = executable_inventory["records"]
     files = []
     summaries = []
+    snapshots = {}
     for path in sorted(PICKS.glob("*.json")):
-        write_public_pick(path, public_picks / path.name, outcome_map)
+        write_public_pick(
+            path,
+            public_picks / path.name,
+            shadow_outcome_map,
+            executable_outcome_map,
+        )
         if path.name != "latest.json":
             files.append(path.name)
-            summary = summarize_pick(path, outcome_map)
+            try:
+                snapshot = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                snapshot = None
+            if isinstance(snapshot, dict):
+                snapshots[path.name] = snapshot
+            summary = summarize_pick(path, shadow_outcome_map, executable_outcome_map)
             if summary:
                 summaries.append(summary)
 
@@ -406,9 +489,18 @@ def main() -> None:
         key=lambda item: f"{item.get('target_date') or ''}{item.get('generated_at') or ''}",
         reverse=True,
     )
-    latest_summary = summarize_pick(PICKS / "latest.json", outcome_map) if (PICKS / "latest.json").is_file() else None
+    latest_summary = (
+        summarize_pick(PICKS / "latest.json", shadow_outcome_map, executable_outcome_map)
+        if (PICKS / "latest.json").is_file()
+        else None
+    )
     latest_summary = latest_summary or {}
-    shadow_outcomes = [item for item in outcome_map.values() if item.get("track") == "SHADOW_RESEARCH"]
+    evaluation = history_evaluation.build_history_evaluation(
+        summaries,
+        snapshots,
+        shadow_inventory,
+        executable_inventory,
+    )
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "schema_version": latest_summary.get("schema_version"),
@@ -420,13 +512,9 @@ def main() -> None:
         "analysis_models": latest_summary.get("analysis_models") or {},
         "files": files,
         "summaries": summaries,
-        "shadow_ledger": {
-            "track": "SHADOW_RESEARCH",
-            "prediction_count": len(shadow_outcomes),
-            "pending_count": sum(1 for item in shadow_outcomes if item.get("status") == "PENDING"),
-            "settled_count": sum(1 for item in shadow_outcomes if item.get("status") == "SETTLED"),
-            "included_in_executable_performance": False,
-        },
+        "history_evaluation": evaluation,
+        "shadow_ledger": evaluation["shadow_ledger"],
+        "executable_ledger": evaluation["executable_ledger"],
     }
     (public_picks / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),

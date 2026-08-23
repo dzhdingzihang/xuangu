@@ -134,23 +134,35 @@ V2 根据 `trend_risk_on / range / risk_off / high_vol / unknown` 使用可解�
 - `entry_session_open_at`
 - `entry_trade_date`
 - `forecast_end_trade_date`
+- `forecast_end_session_close_at`
 - `horizon_sessions=10`
 - `calendar_id` / `calendar_version`
 
 这套规则已经替代“周一到周五等于交易日”的旧逻辑。
 
-## Shadow outcome ledger（研究结果账本）
+## 双轨 outcome ledger（正式绩效与研究验证）
 
-每个满足每日采样策略的稳定 `RESEARCH_ONLY` 研究优先项会写入 `data/outcomes/<prediction_id>.json`，track 固定为 `SHADOW_RESEARCH`。账本与正式可执行模型绩效完全分开：
+历史检验使用两条物理隔离的结果账本，原始 `data/picks/*.json` 始终保持不可变：
 
-- 工作日多时点快照全部保留，但定时绩效账本只在每日末次 `22:47` 主检查点登记一条 `PENDING`；手动运维刷新不登记绩效样本，避免把同日高度相关的盘中快照误当成多个独立样本；
+- 正式轨写入 `data/outcomes/executable/<prediction_id>.json`，`track=EXECUTABLE_MODEL`。只有完整、已校准且通过严格门禁的 `global_decision.primary` 才能登记；所有真实发布的可执行预测按稳定 `prediction_id` 去重，`NO_VALID_PICK`、Legacy 和研究优先项不会进入正式收益分母。
+- 研究轨继续写入 `data/outcomes/<prediction_id>.json`，`track=SHADOW_RESEARCH`。它只验证 `research_priority` 的规则排序价值；工作日多时点快照全部保留，但研究账本只在每日末次 `22:47` 主检查点登记一条 `PENDING`，手动运维刷新不登记研究样本。
+
+两条轨共同遵循：
+
 - 入场采用下一交易日开盘，退出采用第 10 个交易日收盘；
+- 合同同时固化交易所日历给出的真实开盘、收盘时刻；不会用 UTC 午夜伪装成交时间；
 - 退出日尚未完整结束时不会提前结算；
 - 成熟后使用同市场日线，按市场记录成本假设，结算为 `SETTLED`；
 - A 股使用前复权日线，港美使用 Yahoo adjusted close 因子调整的开盘与收盘；
-- 同一 `prediction_id` 幂等更新，不修改原始决策快照。
+- 价格先按 8 位发布精度固化，再据此计算 gross、net 与正收益标签，避免低价股二次舍入造成合法样本被误删；
+- 同一轨内的 `prediction_id` 幂等更新，身份冲突会失败关闭；两条轨使用不同目录，不会串账或覆盖；
+- 已经 `SETTLED` 的记录不会因为后续行情变化而重算。
 
-Shadow 胜率和收益只能描述这条研究优先规则的历史，不得混入 `global_decision.primary` 的生产绩效，也不得用来声称已有校准概率。页面历史 Tab 会单独展示 Shadow 的 PENDING/SETTLED 状态；没有合法样本时显示无样本，不填造 0 胜率。
+页面历史 Tab 的正式指标只读取通过完整合同校验的 `EXECUTABLE_MODEL + SETTLED` 样本。统计 cohort 固定为最新发布的 `(model_id, label_version)`，同一 `target_date` 只保留生成时间最晚的一次可执行预测，因此旧模型和同日重复运行不会把可靠样本数虚高；原始账本仍完整保留供审计。页面展示平均净收益、正收益率、Top 10% 命中率、Brier、ECE、历史已选样本 Rank IC、10% Expected Shortfall 和结算序列最大回撤；总体可靠门槛为 20 个独立决策日，Top 10% 与 Expected Shortfall 另按实际尾部样本数展示，至少 5 个尾部观测才标记达标。样本不足时明确标记“早期样本”，不可用时显示空值而不是伪造 0。这里的 Rank IC 是跨历史已选样本的排序相关性，最大回撤是按结算顺序串联的终值序列，不冒充真实持仓组合。
+
+每条正式历史记录还会发布 `formal_sample_status` 与 `outcome_validation`。只有后端确认 `SETTLED_VALID + VALID` 的记录才能显示绿色“可执行·已结算”；仅有原始 `SETTLED`、身份冲突、算术错误或时点错误都不会进入正式指标，也不会在页面被包装成成功结算。
+
+Shadow 的 PENDING/SETTLED、排除和冲突数量独立展示。旧的手动或本地调试 ledger 若不符合当前采样合同，会保留文件但标记为排除，不计入有效研究样本。
 
 ## 云端定时快照与数据源
 
@@ -174,7 +186,7 @@ Shadow 胜率和收益只能描述这条研究优先规则的历史，不得混�
 GitHub Actions（定时 / 手动）
   → 安装 Python/Node 依赖并运行测试
   → 生成三市场不可变选股快照
-  → 登记/结算 Shadow outcome ledger
+  → 分轨登记/结算正式与 Shadow outcome ledger
   → 校验 schema 与生产合同
   → 构建 public 静态资产和历史 manifest
   → Wrangler 部署 Cloudflare Worker
@@ -241,7 +253,7 @@ GET /api/live?market=us&code=PWR
 
 - `/api/status` 返回快照版本、新鲜度、`snapshot_as_of`、`next_refresh`、主跑/健康补跑检查点、`data_mode=scheduled_snapshot` 和 `device_dependency=false`。
 - `/api/latest` 返回完整快照；`/api/latest-summary` 返回轻量摘要。
-- `/api/history` 默认 `view=daily`，按 `target_date` 合并盘中重复运行，同类保留最后一次；`view=raw` 返回不可变原始运行。绩效和 Shadow 账本另按 `prediction_id` 去重。
+- `/api/history` 默认 `view=daily`，按 `target_date` 合并盘中重复运行，同类保留最后一次；`view=raw` 返回不可变原始运行。`meta.performance`、`meta.executable_ledger` 和 `meta.shadow_ledger` 始终基于完整账本计算，不受页面 limit 或 daily 合并影响。
 - `/api/pick?snapshot=` 是最精确的历史寻址方式；同一天可能有多次快照。
 - `/api/pick?date=` 只返回该日期匹配项；非法日期 400、不存在 404，绝不静默返回 latest。
 - `/api/live` 只是保留 URL 的 scheduled-snapshot 兼容接口，浏览器不调用它。它只返回当前已发布快照中同时保存了正价格、`source_as_of`、`fetched_at` 和成交量单位的可追溯行情；缺少这些来源字段时返回 `SNAPSHOT_QUOTE_UNAVAILABLE`，不会把计划价或 K 线收盘价冒充行情。成功响应固定发布 `data_mode=SCHEDULED_SNAPSHOT`、`provider_class=SCHEDULED_SNAPSHOT`、`is_realtime=false` 和 `realtime_guaranteed=false`；接口名中的 `live` 不代表盘中实时。
@@ -254,7 +266,7 @@ GET /api/live?market=us&code=PWR
 1. **今日答案**：展示 global 正式动作、研究优先项、市场状态、风险和 10 交易日窗口。
 2. **候选池**：展示三市场候选、Legacy/V2/双低边界、来源链、快照行情质量与单股详情。
 3. **事件证据**：区分自动证据、人工待入库与模型信号，并展示扫描状态。
-4. **历史检验**：区分 Legacy 历史、global 合同和 `SHADOW_RESEARCH` 结果；数据异常不会降级成 0 胜率。
+4. **历史检验**：区分 Legacy 历史、主动放弃、正式可执行预测和 `SHADOW_RESEARCH`；展示严格结算后的真实指标、样本门槛与排除原因，数据异常不会降级成 0 胜率。
 5. **模型逻辑**：解释候选召回、因子、去重评分、global 门禁、版本与约两周标签。
 6. **数据健康**：分别监控云端调度、快照时效、市场覆盖、事件管线、数据源完整度与结论可用性。
 
@@ -274,7 +286,7 @@ node --check static/app.js
 npm run check
 ```
 
-生成一次新快照并更新 Shadow 账本：
+生成一次新快照并更新双轨结果账本：
 
 ```bash
 python3 server.py --once --force

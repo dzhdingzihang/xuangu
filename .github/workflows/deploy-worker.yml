@@ -127,11 +127,11 @@ jobs:
             sleep "${sleep_seconds}"
           done
 
-      - name: Update shadow outcome ledger
+      - name: Update isolated outcome ledgers
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
         run: |
-          # Run after generation so the newest research priority is immediately
-          # registered as PENDING while mature predictions settle idempotently.
+          # Run after generation so eligible formal and research predictions are
+          # registered as PENDING while mature outcomes settle idempotently.
           for attempt in 1 2 3; do
             echo "Outcome settlement attempt ${attempt}/3"
             if python scripts/settle_outcomes.py; then
@@ -200,10 +200,9 @@ jobs:
           shutil.copy2(latest_path, target_picks / "latest.json")
           shutil.copy2(immutable_path, target_picks / snapshot_key)
 
-          # The current shadow ledger is stored as one outcome JSON per
-          # prediction.  Keep the name-based glob for compatibility with a
-          # future consolidated ledger file.
-          ledger_candidates = list(pathlib.Path("data/outcomes").glob("*.json"))
+          # Outcome tracks use separate directories. Recursion keeps the legacy
+          # flat Shadow files and the formal executable ledger in the bundle.
+          ledger_candidates = list(pathlib.Path("data/outcomes").rglob("*.json"))
           for pattern in ("*ledger*.json", "*ledger*.jsonl"):
               ledger_candidates.extend(pathlib.Path("data").rglob(pattern))
           ledger_files = []

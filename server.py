@@ -30,6 +30,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+import history_evaluation
+
 from market_calendar import (
     CALENDAR_VERSION,
     calendar_id,
@@ -44,6 +46,8 @@ ROOT = pathlib.Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
+OUTCOMES = CACHE / "outcomes"
+EXECUTABLE_OUTCOMES = OUTCOMES / "executable"
 A_SHARE_KLINE_CACHE = CACHE / "runtime-cache" / "a_share_daily.json"
 DYNAMIC_MARKET_CACHE = CACHE / "runtime-cache" / "hk_us_dynamic_recall.json"
 HK_US_KLINE_CACHE = CACHE / "runtime-cache" / "hk_us_daily.json"
@@ -1885,10 +1889,24 @@ def summarize_history_outcome(pick: dict) -> dict | None:
     if not isinstance(outcome, dict):
         return None
     keys = (
+        "schema_version",
+        "track",
         "status",
         "prediction_id",
         "model_id",
         "label_version",
+        "source_snapshot",
+        "market",
+        "code",
+        "probability",
+        "expected_net_utility",
+        "tail_risk",
+        "entry_trade_date",
+        "forecast_end_trade_date",
+        "horizon_trade_sessions",
+        "entry_policy",
+        "exit_policy",
+        "sampling_policy",
         "entry_at",
         "entry_price",
         "entry_source",
@@ -1900,6 +1918,7 @@ def summarize_history_outcome(pick: dict) -> dict | None:
         "transaction_cost",
         "corporate_action_adjusted",
         "calendar_id",
+        "calendar_version",
         "currency",
         "fx_rate_source",
         "positive_label",
@@ -1909,7 +1928,12 @@ def summarize_history_outcome(pick: dict) -> dict | None:
     return summary or None
 
 
-def summarize_pick(pick: dict) -> dict:
+def summarize_pick(
+    pick: dict,
+    shadow_outcome_map: dict[str, dict] | None = None,
+    executable_outcome_map: dict[str, dict] | None = None,
+    source_snapshot: str | None = None,
+) -> dict:
     legacy_decision = pick.get("decision") or {}
     raw_global = pick.get("global_decision")
     is_global = is_global_ten_day_decision(raw_global)
@@ -1941,16 +1965,31 @@ def summarize_pick(pick: dict) -> dict:
         "global_decision": global_decision if is_global else None,
         "a_share_legacy": summarize_decision(legacy_decision),
     }
-    outcome = summarize_history_outcome(pick)
-    if outcome:
-        summary["outcome"] = outcome
+    # Formal performance is ledger-authoritative. Snapshot-embedded outcomes
+    # remain historical evidence only and cannot enter the executable cohort.
+    executable_outcome = history_evaluation.matching_outcome(
+        pick,
+        executable_outcome_map or {},
+        history_evaluation.EXECUTABLE_TRACK,
+        source_snapshot,
+    )
+    if executable_outcome:
+        summary["outcome"] = summarize_history_outcome({"outcome": executable_outcome})
+    shadow_outcome = history_evaluation.matching_outcome(
+        pick,
+        shadow_outcome_map or {},
+        history_evaluation.SHADOW_TRACK,
+        source_snapshot,
+    )
+    if shadow_outcome:
+        summary["shadow_outcome"] = summarize_history_outcome({"outcome": shadow_outcome})
     markets = pick.get("markets") or {}
     if markets:
         summary["markets"] = {
             key: summarize_decision((section or {}).get("decision") or {})
             for key, section in markets.items()
         }
-    return summary
+    return history_evaluation.annotate_formal_sample(summary)
 
 
 def blocker_level(decision: dict, primary: dict | None = None) -> str:
@@ -1978,74 +2017,16 @@ def latest_decision_days(rows: list[dict]) -> list[dict]:
     return list(by_date.values())
 
 
-def history_metadata(rows: list[dict], days: list[dict], view: str, returned_count: int) -> dict:
+def history_metadata(
+    rows: list[dict],
+    days: list[dict],
+    view: str,
+    returned_count: int,
+    performance: dict | None = None,
+) -> dict:
     contract_days = [row for row in days if row.get("history_kind") == "global_10d_v1"]
     legacy_days = [row for row in days if row.get("history_kind") == "legacy_snapshot"]
-    executable_groups: dict[str, list[dict]] = {}
-    for row in rows:
-        primary = (row.get("global_decision") or {}).get("primary")
-        prediction_id = primary.get("prediction_id") if isinstance(primary, dict) else None
-        if (
-            row.get("history_kind") == "global_10d_v1"
-            and (row.get("global_decision") or {}).get("action") == "REVIEW_EXECUTABLE_PICK"
-            and prediction_id
-        ):
-            executable_groups.setdefault(str(prediction_id), []).append(row)
-    executable = list(executable_groups.values())
-
-    def outcome_status(row: dict) -> str:
-        return str((row.get("outcome") or {}).get("status") or "").upper()
-
-    def valid_settled_outcome(row: dict) -> bool:
-        primary = (row.get("global_decision") or {}).get("primary") or {}
-        outcome = row.get("outcome") or {}
-        if outcome_status(row) != "SETTLED":
-            return False
-        try:
-            generated_at = _parse_iso_moment(row.get("generated_at"))
-            entry_at = _parse_iso_moment(outcome.get("entry_at"))
-            exit_at = _parse_iso_moment(outcome.get("exit_at"))
-            settled_at = _parse_iso_moment(outcome.get("settled_at"))
-            forecast_end = dt.datetime.combine(
-                dt.date.fromisoformat(str(row.get("forecast_end_date") or "")), dt.time.min, tzinfo=CN_TZ
-            )
-        except (TypeError, ValueError):
-            return False
-        numeric_fields = ("entry_price", "exit_price", "gross_total_return", "net_total_return", "transaction_cost")
-        valid_numbers = all(
-            isinstance(outcome.get(key), (int, float))
-            and not isinstance(outcome.get(key), bool)
-            and math.isfinite(outcome[key])
-            for key in numeric_fields
-        )
-        string_fields = ("entry_source", "exit_source", "calendar_id", "currency", "fx_rate_source")
-        valid_strings = all(isinstance(outcome.get(key), str) and bool(outcome[key]) for key in string_fields)
-        positive_label = outcome.get("positive_label")
-        net_total_return = outcome.get("net_total_return")
-        return bool(
-            primary.get("prediction_id")
-            and outcome.get("prediction_id") == primary.get("prediction_id")
-            and primary.get("model_id")
-            and outcome.get("model_id") == primary.get("model_id")
-            and primary.get("label_version")
-            and outcome.get("label_version") == primary.get("label_version")
-            and valid_numbers
-            and outcome.get("entry_price", 0) > 0
-            and outcome.get("exit_price", 0) > 0
-            and outcome.get("transaction_cost", -1) >= 0
-            and valid_strings
-            and isinstance(outcome.get("corporate_action_adjusted"), bool)
-            and isinstance(positive_label, bool)
-            and positive_label == (net_total_return > 0)
-            and generated_at
-            and entry_at
-            and exit_at
-            and settled_at
-            and entry_at >= generated_at
-            and exit_at >= forecast_end
-            and settled_at >= exit_at
-        )
-
+    performance = performance or history_evaluation.evaluate_formal_performance(rows)
     selected_count = len(rows) if view == "raw" else len(days)
     return {
         "view": view,
@@ -2057,29 +2038,30 @@ def history_metadata(rows: list[dict], days: list[dict], view: str, returned_cou
         "no_valid_pick_day_count": sum(
             1 for row in contract_days if (row.get("global_decision") or {}).get("action") == "NO_VALID_PICK"
         ),
-        "executable_prediction_count": len(executable),
-        "pending_settlement_count": sum(
-            1
-            for group in executable
-            if not any(valid_settled_outcome(row) for row in group)
-            and any(outcome_status(row) == "PENDING" for row in group)
-        ),
-        "settled_sample_count": sum(
-            1 for group in executable if any(valid_settled_outcome(row) for row in group)
-        ),
-        "missing_outcome_count": sum(
-            1
-            for group in executable
-            if not any(valid_settled_outcome(row) for row in group)
-            and not any(outcome_status(row) == "PENDING" for row in group)
-        ),
+        "executable_prediction_count": int(performance.get("executable_prediction_count") or 0),
+        "pending_settlement_count": int(performance.get("pending_settlement_count") or 0),
+        "settled_sample_count": int(performance.get("settled_sample_count") or 0),
+        "invalid_settlement_count": int(performance.get("invalid_settlement_count") or 0),
+        "missing_outcome_count": int(performance.get("missing_outcome_count") or 0),
+        "performance": performance,
         "returned_count": returned_count,
         "has_more": selected_count > returned_count,
     }
 
 
 def history_payload(limit: int = 30, view: str = "daily") -> dict:
+    shadow_inventory = history_evaluation.load_ledger_inventory(
+        OUTCOMES,
+        history_evaluation.SHADOW_TRACK,
+    )
+    executable_inventory = history_evaluation.load_ledger_inventory(
+        EXECUTABLE_OUTCOMES,
+        history_evaluation.EXECUTABLE_TRACK,
+    )
+    shadow_outcome_map = shadow_inventory["records"]
+    executable_outcome_map = executable_inventory["records"]
     rows = []
+    snapshots = {}
     for path in PICKS.glob("*.json"):
         parsed = parse_cache_name(path)
         if not parsed:
@@ -2088,7 +2070,13 @@ def history_payload(limit: int = 30, view: str = "daily") -> dict:
             pick = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        summary = summarize_pick(pick)
+        snapshots[path.name] = pick
+        summary = summarize_pick(
+            pick,
+            shadow_outcome_map,
+            executable_outcome_map,
+            path.name,
+        )
         summary["cache_key"] = path.name
         rows.append(summary)
     rows.sort(key=lambda item: (item.get("target_date") or "", item.get("generated_at") or ""), reverse=True)
@@ -2096,20 +2084,30 @@ def history_payload(limit: int = 30, view: str = "daily") -> dict:
     view = "raw" if view == "raw" else "daily"
     selected_rows = rows if view == "raw" else days
     history = selected_rows[:limit]
+    evaluation = history_evaluation.build_history_evaluation(
+        rows,
+        snapshots,
+        shadow_inventory,
+        executable_inventory,
+    )
 
     latest = None
     latest_path = PICKS / "latest.json"
     if latest_path.exists():
         try:
             latest_pick = json.loads(latest_path.read_text(encoding="utf-8"))
-            latest = summarize_pick(latest_pick)
+            latest = summarize_pick(latest_pick, shadow_outcome_map, executable_outcome_map)
         except Exception:
             latest = None
+    meta = history_metadata(rows, days, view, len(history), evaluation["performance"])
+    meta["shadow_ledger"] = evaluation["shadow_ledger"]
+    meta["executable_ledger"] = evaluation["executable_ledger"]
     return {
         "ok": True,
         "time": now_cn().isoformat(timespec="seconds"),
         "latest": latest,
-        "meta": history_metadata(rows, days, view, len(history)),
+        "meta": meta,
+        "history_evaluation": evaluation,
         "history": history,
     }
 

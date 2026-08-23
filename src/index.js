@@ -422,6 +422,15 @@ function summarizePick(pick) {
   if (pick.shadow_outcome && typeof pick.shadow_outcome === "object") {
     summary.shadow_outcome = pick.shadow_outcome;
   }
+  // Public pick assets only retain outcomes that were joined from the isolated
+  // executable ledger during the build, so this is safe to expose here.
+  if (pick.outcome && typeof pick.outcome === "object") {
+    summary.outcome = pick.outcome;
+  }
+  if (pick.formal_sample_status) summary.formal_sample_status = pick.formal_sample_status;
+  if (pick.outcome_validation && typeof pick.outcome_validation === "object") {
+    summary.outcome_validation = pick.outcome_validation;
+  }
   if (pick.markets) {
     summary.markets = Object.fromEntries(
       Object.entries(pick.markets).map(([key, section]) => [key, summarizeDecision((section && section.decision) || {})]),
@@ -485,7 +494,28 @@ function validSettledOutcome(row) {
   );
 }
 
-function historyMetadata(rows, days, view, returnedCount) {
+function emptyPerformance() {
+  return {
+    schema_version: null,
+    cohort: null,
+    sample_status: "UNAVAILABLE",
+    reason: "HISTORY_PERFORMANCE_CONTRACT_UNAVAILABLE",
+    minimum_reliable_sample: 20,
+    sample_count: null,
+    metrics: {},
+  };
+}
+
+function emptyLedger(track, includedInExecutablePerformance) {
+  return {
+    track,
+    contract_status: "UNAVAILABLE",
+    reason: "HISTORY_LEDGER_CONTRACT_UNAVAILABLE",
+    included_in_executable_performance: includedInExecutablePerformance,
+  };
+}
+
+function historyMetadata(rows, days, view, returnedCount, evaluation = null) {
   const contractDays = days.filter((row) => historyKind(row) === "global_10d_v1");
   const legacyDays = days.filter((row) => historyKind(row) === "legacy_snapshot");
   const executableGroups = new Map();
@@ -504,6 +534,20 @@ function historyMetadata(rows, days, view, returnedCount) {
   const executable = [...executableGroups.values()];
   const outcomeStatus = (row) => String(row.outcome?.status || "").toUpperCase();
   const selectedCount = view === "raw" ? rows.length : days.length;
+  const fallbackCounts = {
+    executable_prediction_count: executable.length,
+    pending_settlement_count: executable.filter((group) =>
+      !group.some(validSettledOutcome) && group.some((row) => outcomeStatus(row) === "PENDING")).length,
+    settled_sample_count: executable.filter((group) => group.some(validSettledOutcome)).length,
+    invalid_settlement_count: 0,
+    missing_outcome_count: executable.filter((group) =>
+      !group.some(validSettledOutcome) && !group.some((row) => outcomeStatus(row) === "PENDING")).length,
+  };
+  const hasPrebuiltPerformance = Boolean(evaluation?.performance && typeof evaluation.performance === "object");
+  const performance = hasPrebuiltPerformance ? evaluation.performance : emptyPerformance();
+  const count = (key) => hasPrebuiltPerformance && Number.isInteger(performance[key]) && performance[key] >= 0
+    ? performance[key]
+    : fallbackCounts[key];
   return {
     view,
     raw_run_count: rows.length,
@@ -512,12 +556,18 @@ function historyMetadata(rows, days, view, returnedCount) {
     global_contract_day_count: contractDays.length,
     legacy_day_count: legacyDays.length,
     no_valid_pick_day_count: contractDays.filter((row) => row.global_decision?.action === "NO_VALID_PICK").length,
-    executable_prediction_count: executable.length,
-    pending_settlement_count: executable.filter((group) =>
-      !group.some(validSettledOutcome) && group.some((row) => outcomeStatus(row) === "PENDING")).length,
-    settled_sample_count: executable.filter((group) => group.some(validSettledOutcome)).length,
-    missing_outcome_count: executable.filter((group) =>
-      !group.some(validSettledOutcome) && !group.some((row) => outcomeStatus(row) === "PENDING")).length,
+    executable_prediction_count: count("executable_prediction_count"),
+    pending_settlement_count: count("pending_settlement_count"),
+    settled_sample_count: count("settled_sample_count"),
+    invalid_settlement_count: count("invalid_settlement_count"),
+    missing_outcome_count: count("missing_outcome_count"),
+    performance,
+    shadow_ledger: evaluation?.shadow_ledger && typeof evaluation.shadow_ledger === "object"
+      ? evaluation.shadow_ledger
+      : emptyLedger("SHADOW_RESEARCH", false),
+    executable_ledger: evaluation?.executable_ledger && typeof evaluation.executable_ledger === "object"
+      ? evaluation.executable_ledger
+      : emptyLedger("EXECUTABLE_MODEL", true),
     returned_count: returnedCount,
     has_more: selectedCount > returnedCount,
   };
@@ -741,7 +791,8 @@ async function handleApi(request, env) {
       ok: true,
       time: nowCN(),
       latest: latest ? summarizePick(latest) : null,
-      meta: historyMetadata(rows, days, view, history.length),
+      meta: historyMetadata(rows, days, view, history.length, manifest.history_evaluation),
+      history_evaluation: manifest.history_evaluation || null,
       history,
     });
   }

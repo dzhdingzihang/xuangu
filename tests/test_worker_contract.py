@@ -579,6 +579,10 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(payload.meta.no_valid_pick_day_count, 1);
             assert.equal(payload.meta.executable_prediction_count, 0);
             assert.equal(payload.meta.settled_sample_count, 0);
+            assert.equal(payload.meta.performance.sample_status, "UNAVAILABLE");
+            assert.equal(payload.meta.performance.schema_version, null);
+            assert.equal(payload.meta.shadow_ledger.contract_status, "UNAVAILABLE");
+            assert.equal(payload.meta.shadow_ledger.raw_count, undefined);
 
             const rawResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/history?view=raw&limit=2"),
@@ -590,6 +594,43 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(rawPayload.meta.raw_run_count, 4);
             assert.equal(rawPayload.meta.returned_count, 2);
             assert.equal(rawPayload.meta.has_more, true);
+
+            manifest.history_evaluation = {{
+              schema_version: "history-evaluation-v1",
+              performance: {{
+                schema_version: "history-performance-v1",
+                sample_status: "EARLY_SAMPLE",
+                executable_prediction_count: 7,
+                pending_settlement_count: 2,
+                settled_sample_count: 3,
+                invalid_settlement_count: 1,
+                missing_outcome_count: 1,
+                metrics: {{ mean_net_return: {{ value: 0.025, n: 3 }} }},
+              }},
+              shadow_ledger: {{
+                track: "SHADOW_RESEARCH", raw_count: 9, eligible_count: 4,
+                pending_count: 3, settled_count: 1, excluded_count: 5,
+                conflict_count: 0, included_in_executable_performance: false,
+              }},
+              executable_ledger: {{
+                track: "EXECUTABLE_MODEL", raw_count: 7, eligible_count: 5,
+                pending_count: 2, settled_count: 3, excluded_count: 1,
+                conflict_count: 1, included_in_executable_performance: true,
+              }},
+            }};
+            const evaluatedResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/history?limit=1"), env,
+            );
+            const evaluatedPayload = await evaluatedResponse.json();
+            assert.equal(evaluatedPayload.history.length, 1);
+            assert.equal(evaluatedPayload.meta.executable_prediction_count, 7);
+            assert.equal(evaluatedPayload.meta.settled_sample_count, 3);
+            assert.equal(evaluatedPayload.meta.performance.metrics.mean_net_return.value, 0.025);
+            assert.equal(evaluatedPayload.meta.shadow_ledger.raw_count, 9);
+            assert.equal(evaluatedPayload.meta.shadow_ledger.pending_count, 3);
+            assert.equal(evaluatedPayload.meta.executable_ledger.settled_count, 3);
+            assert.deepEqual(evaluatedPayload.history_evaluation, manifest.history_evaluation);
+            delete manifest.history_evaluation;
 
             const invalidSettlement = {{
               target_date: "2026-08-22",
@@ -817,6 +858,10 @@ class WorkerAssetBuildTests(unittest.TestCase):
             self.assertEqual(manifest["selector_mode"], snapshot["selector_mode"])
             self.assertEqual(manifest["weights_version"], snapshot["weights_version"])
             self.assertEqual(manifest["universe_version"], snapshot["universe_version"])
+            self.assertEqual(manifest["history_evaluation"]["schema_version"], "history-evaluation-v1")
+            self.assertEqual(manifest["history_evaluation"]["performance"]["sample_status"], "NO_SAMPLE")
+            self.assertEqual(manifest["shadow_ledger"]["track"], "SHADOW_RESEARCH")
+            self.assertEqual(manifest["executable_ledger"]["track"], "EXECUTABLE_MODEL")
             self.assertEqual(manifest["market_regimes"]["a_share"]["state"], "risk_off")
             self.assertEqual(manifest["market_regimes"]["hk"]["state"], "range")
             self.assertEqual(manifest["summaries"][0]["market_regimes"]["us"]["state"], "trend_risk_on")

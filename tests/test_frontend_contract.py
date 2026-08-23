@@ -65,13 +65,82 @@ class FrontendContractTests(unittest.TestCase):
         )
 
     def test_shadow_research_outcomes_are_reported_outside_executable_performance(self) -> None:
-        self.assertRegex(self.js, r"function shadowLedgerStats\(")
+        self.assertNotRegex(self.js, r"function shadowLedgerStats\(")
+        self.assertIn("meta.shadow_ledger", self.js)
+        for field in (
+            "prediction_count",
+            "eligible_count",
+            "pending_count",
+            "settled_count",
+            "excluded_count",
+            "raw_prediction_count",
+            "raw_count",
+            "included_in_executable_performance",
+        ):
+            self.assertIn(field, self.js)
         self.assertIn("shadow_outcome", self.js)
-        self.assertIn("shadow_pending", self.js)
-        self.assertIn("shadow_settled", self.js)
-        self.assertIn("研究跟踪 PENDING", self.js)
-        self.assertIn("研究跟踪 SETTLED", self.js)
+        self.assertIn("Shadow·PENDING", self.js)
+        self.assertIn("Shadow·SETTLED", self.js)
+        self.assertIn("Shadow 研究轨", self.js)
+        self.assertIn("后端未发布 Shadow 聚合收益", self.js)
+        self.assertIn("前端不会把缺失字段解释为 0", self.js)
         self.assertIn("不计入可执行绩效、胜率或收益", self.js)
+
+    def test_history_metrics_render_the_published_performance_contract(self) -> None:
+        self.assertIn("meta.performance", self.js)
+        self.assertRegex(self.js, r"function renderHistoryMetric\(")
+        self.assertIn("minimum_reliable_sample", self.js)
+        self.assertIn("cohort_model_id", self.js)
+        self.assertIn("cohort_label_version", self.js)
+        self.assertIn("cohort_independent_day_count", self.js)
+        self.assertIn("按 target_date 仅保留最晚发布预测", self.js)
+        self.assertIn('metric.status === "READY" || metric.status === "INSUFFICIENT_SAMPLE"', self.js)
+        for key in (
+            "mean_net_return",
+            "positive_rate",
+            "top_decile_positive_rate",
+            "selection_rank_ic",
+            "brier_score",
+            "ece_10bin",
+            "expected_shortfall_10pct",
+            "settlement_sequence_max_drawdown",
+            "comparable_sample_count",
+        ):
+            self.assertIn(key, self.js)
+        self.assertIn("历史已选样本 Rank IC", self.js)
+        self.assertIn("结算序列最大回撤", self.js)
+        self.assertIn("早期样本", self.js)
+        self.assertIn('key === "comparable_sample_count"', self.js)
+        self.assertIn('String(metric.status || "").toUpperCase() === "NO_SAMPLE"', self.js)
+        self.assertIn('if (isPublishedZeroSampleCount) return "0"', self.js)
+        self.assertIn('if (!canDisplay || !hasNumericValue) return "—"', self.js)
+        self.assertNotIn('settled ? "待聚合" : "无样本"', self.js)
+
+    def test_history_no_sample_mobile_disclosure_and_navigation_hint(self) -> None:
+        self.assertIn("history-metrics-details", self.js + self.css)
+        self.assertIn("查看指标定义", self.js)
+        self.assertIn('sampleStatus !== "NO_SAMPLE"', self.js)
+        self.assertIn('window.matchMedia?.("(max-width: 760px)")?.matches', self.js)
+        self.assertIn("横向滑动查看更多", self.css)
+        self.assertIn(".history-master-detail > div { order: -1; }", self.css)
+        self.assertIn('scrollIntoView({ behavior: "smooth", block: "start" })', self.js)
+        self.assertIn(".history-metrics-details > summary", self.css)
+
+    def test_shadow_exclusion_copy_does_not_guess_the_reason(self) -> None:
+        self.assertIn("未通过当前准入合同，详见后端诊断", self.js)
+        self.assertNotIn("因身份、时点或结算合同不完整被排除", self.js)
+        self.assertNotIn("不完整或冲突合同", self.js)
+
+    def test_history_rows_show_formal_and_shadow_tracks_independently(self) -> None:
+        self.assertRegex(self.js, r"function historyFormalStatus\(")
+        self.assertRegex(self.js, r"function historyFormalStatusTag\(")
+        for label in ("Legacy", "主动放弃", "可执行·缺结算", "可执行·待结算", "可执行·已结算", "已结算·待校验", "结算无效"):
+            self.assertIn(label, self.js)
+        self.assertIn('formalStatus === "SETTLED_VALID"', self.js)
+        self.assertIn("item?.outcome_validation?.valid === true", self.js)
+        self.assertNotIn('if (outcomeStatus === "SETTLED") return { code: "SETTLED"', self.js)
+        self.assertIn("history-row-statuses", self.js)
+        self.assertIn("shadowOutcomeTag(item)", self.js)
 
     def test_evidence_views_and_canvas_charts_are_implemented(self) -> None:
         for renderer in ("renderDecision", "renderCandidates", "renderEvents", "renderHistory", "renderModel", "renderHealth"):
@@ -207,7 +276,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("决策日", self.js)
         self.assertIn("Legacy 历史日", self.js)
         self.assertIn("已结算样本", self.js)
-        self.assertIn("不展示胜率或模拟收益", self.js)
+        self.assertIn("真实合同指标 · 非浏览器回填 · 非模拟收益", self.js)
         self.assertIn("historyArchiveOpen", self.js)
         self.assertIn("state.historyArchiveOpen = currentArchive.open", self.js)
         self.assertIn("return item.a_share_legacy || {}", self.js)

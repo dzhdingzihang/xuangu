@@ -97,6 +97,20 @@ def session_dates(
     return [session.date() for session in _calendar(market).sessions_in_range(start_day, end_day)]
 
 
+def session_open_at(market: str, value: dt.date | dt.datetime | str) -> str:
+    """Return the exchange's regular-session open as a timezone-aware timestamp."""
+
+    session = _as_date(value).isoformat()
+    return _calendar(market).session_open(session).to_pydatetime().isoformat()
+
+
+def session_close_at(market: str, value: dt.date | dt.datetime | str) -> str:
+    """Return the exchange's regular-session close as a timezone-aware timestamp."""
+
+    session = _as_date(value).isoformat()
+    return _calendar(market).session_close(session).to_pydatetime().isoformat()
+
+
 def expected_quote_session(
     market: str,
     value: dt.datetime | str,
@@ -153,6 +167,7 @@ def market_trade_window(
     entry_open = calendar.next_open(anchor)
     entry = calendar.minute_to_session(entry_open, direction="none").date()
     forecast_end = nth_session(market, entry, horizon_sessions, include_current=True)
+    forecast_end_close = calendar.session_close(forecast_end.isoformat())
     return {
         "calendar_id": calendar_id(market),
         "calendar_version": CALENDAR_VERSION,
@@ -160,6 +175,7 @@ def market_trade_window(
         "entry_session_open_at": entry_open.to_pydatetime().isoformat(),
         "entry_trade_date": entry.isoformat(),
         "forecast_end_trade_date": forecast_end.isoformat(),
+        "forecast_end_session_close_at": forecast_end_close.to_pydatetime().isoformat(),
         "horizon_sessions": horizon_sessions,
     }
 
