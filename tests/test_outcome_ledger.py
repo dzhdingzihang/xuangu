@@ -34,6 +34,33 @@ def fixture_snapshot() -> dict:
 
 
 class OutcomeLedgerTests(unittest.TestCase):
+    def test_scheduled_shadow_ledger_samples_only_the_daily_last_primary_checkpoint(self) -> None:
+        morning = fixture_snapshot() | {
+            "automation": {
+                "trigger": "schedule",
+                "scheduled_slot": "2026-08-21T10:17:00+08:00",
+            }
+        }
+        closing = fixture_snapshot() | {
+            "automation": {
+                "trigger": "schedule",
+                "scheduled_slot": "2026-08-21T22:47:00+08:00",
+            }
+        }
+        manual = fixture_snapshot() | {
+            "automation": {
+                "trigger": "workflow_dispatch",
+                "scheduled_slot": None,
+            }
+        }
+
+        self.assertIsNone(settle_outcomes.candidate_contract(morning, "morning.json"))
+        self.assertIsNone(settle_outcomes.candidate_contract(manual, "manual.json"))
+        contract = settle_outcomes.candidate_contract(closing, "closing.json")
+        self.assertIsNotNone(contract)
+        self.assertEqual(contract["sampling_policy"], "daily_last_primary_checkpoint_v1")
+        self.assertEqual(contract["scheduled_slot"], "2026-08-21T22:47:00+08:00")
+
     def test_research_contract_stays_separate_and_pending(self) -> None:
         contract = settle_outcomes.candidate_contract(fixture_snapshot(), "sample.json")
         self.assertIsNotNone(contract)

@@ -28,7 +28,7 @@ def run_node(script: str) -> None:
 
 
 class WorkerFreshnessTests(unittest.TestCase):
-    def test_two_weekday_checkpoints_and_45_minute_grace(self) -> None:
+    def test_seven_weekday_checkpoints_and_45_minute_grace(self) -> None:
         run_node(
             f"""
             import assert from "node:assert/strict";
@@ -61,12 +61,12 @@ class WorkerFreshnessTests(unittest.TestCase):
             assert.equal(fresh.snapshot_age_minutes, 60);
             assert.equal(fresh.checkpoint_lag_minutes, 0);
 
-            const eveningUpdating = snapshotFreshness(
+            const usOpenUpdating = snapshotFreshness(
               "2026-08-24T08:20:00+08:00",
-              new Date("2026-08-24T20:30:00+08:00"),
+              new Date("2026-08-24T23:00:00+08:00"),
             );
-            assert.equal(eveningUpdating.freshness_state, "updating");
-            assert.equal(eveningUpdating.expected_checkpoint, "2026-08-24T20:17:00+08:00");
+            assert.equal(usOpenUpdating.freshness_state, "updating");
+            assert.equal(usOpenUpdating.expected_checkpoint, "2026-08-24T22:47:00+08:00");
             """
         )
 
@@ -77,27 +77,27 @@ class WorkerFreshnessTests(unittest.TestCase):
             const {{ snapshotFreshness }} = await import({json.dumps(WORKER_URI)} + "?freshness-weekend");
 
             const weekend = snapshotFreshness(
-              "2026-08-21T20:18:00+08:00",
+              "2026-08-21T22:48:00+08:00",
               new Date("2026-08-22T12:00:00+08:00"),
             );
             assert.equal(weekend.freshness_state, "fresh");
-            assert.equal(weekend.expected_checkpoint, "2026-08-21T20:17:00+08:00");
-            assert.equal(weekend.snapshot_age_minutes, 942);
+            assert.equal(weekend.expected_checkpoint, "2026-08-21T22:47:00+08:00");
+            assert.equal(weekend.snapshot_age_minutes, 792);
             assert.equal(weekend.checkpoint_lag_minutes, 0);
 
             const fridayGrace = snapshotFreshness(
-              "2026-08-21T08:20:00+08:00",
-              new Date("2026-08-21T20:30:00+08:00"),
+              "2026-08-21T20:18:00+08:00",
+              new Date("2026-08-21T23:00:00+08:00"),
             );
             assert.equal(fridayGrace.freshness_state, "updating");
-            assert.equal(fridayGrace.expected_checkpoint, "2026-08-21T20:17:00+08:00");
+            assert.equal(fridayGrace.expected_checkpoint, "2026-08-21T22:47:00+08:00");
 
             const afterGrace = snapshotFreshness(
-              "2026-08-21T08:20:00+08:00",
-              new Date("2026-08-21T21:03:00+08:00"),
+              "2026-08-21T20:18:00+08:00",
+              new Date("2026-08-21T23:33:00+08:00"),
             );
             assert.equal(afterGrace.freshness_state, "stale");
-            assert.equal(afterGrace.expected_checkpoint, "2026-08-21T20:17:00+08:00");
+            assert.equal(afterGrace.expected_checkpoint, "2026-08-21T22:47:00+08:00");
             """
         )
 
@@ -113,6 +113,14 @@ class WorkerFreshnessTests(unittest.TestCase):
             );
             assert.equal(
               nextScheduledRefresh(new Date("2026-08-21T20:48:00+08:00")),
+              "2026-08-21T22:47:00+08:00",
+            );
+            assert.equal(
+              nextScheduledRefresh(new Date("2026-08-21T22:48:00+08:00")),
+              "2026-08-21T23:17:00+08:00",
+            );
+            assert.equal(
+              nextScheduledRefresh(new Date("2026-08-21T23:18:00+08:00")),
               "2026-08-24T08:17:00+08:00",
             );
             assert.equal(
@@ -125,12 +133,48 @@ class WorkerFreshnessTests(unittest.TestCase):
             );
             assert.equal(
               nextScheduledRefresh(new Date("2026-08-24T08:48:00+08:00")),
-              "2026-08-24T20:17:00+08:00",
+              "2026-08-24T10:17:00+08:00",
             );
             assert.equal(
               nextScheduledRefresh(new Date("2026-08-24T20:18:00+08:00")),
               "2026-08-24T20:47:00+08:00",
             );
+            """
+        )
+
+    def test_all_intraday_next_refresh_and_expected_checkpoint_boundaries(self) -> None:
+        run_node(
+            f"""
+            import assert from "node:assert/strict";
+            const module = await import({json.dumps(WORKER_URI)} + "?all-checkpoint-boundaries");
+            const nextCases = [
+              ["2026-08-24T08:18:00+08:00", "2026-08-24T08:47:00+08:00"],
+              ["2026-08-24T08:48:00+08:00", "2026-08-24T10:17:00+08:00"],
+              ["2026-08-24T10:18:00+08:00", "2026-08-24T10:47:00+08:00"],
+              ["2026-08-24T10:48:00+08:00", "2026-08-24T12:17:00+08:00"],
+              ["2026-08-24T12:18:00+08:00", "2026-08-24T12:47:00+08:00"],
+              ["2026-08-24T12:48:00+08:00", "2026-08-24T15:17:00+08:00"],
+              ["2026-08-24T15:18:00+08:00", "2026-08-24T15:47:00+08:00"],
+              ["2026-08-24T15:48:00+08:00", "2026-08-24T16:17:00+08:00"],
+              ["2026-08-24T16:18:00+08:00", "2026-08-24T16:47:00+08:00"],
+              ["2026-08-24T16:48:00+08:00", "2026-08-24T20:17:00+08:00"],
+              ["2026-08-24T20:18:00+08:00", "2026-08-24T20:47:00+08:00"],
+              ["2026-08-24T20:48:00+08:00", "2026-08-24T22:47:00+08:00"],
+              ["2026-08-24T22:48:00+08:00", "2026-08-24T23:17:00+08:00"],
+              ["2026-08-24T23:18:00+08:00", "2026-08-25T08:17:00+08:00"],
+            ];
+            for (const [current, expected] of nextCases) {{
+              assert.equal(module.nextScheduledRefresh(new Date(current)), expected, current);
+            }}
+
+            const primaryCases = ["10:17", "12:17", "15:17", "16:17", "20:17", "22:47"];
+            for (const checkpoint of primaryCases) {{
+              const [hour, minute] = checkpoint.split(":").map(Number);
+              const current = new Date(Date.parse("2026-08-24T00:00:00+08:00") + (hour * 60 + minute + 13) * 60_000);
+              const freshness = module.snapshotFreshness("2026-08-24T08:20:00+08:00", current);
+              assert.equal(freshness.expected_checkpoint, `2026-08-24T${{checkpoint}}:00+08:00`, checkpoint);
+              assert.equal(freshness.freshness_state, "updating", checkpoint);
+            }}
             """
         )
 
@@ -170,8 +214,8 @@ class WorkerFreshnessTests(unittest.TestCase):
             assert.equal(status.quote_delivery_mode, "scheduled_snapshot");
             assert.equal(status.device_dependency, false);
             assert.equal(status.schedule_time_zone, "Asia/Shanghai");
-            assert.deepEqual(status.schedule_primary_checkpoints, ["08:17", "20:17"]);
-            assert.deepEqual(status.schedule_fallback_checkpoints, ["08:47", "20:47"]);
+            assert.deepEqual(status.schedule_primary_checkpoints, ["08:17", "10:17", "12:17", "15:17", "16:17", "20:17", "22:47"]);
+            assert.deepEqual(status.schedule_fallback_checkpoints, ["08:47", "10:47", "12:47", "15:47", "16:47", "20:47", "23:17"]);
             assert.equal(status.snapshot_as_of, latest.generated_at);
             assert.equal(status.next_refresh, module.nextScheduledRefresh(new Date(status.time)));
             """

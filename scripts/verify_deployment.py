@@ -34,7 +34,22 @@ DECISION_IDENTITY_FIELDS = (
 ALLOWED_GLOBAL_ACTIONS = {"NO_VALID_PICK", "REVIEW_EXECUTABLE_PICK"}
 DEFAULT_BASE_URL = "https://xuangu.alixjd.com"
 SHANGHAI_TIME_ZONE = ZoneInfo("Asia/Shanghai")
-SCHEDULED_REFRESH_CHECKPOINTS = ((8, 17), (8, 47), (20, 17), (20, 47))
+SCHEDULED_REFRESH_CHECKPOINTS = (
+    (8, 17),
+    (8, 47),
+    (10, 17),
+    (10, 47),
+    (12, 17),
+    (12, 47),
+    (15, 17),
+    (15, 47),
+    (16, 17),
+    (16, 47),
+    (20, 17),
+    (20, 47),
+    (22, 47),
+    (23, 17),
+)
 ResponsePayload = tuple[int, Mapping[str, str], bytes]
 
 
@@ -288,8 +303,24 @@ def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
         "quote_delivery_mode": "scheduled_snapshot",
         "device_dependency": False,
         "schedule_time_zone": "Asia/Shanghai",
-        "schedule_primary_checkpoints": ["08:17", "20:17"],
-        "schedule_fallback_checkpoints": ["08:47", "20:47"],
+        "schedule_primary_checkpoints": [
+            "08:17",
+            "10:17",
+            "12:17",
+            "15:17",
+            "16:17",
+            "20:17",
+            "22:47",
+        ],
+        "schedule_fallback_checkpoints": [
+            "08:47",
+            "10:47",
+            "12:47",
+            "15:47",
+            "16:47",
+            "20:47",
+            "23:17",
+        ],
         "snapshot_as_of": local.get("generated_at"),
     }
     for field, expected in required_values.items():

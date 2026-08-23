@@ -4,11 +4,16 @@ on:
   push:
     branches: [main]
   schedule:
-    # Beijing 08:17 and 20:17 primary checkpoints (UTC+8).
-    - cron: "17 0,12 * * 1-5"
-    # Thirty-minute fallback invocations. schedule_gate skips a fallback when
-    # the corresponding primary snapshot is already healthy and published.
-    - cron: "47 0,12 * * 1-5"
+    # Beijing 08:17/10:17/12:17/15:17/16:17/20:17 primary checkpoints (UTC+8).
+    - cron: "17 0,2,4,7,8,12 * * 1-5"
+    # Beijing 22:47 primary checkpoint, after the US regular session opens in
+    # both daylight-saving and standard time.
+    - cron: "47 14 * * 1-5"
+    # Thirty-minute fallback invocations for the six :17 primary checkpoints.
+    # schedule_gate skips a fallback when the matching snapshot is healthy.
+    - cron: "47 0,2,4,7,8,12 * * 1-5"
+    # Beijing 23:17 fallback for the 22:47 US-open checkpoint.
+    - cron: "17 15 * * 1-5"
   workflow_dispatch:
 
 permissions: {}

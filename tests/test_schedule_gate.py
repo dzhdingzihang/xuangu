@@ -78,19 +78,30 @@ class ScheduleGateTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = load_module()
 
-    def test_business_slots_are_two_primary_checkpoints_only(self) -> None:
-        self.assertEqual(self.module.SLOTS, [(8, 17), (20, 17)])
+    def test_business_slots_cover_all_seven_primary_checkpoints(self) -> None:
+        self.assertEqual(
+            self.module.SLOTS,
+            [
+                (8, 17),
+                (10, 17),
+                (12, 17),
+                (15, 17),
+                (16, 17),
+                (20, 17),
+                (22, 47),
+            ],
+        )
 
-    def test_friday_2017_slot_survives_saturday_delay(self) -> None:
+    def test_friday_2247_slot_survives_saturday_delay(self) -> None:
         now = dt.datetime.fromisoformat("2026-08-22T00:00:00+08:00")
         slot = self.module.select_checkpoint(now)
-        self.assertEqual(slot.isoformat(), "2026-08-21T20:17:00+08:00")
+        self.assertEqual(slot.isoformat(), "2026-08-21T22:47:00+08:00")
         self.assertTrue(self.module.checkpoint_is_within_window(now, slot))
 
     def test_four_hour_window_is_inclusive_and_bounded(self) -> None:
-        slot = dt.datetime.fromisoformat("2026-08-21T20:17:00+08:00")
-        at_limit = dt.datetime.fromisoformat("2026-08-22T00:17:00+08:00")
-        after_limit = dt.datetime.fromisoformat("2026-08-22T00:17:01+08:00")
+        slot = dt.datetime.fromisoformat("2026-08-21T22:47:00+08:00")
+        at_limit = dt.datetime.fromisoformat("2026-08-22T02:47:00+08:00")
+        after_limit = dt.datetime.fromisoformat("2026-08-22T02:47:01+08:00")
         self.assertTrue(self.module.checkpoint_is_within_window(at_limit, slot))
         self.assertFalse(self.module.checkpoint_is_within_window(after_limit, slot))
 
@@ -103,7 +114,7 @@ class ScheduleGateTests(unittest.TestCase):
     def test_weekend_without_recent_checkpoint_is_rejected(self) -> None:
         now = dt.datetime.fromisoformat("2026-08-22T12:00:00+08:00")
         slot = self.module.select_checkpoint(now)
-        self.assertEqual(slot.isoformat(), "2026-08-21T20:17:00+08:00")
+        self.assertEqual(slot.isoformat(), "2026-08-21T22:47:00+08:00")
         self.assertFalse(self.module.checkpoint_is_within_window(now, slot))
 
     def test_latest_snapshot_makes_fallback_idempotent(self) -> None:
@@ -456,6 +467,38 @@ class ScheduleGateTests(unittest.TestCase):
 
         self.assertIn("should_run=true", output)
         self.assertIn("slot=2026-08-21T20:17+08:00", output)
+
+    def test_2317_fallback_targets_the_2247_us_open_checkpoint(self) -> None:
+        output = self._run_main("2026-08-21T23:17:00+08:00", published_source=None)
+
+        self.assertIn("should_run=true", output)
+        self.assertIn("slot=2026-08-21T22:47+08:00", output)
+
+    def test_every_health_fallback_maps_to_its_matching_primary(self) -> None:
+        pairs = (
+            ("08:17", "08:47"),
+            ("10:17", "10:47"),
+            ("12:17", "12:47"),
+            ("15:17", "15:47"),
+            ("16:17", "16:47"),
+            ("20:17", "20:47"),
+            ("22:47", "23:17"),
+        )
+        for primary, fallback in pairs:
+            with self.subTest(primary=primary, fallback=fallback, health="healthy"):
+                output = self._run_main(
+                    f"2026-08-21T{fallback}:00+08:00",
+                    published_source="live",
+                )
+                self.assertIn("should_run=false", output)
+                self.assertIn(f"slot=2026-08-21T{primary}+08:00", output)
+            with self.subTest(primary=primary, fallback=fallback, health="degraded"):
+                output = self._run_main(
+                    f"2026-08-21T{fallback}:00+08:00",
+                    published_source=None,
+                )
+                self.assertIn("should_run=true", output)
+                self.assertIn(f"slot=2026-08-21T{primary}+08:00", output)
 
     def _run_main(self, now: str, *, published_source: str | None) -> str:
         output = io.StringIO()

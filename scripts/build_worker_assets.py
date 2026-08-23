@@ -67,6 +67,8 @@ def public_outcome(outcome: dict | None) -> dict | None:
         "prediction_id",
         "model_id",
         "label_version",
+        "sampling_policy",
+        "scheduled_slot",
         "market",
         "code",
         "entry_trade_date",

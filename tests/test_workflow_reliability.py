@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import re
 import tempfile
 import unittest
 import urllib.parse
@@ -113,9 +114,19 @@ class WorkflowReliabilityTests(unittest.TestCase):
         readme = README.read_text(encoding="utf-8")
         for token in (
             "08:17",
+            "10:17",
+            "12:17",
+            "15:17",
+            "16:17",
             "20:17",
+            "22:47",
             "08:47",
+            "10:47",
+            "12:47",
+            "15:47",
+            "16:47",
             "20:47",
+            "23:17",
             "Asia/Shanghai",
             "data_mode=scheduled_snapshot",
             "device_dependency=false",
@@ -128,9 +139,11 @@ class WorkflowReliabilityTests(unittest.TestCase):
 
     def test_workflow_has_source_aware_fallbacks_and_stale_push_guard(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertEqual(workflow.count("- cron:"), 2)
-        self.assertIn('cron: "17 0,12 * * 1-5"', workflow)
-        self.assertIn('cron: "47 0,12 * * 1-5"', workflow)
+        self.assertEqual(workflow.count("- cron:"), 4)
+        self.assertIn('cron: "17 0,2,4,7,8,12 * * 1-5"', workflow)
+        self.assertIn('cron: "47 14 * * 1-5"', workflow)
+        self.assertIn('cron: "47 0,2,4,7,8,12 * * 1-5"', workflow)
+        self.assertIn('cron: "17 15 * * 1-5"', workflow)
         self.assertNotIn('cron: "58 0,1,2,4,5,6,15 * * 1-5"', workflow)
         self.assertNotIn('cron: "28 1,2,3,5,6,7,16 * * 1-5"', workflow)
         self.assertIn("cancel-in-progress: false", workflow)
@@ -259,8 +272,12 @@ class DeploymentVerifierTests(unittest.TestCase):
             "quote_delivery_mode": "scheduled_snapshot",
             "device_dependency": False,
             "schedule_time_zone": "Asia/Shanghai",
-            "schedule_primary_checkpoints": ["08:17", "20:17"],
-            "schedule_fallback_checkpoints": ["08:47", "20:47"],
+            "schedule_primary_checkpoints": [
+                "08:17", "10:17", "12:17", "15:17", "16:17", "20:17", "22:47",
+            ],
+            "schedule_fallback_checkpoints": [
+                "08:47", "10:47", "12:47", "15:47", "16:47", "20:47", "23:17",
+            ],
             "snapshot_as_of": self.local["generated_at"],
             "next_refresh": "2026-08-24T08:17:00+08:00",
         }
@@ -271,6 +288,16 @@ class DeploymentVerifierTests(unittest.TestCase):
             self.module.deployment_mismatches(self.local, self.status, self.latest),
             [],
         )
+
+    def test_workflow_utc_crons_match_the_verifier_checkpoint_set(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        actual: set[tuple[int, int]] = set()
+        for minute, hours in re.findall(r'cron: "(\d+) ([\d,]+) \* \* 1-5"', workflow):
+            for hour in hours.split(","):
+                local_minutes = (int(hour) * 60 + int(minute) + 8 * 60) % (24 * 60)
+                actual.add(divmod(local_minutes, 60))
+
+        self.assertEqual(actual, set(self.module.SCHEDULED_REFRESH_CHECKPOINTS))
 
     def test_scheduled_snapshot_status_contract_rejects_device_or_live_mode(self) -> None:
         self.assertEqual(
@@ -307,7 +334,7 @@ class DeploymentVerifierTests(unittest.TestCase):
         after_fallback = dict(
             self.status,
             time="2026-08-24T08:48:00+08:00",
-            next_refresh="2026-08-24T20:17:00+08:00",
+            next_refresh="2026-08-24T10:17:00+08:00",
         )
         self.assertEqual(
             self.module.scheduled_snapshot_status_errors(self.local, after_fallback),

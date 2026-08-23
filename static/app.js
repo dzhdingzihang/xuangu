@@ -1534,8 +1534,8 @@ function renderHealth() {
   const truth = globalDecisionTruth();
   const status = state.status || {};
   const schedulerRunning = status.ok !== false && Boolean(state.snapshot?.generated_at);
-  const primarySchedule = (status.schedule_primary_checkpoints || ["08:17", "20:17"]).join(" / ");
-  const fallbackSchedule = (status.schedule_fallback_checkpoints || ["08:47", "20:47"]).join(" / ");
+  const primarySchedule = (status.schedule_primary_checkpoints || ["08:17", "10:17", "12:17", "15:17", "16:17", "20:17", "22:47"]).join(" / ");
+  const fallbackSchedule = (status.schedule_fallback_checkpoints || ["08:47", "10:47", "12:47", "15:47", "16:47", "20:47", "23:17"]).join(" / ");
   const readyMarkets = truth.markets.filter((item) => item.state === "READY").length;
   const recallTargetsMet = truth.markets.every((market) => {
     const funnel = recallFunnel(market.section, market.market);
@@ -1573,7 +1573,7 @@ function renderHealth() {
       ${truth.markets.map((market) => row(MARKET_META[market.market].label, marketTone(market), marketStateLabel(market), marketMetrics(market), market.reasons.join("；") || "关键数据门禁已通过")).join("")}
       ${row("事件数据", truth.autoEvidenceCount ? "warning" : "negative", truth.autoEvidenceCount ? "待复核" : "严重缺口", `外部自动 ${truth.autoEvidenceCount} · 模型信号 ${eventItems().filter((event) => event.event_type === "model_signal").length}`, "事件因子不可作为自动买入依据")}
       ${row("发布任务", schedulerRunning ? "positive" : "negative", schedulerRunning ? "页面可用" : "需检查", `最近快照 ${dateTime(state.snapshot?.generated_at)}`, "页面可用和快照新鲜，不代表决策数据完整")}
-    </div></article><aside class="health-side"><article class="panel"><header class="panel-header"><div><h3 class="panel-title">实际更新机制</h3><p class="panel-subtitle">纯云端批次快照，不依赖个人设备</p></div>${badge("已配置", "primary")}</header><dl><dt>主刷新</dt><dd>工作日北京时间 ${esc(primarySchedule)}</dd><dt>健康补跑</dt><dd>工作日北京时间 ${esc(fallbackSchedule)}；已有健康快照则跳过</dd><dt>快照生成</dt><dd>${esc(dateTime(status.snapshot_as_of || state.snapshot?.generated_at))}</dd><dt>下次计划检查点（含健康补跑）</dt><dd>${esc(dateTime(status.next_refresh))}</dd><dt>交易日窗口</dt><dd>XSHG / XHKG / XNYS 真实日历</dd><dt>结果跟踪</dt><dd>生成后立即 PENDING，第 10 个交易日后结算</dd></dl></article><article class="panel"><header class="panel-header"><div><h3 class="panel-title">调度正常，不代表结果可信</h3></div></header><p>任务可以完成，但如果召回池、外部证据或概率模型缺失，页面仍必须显示阻断；GitHub 调度也不承诺严格准点。</p>${badge(schedulerRunning ? "当前：发布可访问" : "当前：发布待检查", schedulerRunning ? "primary" : "negative")}</article><a class="secondary-button" href="https://github.com/dzhdingzihang/xuangu/actions" target="_blank" rel="noopener noreferrer">查看最近一次任务 ${icon("ph-arrow-square-out")}</a></aside></section>`;
+    </div></article><aside class="health-side"><article class="panel"><header class="panel-header"><div><h3 class="panel-title">实际更新机制</h3><p class="panel-subtitle">纯云端批次快照，不依赖个人设备</p></div>${badge("已配置", "primary")}</header><dl><dt>主刷新</dt><dd>工作日北京时间 ${esc(primarySchedule)}</dd><dt>健康补跑</dt><dd>工作日北京时间 ${esc(fallbackSchedule)}；已有健康快照则跳过</dd><dt>快照生成</dt><dd>${esc(dateTime(status.snapshot_as_of || state.snapshot?.generated_at))}</dd><dt>下次计划检查点（含健康补跑）</dt><dd>${esc(dateTime(status.next_refresh))}</dd><dt>交易日窗口</dt><dd>XSHG / XHKG / XNYS 真实日历</dd><dt>结果跟踪</dt><dd>每日末次主快照登记 PENDING，第 10 个交易日后结算</dd></dl></article><article class="panel"><header class="panel-header"><div><h3 class="panel-title">调度正常，不代表结果可信</h3></div></header><p>任务可以完成，但如果召回池、外部证据或概率模型缺失，页面仍必须显示阻断；GitHub 调度也不承诺严格准点。</p>${badge(schedulerRunning ? "当前：发布可访问" : "当前：发布待检查", schedulerRunning ? "primary" : "negative")}</article><a class="secondary-button" href="https://github.com/dzhdingzihang/xuangu/actions" target="_blank" rel="noopener noreferrer">查看最近一次任务 ${icon("ph-arrow-square-out")}</a></aside></section>`;
 }
 
 function renderActiveTab() {

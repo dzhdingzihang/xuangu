@@ -102,8 +102,8 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(status.quote_delivery_mode, "scheduled_snapshot");
             assert.equal(status.device_dependency, false);
             assert.equal(status.schedule_time_zone, "Asia/Shanghai");
-            assert.deepEqual(status.schedule_primary_checkpoints, ["08:17", "20:17"]);
-            assert.deepEqual(status.schedule_fallback_checkpoints, ["08:47", "20:47"]);
+            assert.deepEqual(status.schedule_primary_checkpoints, ["08:17", "10:17", "12:17", "15:17", "16:17", "20:17", "22:47"]);
+            assert.deepEqual(status.schedule_fallback_checkpoints, ["08:47", "10:47", "12:47", "15:47", "16:47", "20:47", "23:17"]);
             assert.equal(status.snapshot_as_of, latest.generated_at);
             assert.equal(status.next_refresh, module.nextScheduledRefresh(new Date(status.time)));
             assert.equal(statusResponse.headers.get("x-content-type-options"), "nosniff");

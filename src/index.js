@@ -14,9 +14,22 @@ const SHANGHAI_TIME_ZONE = "Asia/Shanghai";
 const STATUS_GRACE_MINUTES = 45;
 const WEEKDAY_CHECKPOINTS = [
   [8, 17],
+  [10, 17],
+  [12, 17],
+  [15, 17],
+  [16, 17],
   [20, 17],
+  [22, 47],
 ];
-const FALLBACK_CHECKPOINTS = [[8, 47], [20, 47]];
+const FALLBACK_CHECKPOINTS = [
+  [8, 47],
+  [10, 47],
+  [12, 47],
+  [15, 47],
+  [16, 47],
+  [20, 47],
+  [23, 17],
+];
 const SCHEDULED_REFRESH_CHECKPOINTS = [...WEEKDAY_CHECKPOINTS, ...FALLBACK_CHECKPOINTS]
   .sort(([leftHour, leftMinute], [rightHour, rightMinute]) =>
     leftHour * 60 + leftMinute - (rightHour * 60 + rightMinute));

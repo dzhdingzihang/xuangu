@@ -36,6 +36,8 @@ TRACK = "SHADOW_RESEARCH"
 COST_ASSUMPTIONS = {"a_share": 0.0015, "hk": 0.0030, "us": 0.0015}
 CURRENCIES = {"a_share": "CNY", "hk": "HKD", "us": "USD"}
 VALID_ID = re.compile(r"^pred_[a-f0-9]{16,64}$")
+CN_TZ = ZoneInfo("Asia/Shanghai")
+DAILY_SCHEDULED_LEDGER_SLOT = (22, 47)
 
 
 def read_json(path: pathlib.Path) -> dict[str, Any] | None:
@@ -53,7 +55,41 @@ def write_json_atomic(path: pathlib.Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def eligible_for_shadow_ledger(snapshot: dict[str, Any]) -> bool:
+    """Keep all snapshots, but sample scheduled research once per decision day.
+
+    Health fallbacks inherit the primary checkpoint in ``scheduled_slot``, so a
+    successful 23:17 recovery remains eligible for the 22:47 daily sample.
+    Manual workflow runs are operational checks, not independent research
+    samples. Legacy snapshots without automation metadata keep compatibility.
+    """
+    automation = snapshot.get("automation")
+    automation = automation if isinstance(automation, dict) else {}
+    trigger = str(automation.get("trigger") or "")
+    if not trigger:
+        return True
+    if trigger != "schedule":
+        return False
+    try:
+        scheduled = dt.datetime.fromisoformat(str(automation.get("scheduled_slot") or ""))
+    except ValueError:
+        return False
+    if scheduled.tzinfo is None or scheduled.utcoffset() is None:
+        return False
+    local = scheduled.astimezone(CN_TZ)
+    return (local.hour, local.minute) == DAILY_SCHEDULED_LEDGER_SLOT
+
+
 def candidate_contract(snapshot: dict[str, Any], source_name: str) -> dict[str, Any] | None:
+    if not eligible_for_shadow_ledger(snapshot):
+        return None
+    automation = snapshot.get("automation")
+    automation = automation if isinstance(automation, dict) else {}
+    sampling_policy = (
+        "daily_last_primary_checkpoint_v1"
+        if str(automation.get("trigger") or "") == "schedule"
+        else "legacy_snapshot_v1"
+    )
     decision = snapshot.get("global_decision") or {}
     candidate = decision.get("research_priority")
     if not isinstance(candidate, dict) or candidate.get("status") != "RESEARCH_ONLY":
@@ -94,6 +130,8 @@ def candidate_contract(snapshot: dict[str, Any], source_name: str) -> dict[str, 
         "generated_at": snapshot.get("generated_at"),
         "signal_date": snapshot.get("signal_date"),
         "source_snapshot": source_name,
+        "sampling_policy": sampling_policy,
+        "scheduled_slot": automation.get("scheduled_slot"),
         "score_kind": candidate.get("priority_score_kind") or candidate.get("score_kind"),
         "priority_score": candidate.get("priority_score"),
         "entry_trade_date": entry_date.isoformat(),

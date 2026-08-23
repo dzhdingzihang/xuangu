@@ -12,7 +12,15 @@ from zoneinfo import ZoneInfo
 
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
-SLOTS = [(8, 17), (20, 17)]
+SLOTS = [
+    (8, 17),
+    (10, 17),
+    (12, 17),
+    (15, 17),
+    (16, 17),
+    (20, 17),
+    (22, 47),
+]
 EARLY_GRACE_SECONDS = 5 * 60
 # GitHub scheduled workflows are not precise timers. They can be delayed by
 # tens of minutes, and occasionally longer when GitHub Actions is busy. Treat a
@@ -58,7 +66,7 @@ def as_cn_time(value: dt.datetime) -> dt.datetime:
 def select_checkpoint(now: dt.datetime) -> dt.datetime | None:
     """Return the latest intended weekday checkpoint, including yesterday.
 
-    Looking back one calendar day is deliberate: the Friday 20:17 checkpoint
+    Looking back one calendar day is deliberate: the Friday 22:47 checkpoint
     may not start until early Saturday when GitHub Actions is congested.
     """
     now = as_cn_time(now)
