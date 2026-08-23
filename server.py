@@ -31,11 +31,22 @@ from zoneinfo import ZoneInfo
 import requests
 
 import history_evaluation
+import model_observation_ledger
 
 try:
     import ten_day_model
 except ImportError:  # The selector must still publish an explicit fail-closed card.
     ten_day_model = None
+
+try:
+    import event_pipeline
+except ImportError:  # Official-event evidence is optional at import time, never at the decision gate.
+    event_pipeline = None
+
+try:
+    import ten_day_rank_model
+except ImportError:  # The parallel excess-return model must fail closed while it is collecting data.
+    ten_day_rank_model = None
 
 from market_calendar import (
     CALENDAR_VERSION,
@@ -61,7 +72,7 @@ HK_US_KLINE_CACHE = CACHE / "runtime-cache" / "hk_us_daily.json"
 MARKET_RECALL_EXPANSION_PATH = CACHE / "universes" / "market_recall_expansion_v2.json"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-08-23.2-dynamic-hk-us"
+MODEL_VERSION = "smart-selector-2026-08-23.3-evidence-loop"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
@@ -1533,6 +1544,105 @@ def _dynamic_recall_manifest(selected: list[dict], market_key: str) -> list[dict
     return manifest
 
 
+def _a_share_recall_manifest(selected: list[dict]) -> list[dict]:
+    """Publish the same code-level recall evidence already available for HK/US."""
+
+    manifest: list[dict] = []
+    for rank, candidate in enumerate(selected, 1):
+        lineage = ensure_candidate_lineage(candidate, "a_share")
+        manifest.append(
+            {
+                "symbol": candidate.get("code") or candidate.get("symbol"),
+                "name": candidate.get("name"),
+                "recall_rank": rank,
+                "recall_score": round(safe_float(_candidate_recall_priority(candidate)[0]), 4),
+                "primary_route": candidate.get("selection_route") or _selection_route_for_candidate(candidate),
+                "recall_routes": [item.get("route") for item in lineage.get("recall_routes") or []],
+                "source": candidate.get("source"),
+                "observed_at": candidate.get("observed_at"),
+                "board": candidate.get("a_share_board") or a_share_board(str(candidate.get("code") or "")),
+            }
+        )
+    return manifest
+
+
+def build_point_in_time_universe(
+    generated_at: dt.datetime,
+    signal_date: str,
+    trade_windows: dict,
+    recall_rows: dict[str, list[dict]],
+    scored_rows: dict[str, list[dict]],
+) -> dict:
+    """Freeze every recalled member before outcomes exist.
+
+    This ledger is intentionally larger than the displayed shortlist.  It is
+    the only admissible population for the parallel rank model and prevents a
+    future winner from being retroactively inserted into an old universe.
+    """
+
+    markets: dict[str, dict] = {}
+    targets = {"a_share": A_SHARE_RECALL_TARGET, "hk": HK_RECALL_TARGET, "us": US_RECALL_TARGET}
+    for market_key in ("a_share", "hk", "us"):
+        enriched_by_code = {
+            str(item.get("code") or item.get("symbol") or "").lower(): item
+            for item in (scored_rows.get(market_key) or [])
+        }
+        members: list[dict] = []
+        for recall_rank, recalled in enumerate(recall_rows.get(market_key) or [], 1):
+            code = str(recalled.get("code") or recalled.get("symbol") or "")
+            if not code:
+                continue
+            candidate = enriched_by_code.get(code.lower()) or recalled
+            lineage = ensure_candidate_lineage(candidate, market_key)
+            v2 = candidate.get("v2") or {}
+            groups = v2.get("factor_groups") or {}
+            feature_snapshot = {
+                "technical": nullable_float((groups.get("technical") or {}).get("score")),
+                "industry": nullable_float((groups.get("industry") or {}).get("score")),
+                "liquidity_flow": nullable_float((groups.get("liquidity_flow") or {}).get("score")),
+                "quality": nullable_float((groups.get("quality") or {}).get("score")),
+                "event": nullable_float((groups.get("event") or {}).get("score")),
+                "rule_score": nullable_float(v2.get("rule_score")),
+                "legacy_recommendation": nullable_float(
+                    candidate.get("recommendation_degree", candidate.get("confidence"))
+                ),
+            }
+            members.append(
+                {
+                    "market": market_key,
+                    "code": code,
+                    "name": candidate.get("name") or recalled.get("name"),
+                    "recall_rank": recall_rank,
+                    "primary_route": recalled.get("selection_route") or lineage.get("primary_route"),
+                    "recall_routes": [item.get("route") for item in lineage.get("recall_routes") or []],
+                    "source": recalled.get("source") or candidate.get("source"),
+                    "observed_at": recalled.get("observed_at") or candidate.get("observed_at"),
+                    "entry_reference_price": nullable_float(candidate.get("entry_price") or candidate.get("price")),
+                    "feature_snapshot": feature_snapshot,
+                    "feature_complete": all(value is not None for value in feature_snapshot.values()),
+                }
+            )
+        window = trade_windows[market_key]
+        markets[market_key] = {
+            "target_count": targets[market_key],
+            "member_count": len(members),
+            "complete": len(members) == targets[market_key],
+            "entry_trade_date": window.get("entry_trade_date"),
+            "forecast_end_trade_date": window.get("forecast_end_trade_date"),
+            "members": members,
+        }
+    identity = {
+        "contract_version": "point-in-time-universe-v1",
+        "generated_at": generated_at.isoformat(timespec="seconds"),
+        "signal_date": signal_date,
+        "markets": markets,
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {**identity, "sha256": digest}
+
+
 def select_dynamic_market_pool(
     rows: list[dict], market_key: str, target: int | None = None
 ) -> tuple[list[dict], dict]:
@@ -2107,6 +2217,10 @@ def history_payload(limit: int = 30, view: str = "daily") -> dict:
         shadow_inventory,
         executable_inventory,
     )
+    observation_summary = model_observation_ledger.summarize_observation_cohorts(
+        model_observation_ledger.load_observation_cohorts(OUTCOMES / "observations")
+    )
+    evaluation["observation_ledger"] = observation_summary
 
     latest = None
     latest_path = PICKS / "latest.json"
@@ -2119,6 +2233,7 @@ def history_payload(limit: int = 30, view: str = "daily") -> dict:
     meta = history_metadata(rows, days, view, len(history), evaluation["performance"])
     meta["shadow_ledger"] = evaluation["shadow_ledger"]
     meta["executable_ledger"] = evaluation["executable_ledger"]
+    meta["observation_ledger"] = observation_summary
     return {
         "ok": True,
         "time": now_cn().isoformat(timespec="seconds"),
@@ -2157,10 +2272,20 @@ def automation_metadata() -> dict:
         generation_attempt = max(1, int(raw_attempt))
     except (TypeError, ValueError):
         generation_attempt = 1
+    run_id = (
+        os.environ.get("EVENT_PIPELINE_RUN_ID")
+        or os.environ.get("GITHUB_RUN_ID")
+        or os.environ.get("CF_PAGES_COMMIT_SHA")
+    )
+    if run_id:
+        run_id = f"{run_id}:{generation_attempt}"
+    else:
+        run_id = f"local:{now_cn().strftime('%Y%m%dT%H%M%S%z')}:{generation_attempt}"
     return {
         "trigger": os.environ.get("AUTOMATION_TRIGGER") or os.environ.get("GITHUB_EVENT_NAME") or "local",
         "scheduled_slot": os.environ.get("SCHEDULED_SLOT") or os.environ.get("SCHEDULE_GATE_SLOT") or None,
         "generation_attempt": generation_attempt,
+        "run_id": run_id,
     }
 
 
@@ -3242,6 +3367,13 @@ def _automatic_external_event_verified(
 
     if not isinstance(item, dict):
         return False
+    pipeline = ((snapshot.get("events") or {}).get("pipeline") or {})
+    if (
+        event_pipeline is not None
+        and pipeline.get("contract_version") == "official-event-pipeline-v1"
+        and not event_pipeline.event_is_auditable(item, snapshot, market_key, symbol)
+    ):
+        return False
     if item.get("event_type") in {"model_signal", "manual_external"}:
         return False
     if item.get("decision_eligible") is not True or str(item.get("ingestion_mode") or "").lower() != "automatic":
@@ -3253,6 +3385,16 @@ def _automatic_external_event_verified(
     if item.get("revoked_at"):
         return False
     if not item.get("source") or not str(item.get("url") or "").startswith("https://"):
+        return False
+    event_market = str(item.get("market") or market_key or "").lower()
+    hostname = (urllib.parse.urlparse(str(item.get("url") or "")).hostname or "").lower()
+    official_hosts = {
+        "a_share": ("cninfo.com.cn", "sse.com.cn", "szse.cn"),
+        "hk": ("hkexnews.hk", "hkex.com.hk"),
+        "us": ("sec.gov",),
+    }
+    allowed_hosts = official_hosts.get(event_market, ())
+    if not allowed_hosts or not any(hostname == host or hostname.endswith(f".{host}") for host in allowed_hosts):
         return False
     if market_key and str(item.get("market") or "").lower() != market_key.lower():
         return False
@@ -3270,7 +3412,10 @@ def _automatic_external_event_verified(
         forecast_end = None
     if not generated or not published or not effective or not forecast_end:
         return False
-    window_start = generated.replace(hour=0, minute=0, second=0, microsecond=0)
+    # A filing published before the generation day can still be the most
+    # important evidence for the coming ten-session window.  The old
+    # day-boundary check silently ignored prior-day negative filings.
+    window_start = generated - dt.timedelta(days=45)
     window_end = dt.datetime.combine(forecast_end, dt.time.max, tzinfo=CN_TZ)
     if published > generated or published < generated - dt.timedelta(days=45):
         return False
@@ -3284,10 +3429,19 @@ def _automatic_event_decision_eligible(
     market_key: str | None = None,
     symbol: str | None = None,
 ) -> bool:
-    return bool(
+    if not (
         _automatic_external_event_verified(item, snapshot, market_key=market_key, symbol=symbol)
         and str(item.get("direction") or "").lower() == "positive"
-    )
+    ):
+        return False
+    generated = _parse_iso_moment(snapshot.get("generated_at"))
+    published = _parse_iso_moment(item.get("released_at") or item.get("published_at"))
+    effective = _parse_iso_moment(item.get("effective_at"))
+    if not generated or not published or not effective:
+        return False
+    # Positive catalysts decay quickly; material negatives keep the broader
+    # 45-day risk window handled by ``_material_negative_event``.
+    return published >= generated - dt.timedelta(days=7) or effective >= generated
 
 
 def _material_negative_event(
@@ -3314,14 +3468,34 @@ def _event_pipeline_scan_state(snapshot: dict) -> tuple[bool, dict]:
     markets = {str(value) for value in (pipeline.get("markets") or pipeline.get("markets_scanned") or [])}
     scanned_at = _parse_iso_moment(pipeline.get("scanned_at"))
     generated_at = _parse_iso_moment(snapshot.get("generated_at"))
+    official_contract_complete = (
+        event_pipeline is not None
+        and pipeline.get("contract_version") == "official-event-pipeline-v1"
+        and event_pipeline.pipeline_complete(snapshot)
+    )
+    status_ready = (
+        official_contract_complete
+        if pipeline.get("contract_version") == "official-event-pipeline-v1"
+        else status in {"SCANNED", "READY", "READY_EMPTY", "COMPLETE"}
+    )
     complete = (
-        status in {"SCANNED", "READY", "COMPLETE"}
+        status_ready
         and markets == {"a_share", "hk", "us"}
         and scanned_at is not None
         and generated_at is not None
         and scanned_at <= generated_at
     )
     return complete, pipeline
+
+
+def _candidate_event_scan_complete(pipeline: dict, market_key: str, symbol: str) -> bool:
+    """Return whether this exact candidate was included in the official-source scan."""
+
+    scanned = pipeline.get("scanned_symbols") or pipeline.get("symbols_scanned") or {}
+    if not isinstance(scanned, dict):
+        return False
+    symbols = scanned.get(market_key) or []
+    return str(symbol).lower() in {str(value).lower() for value in symbols}
 
 
 def _finite_number(value) -> bool:
@@ -3926,9 +4100,14 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 item for item in (quality.get("inputs") or []) if isinstance(item, dict) and item.get("required")
             ]
             quality_ready = bool(required_inputs) and all(item.get("state") == "fresh" for item in required_inputs)
-            positive_event = any(
-                _automatic_event_decision_eligible(item, snapshot, market_key=market_key, symbol=code)
+            positive_events = [
+                item
                 for item in automatic_external
+                if _automatic_event_decision_eligible(item, snapshot, market_key=market_key, symbol=code)
+            ]
+            positive_event = bool(positive_events)
+            candidate_event_scanned = bool(
+                pipeline_scanned and _candidate_event_scan_complete(pipeline, market_key, code)
             )
             material_negative = any(
                 _material_negative_event(item, snapshot, market_key=market_key, symbol=code) for item in events
@@ -3965,6 +4144,10 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 candidate_blockers.append("LEGACY_DEEP_SCORE_MISSING")
             if not pipeline_scanned:
                 candidate_blockers.append("EVENT_PIPELINE_NOT_SCANNED")
+            elif not candidate_event_scanned:
+                candidate_blockers.append("EVENT_CANDIDATE_NOT_SCANNED")
+            if not positive_event:
+                candidate_blockers.append("VERIFIED_POSITIVE_EVENT_MISSING")
             if material_negative:
                 candidate_blockers.append("MATERIAL_NEGATIVE_EVENT")
             if not model_ready:
@@ -4019,6 +4202,8 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 "estimated_2d_range": candidate.get("estimated_2d_range"),
                 "estimated_10d_range": candidate.get("estimated_10d_range") or candidate.get("estimated_2w_range"),
                 "shadow_model": shadow_prediction,
+                "event_candidate_scanned": candidate_event_scanned,
+                "verified_positive_event_ids": [item.get("event_id") for item in positive_events if item.get("event_id")],
                 "blocker_codes": list(dict.fromkeys(candidate_blockers)),
             }
             evaluated.append(row)
@@ -4095,6 +4280,8 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
         blocker_codes.append("MARKET_COVERAGE_INCOMPLETE")
     if not pipeline_scanned:
         blocker_codes.append("EVENT_PIPELINE_NOT_SCANNED")
+    if not any(item.get("verified_positive_event_ids") for item in evaluated):
+        blocker_codes.append("VERIFIED_POSITIVE_EVENT_MISSING")
     if not calibrated:
         blocker_codes.append("TEN_DAY_PROBABILITY_UNCALIBRATED")
     if not costs_ready:
@@ -7860,6 +8047,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
                 "route_counts": recall_coverage["route_counts"],
                 "route_hit_counts": recall_coverage["route_hit_counts"],
                 "route_shortfalls": recall_coverage["route_shortfalls"],
+                "recall_manifest": _a_share_recall_manifest(hot_rows),
                 "source_counts": recall_source_counts(hot_rows, "a_share"),
                 "recall_backfill_count": recall_coverage["backfill_count"],
                 "deep_score_limit": int(os.environ.get("CHAN_MAX_KLINE_CHECKS", str(A_SHARE_DEEP_SCORE_LIMIT))),
@@ -7991,9 +8179,59 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         ),
         "disclaimer": "本工具是量化决策辅助，不构成投资建议，不保证盈利。",
     }
+    result["point_in_time_universe"] = build_point_in_time_universe(
+        generated_at,
+        hot_date,
+        trade_windows,
+        {"a_share": hot_rows, "hk": hk_universe, "us": us_universe},
+        {
+            "a_share": scored.get("research_candidates", scored["candidates"]),
+            "hk": hk_scored["candidates"],
+            "us": us_scored["candidates"],
+        },
+    )
+    run_id = str((result.get("automation") or {}).get("run_id") or "")
+    if event_pipeline is not None:
+        try:
+            result["events"] = event_pipeline.collect_for_snapshot(
+                result,
+                run_id,
+                now=generated_at,
+            )
+        except Exception as exc:
+            result["events"] = {
+                "generated_at": result.get("generated_at"),
+                "pipeline": {
+                    "contract_version": "official-event-pipeline-v1",
+                    "run_id": run_id,
+                    "status": "PARTIAL",
+                    "scanned_at": generated_at.isoformat(timespec="seconds"),
+                    "markets": [],
+                    "markets_attempted": ["a_share", "hk", "us"],
+                    "scanned_symbols": {"a_share": [], "hk": [], "us": []},
+                    "source_manifest": [],
+                    "reason_code": f"EVENT_PIPELINE_FAILED:{type(exc).__name__}",
+                },
+                "items": [],
+                "stats": {"automatic_external": 0, "decision_eligible": 0},
+            }
     result.setdefault("analysis_models", {})["ten_day_return"] = build_ten_day_shadow_model_contract(
         result,
         generated_at,
+    )
+    result["analysis_models"]["ten_day_excess_rank"] = (
+        ten_day_rank_model.build_collecting_contract()
+        if ten_day_rank_model is not None
+        else {
+            "model_id": "ten-day-excess-rank-shadow-v2",
+            "status": "UNAVAILABLE",
+            "calibrated": False,
+            "costs_ready": False,
+            "tail_risk_ready": False,
+            "participates_in_decision": False,
+            "production_eligible": False,
+            "reason_codes": ["RANK_MODEL_MODULE_UNAVAILABLE"],
+        }
     )
     result = enrich_snapshot_v2(result)
     cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

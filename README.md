@@ -115,6 +115,22 @@ V2 根据 `trend_risk_on / range / risk_off / high_vol / unknown` 使用可解�
 
 要升级为生产概率模型，至少需要持续保存每个历史决策日的点时候选池和未来不可见证据，累积足够的独立在线 Shadow 决策日，预注册晋级阈值，并在另一段未参与调参的样本上同时通过概率校准、成本后收益、尾部风险和数据完整性门槛。
 
+### 6.1 10 交易日净超额收益排序 V2
+
+`ten-day-excess-rank-shadow-v2` 与原概率模型并行运行，不替换 Legacy 因子，也不会自行获得买入权限。它把优化目标从“十日后是否为正”改为连续的：
+
+```text
+股票下一交易日开盘至第 10 个交易日收盘的净收益
+− 同一入场/退出窗口可投资宽基的净收益
+```
+
+- 注册基准固定为 A 股 `510300`、港股 `2800.HK`、美股 `SPY`；标签缺少完全相同的基准入场或退出交易日时失败关闭。
+- 每个健康批次冻结全部 A/港/美 `300 / 200 / 300` 点时候选成员、来源、召回路径、当时特征和交易窗口，旧日期不会按今天的赢家回填。
+- 不再将每个历史日截成 24 只；所有有效点时成员都参与训练，并以“每个信号日总权重相同”的方式防止某天候选多就支配模型。
+- 使用固定 L2 Ridge 学习连续净超额收益；验证采用按真实标签退出日 purge 的 expanding walk-forward。
+- 评估直接看逐日 Spearman Rank IC、Top 10% 净超额收益、Top 1 股票净收益、Top-Bottom spread、命中率和 10% Expected Shortfall。
+- 当前合同固定为 `COLLECTING`，且 `calibrated=false`、`participates_in_decision=false`、`production_eligible=false`。点时历史积累和独立晋级评审完成前，它只说明研究方向，不生成正式买入。
+
 ### 7. global 严格门禁
 
 跨市场正式动作由 `strict_cross_market_gate_v1` 控制。以下任一类条件不满足，就输出 `NO_VALID_PICK`：
@@ -159,14 +175,15 @@ V2 根据 `trend_risk_on / range / risk_off / high_vol / unknown` 使用可解�
 
 这套规则已经替代“周一到周五等于交易日”的旧逻辑。
 
-## 双轨 outcome ledger（正式绩效与研究验证）
+## 三轨历史账本（正式绩效、研究验证与完整观察）
 
-历史检验使用两条物理隔离的结果账本，原始 `data/picks/*.json` 始终保持不可变：
+历史检验使用三条物理隔离的账本，原始 `data/picks/*.json` 始终保持不可变：
 
 - 正式轨写入 `data/outcomes/executable/<prediction_id>.json`，`track=EXECUTABLE_MODEL`。只有完整、已校准且通过严格门禁的 `global_decision.primary` 才能登记；所有真实发布的可执行预测按稳定 `prediction_id` 去重，`NO_VALID_PICK`、Legacy 和研究优先项不会进入正式收益分母。
 - 研究轨继续写入 `data/outcomes/<prediction_id>.json`，`track=SHADOW_RESEARCH`。当 Shadow 模型通过本轮研究排序资格时，账本固化技术模型的 `prediction_id`、影子概率、净效用、尾部风险、成本、市场级产物哈希和训练截止日；未通过时不把不合格概率错记为研究样本。研究账本只在每日末次 `22:47` 主检查点登记一条 `PENDING`；`23:17` 健康补跑在入场前可更新同槽记录，已结算记录永不改写，手动运维刷新不登记研究样本。
+- 完整观察轨写入 `data/outcomes/observations/obscohort_<id>.json`，`track=MODEL_OBSERVATION`。每日 `22:47` 固化原概率模型的全部 `shadow_predictions`，不以 `rank_eligible`、质量门槛或净效用正负作为准入条件；`23:17` 同槽补跑作为 revision 保留。这条轨解决“被拒绝模型永远积累不到观察样本”的问题，但明确标记 `included_in_shadow_research=false` 与 `included_in_executable_performance=false`。当前只冻结预测，结果结算仍为 `NOT_IMPLEMENTED`，页面不会把它包装成胜率。
 
-两条轨共同遵循：
+正式轨与研究轨共同遵循：
 
 - 入场采用下一交易日开盘，退出采用第 10 个交易日收盘；
 - 合同同时固化交易所日历给出的真实开盘、收盘时刻；不会用 UTC 午夜伪装成交时间；
@@ -174,7 +191,7 @@ V2 根据 `trend_risk_on / range / risk_off / high_vol / unknown` 使用可解�
 - 成熟后使用同市场日线，按市场记录成本假设，结算为 `SETTLED`；
 - A 股使用前复权日线，港美使用 Yahoo adjusted close 因子调整的开盘与收盘；
 - 价格先按 8 位发布精度固化，再据此计算 gross、net 与正收益标签，避免低价股二次舍入造成合法样本被误删；
-- 同一轨内的 `prediction_id` 幂等更新，身份冲突会失败关闭；两条轨使用不同目录，不会串账或覆盖；
+- 同一轨内的稳定 ID 幂等更新，身份冲突会失败关闭；三条轨使用不同目录与明确隔离字段，不会串账或覆盖；
 - 已经 `SETTLED` 的记录不会因为后续行情变化而重算。
 
 页面历史 Tab 的正式指标只读取通过完整合同校验的 `EXECUTABLE_MODEL + SETTLED` 样本。统计 cohort 固定为最新发布的 `(model_id, label_version)`，同一 `target_date` 只保留生成时间最晚的一次可执行预测，因此旧模型和同日重复运行不会把可靠样本数虚高；原始账本仍完整保留供审计。页面展示平均净收益、正收益率、Top 10% 命中率、Brier、ECE、历史已选样本 Rank IC、10% Expected Shortfall 和结算序列最大回撤；总体可靠门槛为 20 个独立决策日，Top 10% 与 Expected Shortfall 另按实际尾部样本数展示，至少 5 个尾部观测才标记达标。样本不足时明确标记“早期样本”，不可用时显示空值而不是伪造 0。这里的 Rank IC 是跨历史已选样本的排序相关性，最大回撤是按结算顺序串联的终值序列，不冒充真实持仓组合。
@@ -192,7 +209,8 @@ Shadow 的 PENDING/SETTLED、排除和冲突数量独立展示。旧的手动或
 - A 股宽基主召回来自新浪行情中心的沪主板/深主板/创业板/科创板分板块横截面，东方财富在某板块缺口时回退；报价使用腾讯财经与东方财富的有界重试链路，模型日 K 只接受东方财富 `fqt=1`、腾讯 `qfqday` 或 Yahoo `adjclose` 三种明确调整口径。日 K 通过 GitHub Actions Cache 跨批次复用，缺失代码才低并发补拉；盘中技术分会用本轮腾讯实时行情覆盖缓存中的当日日线，缓存只优化请求频率，不替代行情新鲜度门禁。
 - A 股龙虎榜数据来自东方财富数据中心公开接口。
 - 港股和美股候选边界来自本轮东方财富延迟普通股横截面；源不可用时切换新浪公开市场榜单。最终 200/300 只的价格、最近交易时段与日线由 Yahoo Finance chart 二次验证，公开源缺口或时效不合格会降级，不会回填静态策展池。
-- 事件、公告、新闻和人工待入库证据在快照中分类标记；只有保存来源 URL、发布/生效时间并通过合同校验的自动证据才能参与严格门禁。
+- A 股公告只接受巨潮资讯、上交所或深交所官方原文；港股只接受 HKEXnews；美股只接受 SEC EDGAR。采集批次保存 run id、逐市场扫描标的、来源请求状态和原文 URL；自报 `official` 但 URL 不在官方域名白名单的记录不能进入门禁。
+- 事件、公告、新闻和人工待入库证据在快照中分类标记；只有保存来源 URL、发布/生效时间、精确证券映射并通过同批次合同校验的自动证据才能参与严格门禁。扫描成功但零事件是 `READY_EMPTY`，仍不能替代候选所需的官方正向证据。
 - XSHG / XHKG / XNYS 交易窗口由版本化 `exchange-calendars` 计算。
 
 这些是公开 best-effort 数据源，没有交易所级 SLA。页面显示的价格、涨跌和 K 线都属于已发布快照，不是浏览器盘中实时行情。顶栏的 `snapshot_as_of` 表示快照生成时间，`next_refresh` 表示下一个计划检查点，不是数据供应商或 GitHub 的准点保证。
@@ -205,7 +223,7 @@ Shadow 的 PENDING/SETTLED、排除和冲突数量独立展示。旧的手动或
 GitHub Actions（定时 / 手动）
   → 安装 Python/Node 依赖并运行测试
   → 生成三市场不可变选股快照
-  → 分轨登记/结算正式与 Shadow outcome ledger
+  → 分轨登记/结算正式与 Shadow outcome，并固化完整 MODEL_OBSERVATION
   → 校验 schema 与生产合同
   → 构建 public 静态资产和历史 manifest
   → Wrangler 部署 Cloudflare Worker
@@ -233,7 +251,7 @@ Python 选股程序不会在 Worker 或浏览器请求中重算。页面只读 `
 
 一次生成与 outcome 结算各最多尝试 3 次。部署前执行单元测试、JavaScript 语法检查、snapshot schema 校验和 immutable 快照一致性检查；部署后验证线上 `generated_at`、`snapshot_as_of`、`next_refresh`、`snapshot_key`、schema、模型版本、历史和不可变快照。生成、测试或部署前校验失败时不会切换生产版。部署前还会记录当前唯一 100% 生效的 Cloudflare Worker Version 和快照摘要；若部署后完整验收失败，Workflow 会标红并自动回滚到该精确版本，再核对旧快照身份与摘要。这是自动恢复，不是零暴露发布：新版在部署后验证窗口内可能短暂在线；回滚本身若失败也会继续标红，需要人工处理。
 
-每次定时或手动生成都会上传一个保留 30 天的 GitHub Actions 恢复包。为避免约 4–5 MiB 的全量快照在 Git 和 Worker 中无限增长，长期 Git 归档只保存每日 `22:47` 检查点或确实产生正式可执行候选的批次；Worker 只携带最近 30 个决策日的完整交互快照。更早的已归档决策日继续保留轻量摘要和双轨结果账本，因此历史统计仍可审计，但页面不会再下载其完整候选明细。
+每次定时或手动生成都会上传一个保留 30 天的 GitHub Actions 恢复包。为避免约 4–5 MiB 的全量快照在 Git 和 Worker 中无限增长，长期 Git 归档只保存每日 `22:47` 检查点或确实产生正式可执行候选的批次；Worker 只携带最近 30 个决策日的完整交互快照。更早的已归档决策日继续保留轻量摘要和三轨账本，因此历史统计仍可审计，但页面不会再下载其完整候选明细。归档冲突重试采用单调合并：较旧任务可以补充自己的不可变快照，但不能覆盖较新的 `latest.json`、把 `SETTLED` 降级成 `PENDING`，或丢失观察轨 revision。
 
 浏览器每 5 分钟读取一次 `/api/status`，只有 `generated_at` 变化才重载快照和历史。它不会轮询盘中行情，也不在前端重算评分与排序。快照 `fresh` 只表示它满足发布时效合同，不等于所有公开数据源绝对完整。
 
@@ -307,7 +325,7 @@ node --check static/app.js
 npm run check
 ```
 
-生成一次新快照并更新双轨结果账本：
+生成一次新快照并更新三轨结果账本（Shadow 研究、可执行推荐、模型观察）：
 
 ```bash
 python3 server.py --once --force

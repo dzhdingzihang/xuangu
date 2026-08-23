@@ -377,6 +377,7 @@ class SnapshotContractTests(unittest.TestCase):
                 "AUTOMATION_TRIGGER": "schedule",
                 "SCHEDULED_SLOT": "2026-08-21T20:17:00+08:00",
                 "GENERATION_ATTEMPT": "2",
+                "GITHUB_RUN_ID": "123456",
             },
             clear=False,
         ):
@@ -387,6 +388,7 @@ class SnapshotContractTests(unittest.TestCase):
                 "trigger": "schedule",
                 "scheduled_slot": "2026-08-21T20:17:00+08:00",
                 "generation_attempt": 2,
+                "run_id": "123456:2",
             },
         )
 

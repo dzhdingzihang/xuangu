@@ -497,8 +497,15 @@ jobs:
               continue
             fi
 
-            mkdir -p "${archive_tree}/data"
-            cp -a "${payload_root}/data/." "${archive_tree}/data/"
+            # Merge monotonically: a delayed retry may add its immutable
+            # snapshot, but it must never replace a newer latest.json,
+            # downgrade SETTLED to PENDING, or discard observation revisions.
+            if ! python "${archive_tree}/scripts/merge_archive_payload.py" "${payload_root}" "${archive_tree}"; then
+              echo "Archive payload conflicts with newer main on attempt ${attempt}" >&2
+              git worktree remove --force "${archive_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
             git -C "${archive_tree}" add data
             if git -C "${archive_tree}" diff --cached --quiet; then
               echo "Snapshot ${SNAPSHOT_KEY} is already archived."

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import math
 import pathlib
@@ -73,6 +74,10 @@ TEN_DAY_SHADOW_QUALITY_GATE = {
     "minimum_top_decile_excess_vs_mean": 0.005,
     "minimum_top_decile_mean_net_return": 0.0,
 }
+EVIDENCE_LOOP_MODEL_VERSION = "smart-selector-2026-08-23.3-evidence-loop"
+TEN_DAY_RANK_MODEL_ID = "ten-day-excess-rank-shadow-v2"
+TEN_DAY_RANK_LABEL_VERSION = "r10-net-excess-return-v2"
+TEN_DAY_RANK_BENCHMARKS = {"a_share": "510300", "hk": "2800.HK", "us": "SPY"}
 
 
 def finite_number(value) -> bool:
@@ -85,6 +90,79 @@ def probability(value) -> bool:
 
 def strict_boolean(value) -> bool:
     return type(value) is bool
+
+
+def _append_evidence_loop_errors(snapshot: dict, errors: list[str]) -> None:
+    if snapshot.get("model_version") != EVIDENCE_LOOP_MODEL_VERSION:
+        return
+    automation = snapshot.get("automation") or {}
+    if not isinstance(automation.get("run_id"), str) or not automation.get("run_id"):
+        errors.append("evidence-loop automation.run_id is required")
+    pipeline = ((snapshot.get("events") or {}).get("pipeline") or {})
+    if pipeline.get("contract_version") != "official-event-pipeline-v1":
+        errors.append("evidence-loop official event pipeline contract is required")
+    if pipeline.get("run_id") != automation.get("run_id"):
+        errors.append("event pipeline run_id must match automation.run_id")
+    if pipeline.get("status") not in {"READY", "READY_EMPTY", "PARTIAL"}:
+        errors.append("event pipeline status is invalid")
+    scanned_symbols = pipeline.get("scanned_symbols")
+    if not isinstance(scanned_symbols, dict) or set(scanned_symbols) != set(MARKET_RECALL_TARGETS):
+        errors.append("event pipeline scanned_symbols must cover three markets")
+
+    universe = snapshot.get("point_in_time_universe")
+    if not isinstance(universe, dict):
+        errors.append("point_in_time_universe is required")
+    else:
+        if universe.get("contract_version") != "point-in-time-universe-v1":
+            errors.append("point_in_time_universe.contract_version is invalid")
+        if universe.get("generated_at") != snapshot.get("generated_at"):
+            errors.append("point_in_time_universe.generated_at must match snapshot")
+        markets = universe.get("markets")
+        if not isinstance(markets, dict) or set(markets) != set(MARKET_RECALL_TARGETS):
+            errors.append("point_in_time_universe.markets must cover three markets")
+            markets = {}
+        for market, target in MARKET_RECALL_TARGETS.items():
+            section = markets.get(market) or {}
+            members = section.get("members")
+            if section.get("target_count") != target or section.get("member_count") != target:
+                errors.append(f"point_in_time_universe.{market} must contain {target} members")
+            if section.get("complete") is not True or not isinstance(members, list) or len(members) != target:
+                errors.append(f"point_in_time_universe.{market}.members is incomplete")
+                members = members if isinstance(members, list) else []
+            codes = [str(item.get("code") or "") for item in members if isinstance(item, dict)]
+            if len(codes) != len(set(codes)) or any(not code for code in codes):
+                errors.append(f"point_in_time_universe.{market} member identities are invalid")
+            if section.get("entry_trade_date") != (snapshot.get("next_trade_dates") or {}).get(market):
+                errors.append(f"point_in_time_universe.{market}.entry_trade_date is inconsistent")
+            if section.get("forecast_end_trade_date") != (snapshot.get("forecast_end_dates") or {}).get(market):
+                errors.append(f"point_in_time_universe.{market}.forecast_end_trade_date is inconsistent")
+        identity = {key: universe.get(key) for key in ("contract_version", "generated_at", "signal_date", "markets")}
+        expected_hash = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if universe.get("sha256") != expected_hash:
+            errors.append("point_in_time_universe.sha256 is inconsistent")
+
+    rank_model = ((snapshot.get("analysis_models") or {}).get("ten_day_excess_rank") or {})
+    if rank_model.get("model_id") != TEN_DAY_RANK_MODEL_ID:
+        errors.append("analysis_models.ten_day_excess_rank.model_id is invalid")
+    if rank_model.get("label_version") != TEN_DAY_RANK_LABEL_VERSION:
+        errors.append("analysis_models.ten_day_excess_rank.label_version is invalid")
+    if rank_model.get("status") != "COLLECTING":
+        errors.append("analysis_models.ten_day_excess_rank must remain COLLECTING")
+    if rank_model.get("benchmark_registry") != TEN_DAY_RANK_BENCHMARKS:
+        errors.append("analysis_models.ten_day_excess_rank benchmark registry is invalid")
+    for field in ("calibrated", "costs_ready", "tail_risk_ready", "participates_in_decision", "production_eligible"):
+        if rank_model.get(field) is not False:
+            errors.append(f"analysis_models.ten_day_excess_rank.{field} must remain false")
+    if rank_model.get("shadow_predictions") != []:
+        errors.append("analysis_models.ten_day_excess_rank cannot publish predictions while COLLECTING")
+
+    a_manifest = ((((snapshot.get("markets") or {}).get("a_share") or {}).get("stats") or {}).get("recall_manifest"))
+    if not isinstance(a_manifest, list) or len(a_manifest) != MARKET_RECALL_TARGETS["a_share"]:
+        errors.append("markets.a_share.stats.recall_manifest must contain 300 rows")
+    elif len({str(item.get("symbol") or "") for item in a_manifest if isinstance(item, dict)}) != len(a_manifest):
+        errors.append("markets.a_share.stats.recall_manifest symbols must be unique")
 
 
 def ten_day_shadow_quality_ready(validation: dict) -> bool:
@@ -1609,6 +1687,7 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                     errors.append(f"global_decision.market_states.{market_key}.reason_codes are incomplete")
                 if action == "REVIEW_EXECUTABLE_PICK" and published_state != "READY":
                     errors.append(f"REVIEW_EXECUTABLE_PICK requires market_states.{market_key}=READY")
+    _append_evidence_loop_errors(snapshot, errors)
     errors.extend(validate_live_candidate_publication(snapshot))
     return errors
 

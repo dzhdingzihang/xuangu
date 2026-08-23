@@ -234,7 +234,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('getJson("/api/latest")', self.js)
         self.assertIn("getHistoryPayload()", self.js)
         self.assertIn("window.setInterval(pollStatus, STATUS_POLL_INTERVAL_MS)", self.js)
-        for label in ("数据正常", "更新中", "数据已过期", "状态未知"):
+        for label in ("计划批次已发布", "等待计划批次", "计划批次已过期", "状态未知"):
             self.assertIn(label, self.js)
 
     def test_decision_page_makes_degraded_pool_visible(self) -> None:

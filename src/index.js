@@ -568,6 +568,15 @@ function historyMetadata(rows, days, view, returnedCount, evaluation = null) {
     executable_ledger: evaluation?.executable_ledger && typeof evaluation.executable_ledger === "object"
       ? evaluation.executable_ledger
       : emptyLedger("EXECUTABLE_MODEL", true),
+    observation_ledger: evaluation?.observation_ledger && typeof evaluation.observation_ledger === "object"
+      ? evaluation.observation_ledger
+      : {
+        track: "MODEL_OBSERVATION",
+        status: "UNAVAILABLE",
+        included_in_shadow_research: false,
+        included_in_executable_performance: false,
+        settlement_status: "NOT_IMPLEMENTED",
+      },
     returned_count: returnedCount,
     has_more: selectedCount > returnedCount,
   };
@@ -731,6 +740,16 @@ async function handleApi(request, env) {
     const currentTime = nowCN();
     const current = new Date(currentTime);
     const freshness = snapshotFreshness(latest ? latest.generated_at : null, current);
+    const sourceStateByMarket = Object.fromEntries(["a_share", "hk", "us"].map((market) => {
+      const section = latest?.markets?.[market] || {};
+      const health = section.quote_health || {};
+      return [market, {
+        status: health.status || "unknown",
+        quote_coverage: Number.isFinite(Number(health.quote_coverage)) ? Number(health.quote_coverage) : null,
+        source_session: health.freshness_reference_session || null,
+        source_as_of: health.source_as_of || health.observed_at || null,
+      }];
+    }));
     return json({
       ok: true,
       time: currentTime,
@@ -738,6 +757,8 @@ async function handleApi(request, env) {
       snapshot_generation: "github-actions",
       data_mode: "scheduled_snapshot",
       quote_delivery_mode: "scheduled_snapshot",
+      publication_state: freshness.freshness_state === "fresh" ? "BATCH_PUBLISHED" : freshness.freshness_state.toUpperCase(),
+      source_state_by_market: sourceStateByMarket,
       device_dependency: false,
       schedule_time_zone: SHANGHAI_TIME_ZONE,
       schedule_primary_checkpoints: WEEKDAY_CHECKPOINTS.map(([hour, minute]) => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`),

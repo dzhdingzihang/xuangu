@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import unittest
 
+import event_pipeline
 import server
 from scripts.validate_snapshot import validate_snapshot
 from tests.test_snapshot_contract import dynamic_hk_us_snapshot_fixture, snapshot_fixture
@@ -83,6 +84,12 @@ def executable_builder_input() -> dict:
     snapshot = server.enrich_snapshot_v2(snapshot)
     events = []
     predictions = []
+    scanned_symbols = {}
+    official_urls = {
+        "a_share": "https://static.cninfo.com.cn/finalpage/2026-08-21/fixture.pdf",
+        "hk": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0821/fixture.pdf",
+        "us": "https://www.sec.gov/Archives/edgar/data/fixture.htm",
+    }
     utilities = {"a_share": 0.01, "hk": 0.02, "us": 0.04}
     for market_key, section in snapshot["markets"].items():
         section["stats"]["universe_origin"] = (
@@ -106,6 +113,7 @@ def executable_builder_input() -> dict:
             ],
         }
         code = primary["code"]
+        scanned_symbols[market_key] = [code]
         events.append(
             {
                 "event_id": f"official:{market_key}:{code}",
@@ -115,9 +123,9 @@ def executable_builder_input() -> dict:
                 "source": "Official filing",
                 "source_tier": "regulatory",
                 "published_at": "2026-08-21T09:00:00+08:00",
-                "effective_at": "2026-08-26T09:00:00+08:00",
+                "effective_at": "2026-08-21T09:00:00+08:00",
                 "direction": "positive",
-                "url": "https://example.com/official",
+                "url": official_urls[market_key],
                 "evidence_status": "verified",
                 "decision_eligible": True,
                 "ingestion_mode": "automatic",
@@ -140,6 +148,7 @@ def executable_builder_input() -> dict:
             "status": "SCANNED",
             "scanned_at": "2026-08-22T08:59:00+08:00",
             "markets": ["a_share", "hk", "us"],
+            "scanned_symbols": scanned_symbols,
         },
         "items": events,
     }
@@ -460,6 +469,39 @@ class GlobalDecisionContractTests(unittest.TestCase):
         self.assertRegex(decision["primary"]["prediction_id"], r"^pred_[0-9a-f]{24}$")
         self.assertEqual(decision["primary"]["label_version"], server.TEN_DAY_LABEL_VERSION)
 
+    def test_official_pipeline_requires_same_run_source_and_symbol_manifest(self) -> None:
+        snapshot = executable_builder_input()
+        run_id = "run-fixture:1"
+        snapshot["events"]["pipeline"].update(
+            {
+                "contract_version": "official-event-pipeline-v1",
+                "run_id": run_id,
+                "status": "READY",
+                "source_manifest": [
+                    {"source_id": row["source_id"], "status": "SUCCESS"}
+                    for row in event_pipeline.SOURCE_REGISTRY.values()
+                ],
+            }
+        )
+        source_ids = {market: row["source_id"] for market, row in event_pipeline.SOURCE_REGISTRY.items()}
+        for event in snapshot["events"]["items"]:
+            event.update(
+                {
+                    "source_id": source_ids[event["market"]],
+                    "source_document_id": event["event_id"],
+                    "released_at": event["published_at"],
+                    "fetch_run_id": run_id,
+                }
+            )
+
+        self.assertEqual(server.build_global_ten_day_decision(snapshot)["action"], "REVIEW_EXECUTABLE_PICK")
+
+        snapshot["events"]["items"][0]["fetch_run_id"] = "another-run"
+        decision = server.build_global_ten_day_decision(snapshot)
+        affected_market = snapshot["events"]["items"][0]["market"]
+        affected = next(row for row in decision["evaluated_candidates"] if row["market"] == affected_market)
+        self.assertIn("VERIFIED_POSITIVE_EVENT_MISSING", affected["blocker_codes"])
+
     def test_builder_prediction_id_is_stable_for_the_same_slot(self) -> None:
         snapshot = executable_builder_input()
         snapshot["automation"] = {"scheduled_slot": "2026-08-21T08:17:00+08:00"}
@@ -515,23 +557,36 @@ class GlobalDecisionContractTests(unittest.TestCase):
         self.assertEqual(decision["action"], "NO_VALID_PICK")
         self.assertNotIn("_candidate_pool", snapshot["markets"]["a_share"])
 
-    def test_scanned_pipeline_with_zero_events_is_a_valid_empty_result(self) -> None:
+    def test_scanned_pipeline_with_zero_events_stays_research_only(self) -> None:
         snapshot = executable_builder_input()
+        scanned_symbols = snapshot["events"]["pipeline"]["scanned_symbols"]
         snapshot["events"] = {
             "pipeline": {
                 "status": "SCANNED",
                 "scanned_at": "2026-08-22T08:59:00+08:00",
                 "markets": ["a_share", "hk", "us"],
+                "scanned_symbols": scanned_symbols,
             },
             "items": [],
         }
 
         decision = server.build_global_ten_day_decision(snapshot)
 
-        self.assertEqual(decision["action"], "REVIEW_EXECUTABLE_PICK")
-        self.assertNotIn("EXTERNAL_EVIDENCE_MISSING", decision["blocker_codes"])
+        self.assertEqual(decision["action"], "NO_VALID_PICK")
+        self.assertIn("VERIFIED_POSITIVE_EVENT_MISSING", decision["blocker_codes"])
         self.assertTrue(decision["event_pipeline_scanned"])
         self.assertEqual(decision["automatic_external_evidence_count"], 0)
+
+    def test_old_positive_filing_does_not_unlock_the_strict_gate(self) -> None:
+        snapshot = executable_builder_input()
+        for event in snapshot["events"]["items"]:
+            event["published_at"] = "2026-07-30T09:00:00+08:00"
+            event["effective_at"] = "2026-07-30T09:00:00+08:00"
+
+        decision = server.build_global_ten_day_decision(snapshot)
+
+        self.assertEqual(decision["action"], "NO_VALID_PICK")
+        self.assertIn("VERIFIED_POSITIVE_EVENT_MISSING", decision["blocker_codes"])
 
     def test_material_negative_event_blocks_only_the_affected_candidate(self) -> None:
         snapshot = executable_builder_input()
@@ -545,11 +600,11 @@ class GlobalDecisionContractTests(unittest.TestCase):
                 "source": "SEC filing",
                 "source_tier": "regulatory",
                 "published_at": "2026-08-21T09:00:00+08:00",
-                "effective_at": "2026-08-26T09:00:00+08:00",
+                "effective_at": "2026-08-21T09:00:00+08:00",
                 "direction": "negative",
                 "materiality": "critical",
                 "decision_blocking": True,
-                "url": "https://example.com/material-negative",
+                "url": "https://www.sec.gov/Archives/edgar/data/material-negative.htm",
                 "evidence_status": "verified",
                 "decision_eligible": True,
                 "ingestion_mode": "automatic",

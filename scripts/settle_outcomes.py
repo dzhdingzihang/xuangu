@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 import market_calendar  # noqa: E402
 import history_evaluation  # noqa: E402
+import model_observation_ledger  # noqa: E402
 import server  # noqa: E402
 
 
@@ -679,9 +680,31 @@ def run(
     shadow = _settle_contracts(discover_contracts(picks_dir), outcomes_dir, today)
     executable_dir = executable_outcomes_dir or outcomes_dir / "executable"
     executable = _settle_contracts(discover_executable_contracts(picks_dir), executable_dir, today)
+    observation_dir = outcomes_dir / "observations"
+    observation = {"eligible": 0, "created": 0, "changed": 0, "unchanged": 0}
+    for path in sorted(picks_dir.glob("*.json")):
+        snapshot = read_json(path)
+        if not snapshot:
+            continue
+        try:
+            recorded = model_observation_ledger.record_observation_revision(
+                snapshot,
+                path.name,
+                observation_dir,
+            )
+        except model_observation_ledger.ObservationContractError:
+            continue
+        observation["eligible"] += 1
+        if recorded["created"]:
+            observation["created"] += 1
+        if recorded["changed"]:
+            observation["changed"] += 1
+        else:
+            observation["unchanged"] += 1
     counters = {key: shadow[key] + executable[key] for key in shadow}
     counters.update({f"shadow_{key}": value for key, value in shadow.items()})
     counters.update({f"executable_{key}": value for key, value in executable.items()})
+    counters.update({f"observation_{key}": value for key, value in observation.items()})
     return counters
 
 

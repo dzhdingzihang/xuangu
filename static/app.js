@@ -78,6 +78,9 @@ const GLOBAL_BLOCKER_META = {
   GLOBAL_DECISION_MISSING: "当前发布快照尚未包含跨市场十日契约",
   MARKET_COVERAGE_INCOMPLETE: "至少一个市场的召回、行情或市场上下文不完整",
   EXTERNAL_EVIDENCE_MISSING: "没有可进入自动决策的官方外部证据",
+  EVENT_PIPELINE_NOT_SCANNED: "官方公告采集没有完成三市场扫描",
+  EVENT_CANDIDATE_NOT_SCANNED: "该候选未包含在本批官方公告扫描清单",
+  VERIFIED_POSITIVE_EVENT_MISSING: "候选缺少可审计的官方正向事件证据",
   TEN_DAY_PROBABILITY_UNCALIBRATED: "十日正收益概率尚未样本外校准",
   TRANSACTION_COST_MODEL_MISSING: "交易成本模型尚未就绪",
   TAIL_RISK_MODEL_MISSING: "尾部风险模型尚未就绪",
@@ -93,9 +96,9 @@ const GLOBAL_BLOCKER_META = {
 const STATUS_POLL_INTERVAL_MS = 5 * 60 * 1000;
 const HISTORY_LIMIT = 1000;
 const FRESHNESS_META = {
-  fresh: { label: "数据正常", icon: "ph-check-circle", className: "is-fresh" },
-  updating: { label: "更新中", icon: "ph-arrows-clockwise", className: "is-updating" },
-  stale: { label: "数据已过期", icon: "ph-warning-circle", className: "is-stale" },
+  fresh: { label: "计划批次已发布", icon: "ph-check-circle", className: "is-fresh" },
+  updating: { label: "等待计划批次", icon: "ph-arrows-clockwise", className: "is-updating" },
+  stale: { label: "计划批次已过期", icon: "ph-warning-circle", className: "is-stale" },
   unknown: { label: "状态未知", icon: "ph-question", className: "is-unknown" },
 };
 const MANUAL_RESEARCH_EVIDENCE = [
@@ -360,9 +363,8 @@ function automaticExternalEvents() {
   const items = state.snapshot?.events?.items;
   if (!Array.isArray(items)) return [];
   const generated = Date.parse(state.snapshot?.generated_at || "");
-  const generatedDay = String(state.snapshot?.generated_at || "").slice(0, 10);
   const forecastEndDay = String(state.snapshot?.forecast_end_date || "").slice(0, 10);
-  const windowStart = Date.parse(`${generatedDay}T00:00:00+08:00`);
+  const windowStart = generated - 45 * 24 * 60 * 60 * 1000;
   const windowEnd = Date.parse(`${forecastEndDay}T23:59:59.999+08:00`);
   if (![generated, windowStart, windowEnd].every(Number.isFinite)) return [];
   return items.filter((event) => {
@@ -1750,6 +1752,17 @@ function renderShadowResearchPanel(shadowLedger) {
   return `<section class="panel shadow-evaluation-panel"><header class="panel-header"><div><h3 class="panel-title">Shadow 研究轨</h3><p class="panel-subtitle">只检验 research_priority 的研究排序；不计入可执行绩效、胜率或收益</p></div><span class="status-pill ${ledgerTone}">${ledgerLabel}</span></header><div class="shadow-ledger-grid"><div><small>原始登记</small><strong>${countValue(rawCount)}</strong><span>未按 prediction_id 去重</span></div><div><small>去重研究样本</small><strong>${countValue(predictionCount)}</strong><span>${contractPublished ? `PENDING ${fmt(pendingCount, 0)} · SETTLED ${fmt(settledCount, 0)}` : "合同未发布"}</span></div><div><small>排除记录</small><strong>${countValue(excludedCount)}</strong><span>未通过当前准入合同，详见后端诊断</span></div><div><small>Shadow 平均净收益</small><strong>${esc(returnValue)}</strong><span>${esc(historyMetricReason(returnMetric))}</span></div></div><footer>${icon("ph-flask")}<span>${esc(stateCopy)} ${isolated ? "后端合同明确标记 included_in_executable_performance=false。" : "隔离字段未发布，因此前端不会把它并入正式指标。"}</span></footer></section>`;
 }
 
+function renderObservationLedgerPanel(observationLedger) {
+  const available = observationLedger && observationLedger.track === "MODEL_OBSERVATION";
+  const cohorts = Math.max(0, num(observationLedger?.cohort_count));
+  const revisions = Math.max(0, num(observationLedger?.revision_count));
+  const predictions = Math.max(0, num(observationLedger?.canonical_prediction_count));
+  const markets = observationLedger?.market_prediction_counts || {};
+  const status = String(observationLedger?.status || "UNAVAILABLE").toUpperCase();
+  const tone = status === "OBSERVING" ? "primary" : status === "NO_SAMPLE" ? "warning" : "negative";
+  return `<section class="panel shadow-evaluation-panel"><header class="panel-header"><div><h3 class="panel-title">模型观察轨</h3><p class="panel-subtitle">每天 22:47 固化全部影子预测，包括质量门槛未通过和净效用为负的记录</p></div><span class="status-pill ${tone}">${esc(status)}</span></header><div class="shadow-ledger-grid"><div><small>每日 cohort</small><strong>${available ? fmt(cohorts, 0) : "—"}</strong><span>同槽补跑作为 revision</span></div><div><small>批次 revisions</small><strong>${available ? fmt(revisions, 0) : "—"}</strong><span>保留入场前最后版本</span></div><div><small>完整预测观察</small><strong>${available ? fmt(predictions, 0) : "—"}</strong><span>A ${fmt(markets.a_share, 0)} · 港 ${fmt(markets.hk, 0)} · 美 ${fmt(markets.us, 0)}</span></div><div><small>结果结算</small><strong>${esc(observationLedger?.settlement_status || "NOT IMPLEMENTED")}</strong><span>当前只负责积累点时预测</span></div></div><footer>${icon("ph-database")}<span>该轨不进入 Shadow research_priority，也不进入正式胜率和收益分母；它解决的是“被拒绝模型永远没有观察样本”的积累问题。</span></footer></section>`;
+}
+
 function renderHistory() {
   const root = $("#historyView");
   const currentArchive = $("details.history-archive");
@@ -1764,6 +1777,7 @@ function renderHistory() {
   const performance = meta.performance && typeof meta.performance === "object" ? meta.performance : {};
   const metrics = performance.metrics && typeof performance.metrics === "object" ? performance.metrics : {};
   const shadowLedger = meta.shadow_ledger && typeof meta.shadow_ledger === "object" ? meta.shadow_ledger : {};
+  const observationLedger = meta.observation_ledger && typeof meta.observation_ledger === "object" ? meta.observation_ledger : {};
   const rawRuns = num(meta.raw_run_count, state.history.length);
   const decisionDays = num(meta.decision_day_count, state.history.length);
   const duplicateRuns = num(meta.duplicate_run_count, Math.max(0, rawRuns - decisionDays));
@@ -1821,7 +1835,8 @@ function renderHistory() {
     <div class="evaluation-tabs" aria-label="评估维度"><button class="is-active" type="button">10日表现</button><button type="button" disabled>概率校准</button><button type="button" disabled>分市场表现</button><button type="button" disabled>版本对比</button><button type="button" disabled>失效分析</button><span>真实合同指标 · 非浏览器回填 · 非模拟收益</span></div>
     <details class="history-metrics-details ${sampleStatus === "NO_SAMPLE" ? "is-no-sample" : ""}" ${metricsExpandedByDefault ? "open" : ""}><summary>${icon("ph-chart-bar")}<span>查看指标定义</span><small>${fmt(HISTORY_PERFORMANCE_METRICS.length, 0)} 项 · ${sampleStatus === "NO_SAMPLE" ? "当前无可计算样本" : performanceState.label}</small>${icon("ph-caret-down")}</summary><section class="evaluation-metric-grid">${HISTORY_PERFORMANCE_METRICS.map((definition) => renderHistoryMetric(definition, metrics, performance)).join("")}</section></details>
     ${renderShadowResearchPanel(shadowLedger)}
-    <section class="panel evaluation-method"><header class="panel-header"><div><h3 class="panel-title">历史检验如何回答“今天买哪只更可能在两周内赚得最多”</h3><p class="panel-subtitle">评估既看收益排序，也看概率是否可信、风险是否可承受</p></div></header><div><article><b>01｜点时数据</b><p>当时可见的价格、财务与事件，禁止未来函数。</p></article><article><b>02｜净总回报</b><p>包含股息、扣除税费、点差、滑点与汇兑成本。</p></article><article><b>03｜概率校准</b><p>检验 P(R10&gt;0) 是否与真实频率一致。</p></article><article><b>04｜失效分析</b><p>按市场、行情状态、成本和事件类型拆解。</p></article></div></section>
+    ${renderObservationLedgerPanel(observationLedger)}
+    <section class="panel evaluation-method"><header class="panel-header"><div><h3 class="panel-title">历史检验如何回答“今天买哪只更可能在两周内赚得最多”</h3><p class="panel-subtitle">评估既看收益排序，也看概率是否可信、风险是否可承受</p></div></header><div><article><b>01｜点时数据</b><p>当时可见的候选池、价格与事件，禁止未来函数。</p></article><article><b>02｜净超额收益</b><p>股票复权收益减固定市场成本，再减同期宽基净收益；个性化成本尚未接入。</p></article><article><b>03｜排名检验</b><p>逐日检验 Spearman IC、Top 10%、Top 1 和尾部损失。</p></article><article><b>04｜失效分析</b><p>按市场、行情状态、成本和事件类型拆解。</p></article></div></section>
     <details class="history-archive" ${state.historyArchiveOpen ? "open" : ""}><summary>${icon("ph-archive")} 查看每日决策快照（${hasMore ? `已载入 ${fmt(returned, 0)} / ` : ""}${fmt(decisionDays, 0)} 个决策日）</summary><div class="history-archive-body">
       <div class="callout info">${icon("ph-info")}<div><strong>${fmt(rawRuns, 0)} 次原始运行 → ${fmt(decisionDays, 0)} 个每日代表快照</strong><br>同一 target_date 优先展示正式 global-10d 合同，同类保留最后一次运行；绩效另限定当前模型与标签版本，并在每个 target_date 只保留最晚发布的可执行预测。</div></div>
       <div class="filter-strip"><div class="filter-group"><span>市场</span><div class="segmented-button">${MARKET_ORDER.map((market) => `<button data-action="history-market" data-market="${market}" aria-pressed="${state.historyMarket === market}">${MARKET_META[market].label}</button>`).join("")}</div></div><label>动作<select id="historyAction"><option value="all">全部</option><option value="buy">有 Legacy 首选</option><option value="no_trade">不交易</option></select></label><label class="search-field">${icon("ph-magnifying-glass")}<input id="historySearch" type="search" value="${esc(state.historyQuery)}" placeholder="搜索日期 / 公司 / 代码" aria-label="搜索历史"></label></div>
@@ -1872,12 +1887,21 @@ function renderTenDayModelCard(modelState = tenDayModelState()) {
   </section>`;
 }
 
+function renderRankModelCard(model = {}) {
+  const status = String(model.status || "UNAVAILABLE").toUpperCase();
+  const observing = status === "COLLECTING";
+  const benchmarks = model.benchmark_registry || { a_share: "510300", hk: "2800.HK", us: "SPY" };
+  const reasons = Array.isArray(model.reason_codes) ? model.reason_codes : [];
+  return `<section class="panel shadow-model-card"><header class="panel-header"><div><h3 class="panel-title">10 日净超额收益排序 · V2</h3><p class="panel-subtitle">直接学习“股票净收益 − 可投资宽基净收益”，目标更接近两周内赚得最多</p></div><span class="status-pill ${observing ? "primary" : "negative"}">${esc(status)}</span></header><div class="shadow-model-metrics"><div><small>点时样本</small><strong>${fmt(model.sample_count, 0)}</strong><span>不做每日期 24 只截断</span></div><div><small>独立信号日</small><strong>${fmt(model.signal_date_count, 0)}</strong><span>最低训练门槛 ${fmt(model.minimum_train_days || 100, 0)} 日</span></div><div><small>Walk-forward folds</small><strong>${fmt(model.fold_count, 0)}</strong><span>按真实标签退出日防泄漏</span></div><div><small>正式决策权限</small><strong class="warning">无</strong><span>COLLECTING 不可自授权</span></div></div><div class="shadow-model-audit"><dl><dt>模型</dt><dd>${esc(model.model_id || "ten-day-excess-rank-shadow-v2")}</dd><dt>标签</dt><dd>${esc(model.label_version || "r10-net-excess-return-v2")}</dd><dt>A股基准</dt><dd>${esc(benchmarks.a_share || "510300")}</dd><dt>港股基准</dt><dd>${esc(benchmarks.hk || "2800.HK")}</dd><dt>美股基准</dt><dd>${esc(benchmarks.us || "SPY")}</dd></dl><div class="shadow-model-limit"><strong>当前边界</strong><p>${esc(reasons.join(" · ") || "等待每天的 300 / 200 / 300 点时候选池积累并完成样本外排名检验。")}</p></div></div></section>`;
+}
+
 function renderModel() {
   const root = $("#modelView");
   const status = state.status || {};
   const snapshot = state.snapshot || {};
   const weights = modelWeightRows();
   const dualModel = snapshot.analysis_models?.dual_low || {};
+  const rankModel = snapshot.analysis_models?.ten_day_excess_rank || {};
   const tenDay = tenDayModelState(snapshot);
   const tenDayLive = tenDay.ready;
   const tenDayPresentation = tenDayModelPresentation(tenDay);
@@ -1913,10 +1937,11 @@ function renderModel() {
   const hkRecallCopy = dynamicRecallCopy("hk", hkRecall, 200);
   const usRecallCopy = dynamicRecallCopy("us", usRecall, 300);
   root.innerHTML = `
-    <section class="objective-formula"><div><small>核心优化目标</small><strong>最终效用 ＝ 预期 10 日净总回报 − λ × 尾部风险 − μ × 交易成本 − ν × 数据不确定性</strong><p>净总回报包含股息，并扣除手续费、税费、点差、滑点与汇兑成本；缺失任一关键项时不输出可执行股票。</p></div><span>HORIZON · 10 TRADING DAYS</span></section>
+    <section class="objective-formula"><div><small>核心优化目标</small><strong>排序目标 ＝ 预期 10 日股票净收益 − 同期可投资宽基净收益</strong><p>V2 使用固定、公开的市场成本假设和 510300 / 2800.HK / SPY 基准；个性化佣金、税费、滑点与汇兑成本尚未接入，因此模型只积累观察样本，不输出可执行股票。</p></div><span>HORIZON · 10 TRADING DAYS</span></section>
     ${renderTenDayModelCard(tenDay)}
+    ${renderRankModelCard(rankModel)}
   <section class="panel model-pipeline-panel"><header class="panel-header"><div><h3 class="panel-title">7 阶段决策流水线</h3><p class="panel-subtitle">任一关键门禁失败，自动回退为 NO_VALID_PICK</p></div>${badge(snapshot.selector_mode || "legacy_active", "purple")}</header><ol class="pipeline-list pipeline-seven"><li><span>01</span><div><b>三市场有界动态召回</b><p>A / 港 / 美候选覆盖与召回来源。</p></div></li><li><span>02</span><div><b>交易与数据门禁</b><p>流动性、停牌、完整性和新鲜度。</p></div></li><li><span>03</span><div><b>因子和事件特征</b><p>Legacy、V2、双低与外部证据分开。</p></div></li><li><span>04</span><div><b>分市场 10 日模型</b><p>${esc(tenDayPipelineCopy)}</p></div></li><li><span>05</span><div><b>概率校准</b><p>${tenDayLive ? "P(R10>0) 已校准并记录模型版本。" : tenDay.shadowReady ? "已发布留出 Brier / ECE / AUC，但当前影子运行不授权正式动作。" : tenDay.shadowRejected ? "留出 Brier Skill、AUC、ECE 或 Top 10% 超额未同时达标，概率不进入排序。" : "P(R10>0) 留出校准数据积累中。"}</p></div></li><li><span>06</span><div><b>跨市场效用排名</b><p>收益、风险、成本与不确定性统一比较。</p></div></li><li class="is-gate"><span>07</span><div><b>可执行性复核</b><p>价格、仓位、事件时点与尾部风险。</p></div></li></ol></section>
-    <section class="model-version-grid"><article class="panel"><header class="panel-header"><div><h3 class="panel-title">版本状态</h3><p class="panel-subtitle">实际运行、影子观察与计划能力明确分开</p></div></header><div class="version-table"><div><b>Legacy</b><span class="status-pill positive">运行中</span><small>规则评分与市场级动作</small></div><div><b>V2</b><span class="status-pill primary">影子</span><small>分组因子与市场内结构排名</small></div><div><b>10 日收益模型</b><span class="status-pill ${esc(tenDayPresentation.tone)}">${esc(tenDayPresentation.label)}</span><small>${tenDayLive ? esc(tenDay.model.model_id || "已校准模型") : esc(tenDayPipelineCopy)}</small></div><div><b>数据闸门</b><span class="status-pill positive">运行中</span><small>可直接输出 NO_VALID_PICK</small></div></div></article><article class="panel"><header class="panel-header"><div><h3 class="panel-title">术语边界</h3><p class="panel-subtitle">分数、概率与动作不能混用</p></div></header><dl class="term-list"><dt>规则分</dt><dd>现有规则匹配程度，不等于上涨概率</dd><dt>影子 P10</dt><dd>留出样本概率观察；不参与正式决策</dd><dt>正式正收益概率</dt><dd>仅已授权生产模型的 P(R10&gt;0)</dd><dt>预测净收益</dt><dd>最终跨市场排序目标</dd><dt>置信度</dt><dd>数据和模型不确定性</dd><dt>研究优先</dt><dd>值得继续核验，不等于建议买入</dd></dl></article></section>
+    <section class="model-version-grid"><article class="panel"><header class="panel-header"><div><h3 class="panel-title">版本状态</h3><p class="panel-subtitle">实际运行、影子观察与计划能力明确分开</p></div></header><div class="version-table"><div><b>Legacy</b><span class="status-pill positive">运行中</span><small>规则评分与市场级动作</small></div><div><b>V2 因子</b><span class="status-pill primary">影子</span><small>分组因子与市场内结构排名</small></div><div><b>10 日概率 V1</b><span class="status-pill ${esc(tenDayPresentation.tone)}">${esc(tenDayPresentation.label)}</span><small>${tenDayLive ? esc(tenDay.model.model_id || "已校准模型") : esc(tenDayPipelineCopy)}</small></div><div><b>超额排序 V2</b><span class="status-pill primary">${esc(String(rankModel.status || "COLLECTING").toUpperCase())}</span><small>点时候选池持续积累，不参与正式决策</small></div><div><b>数据闸门</b><span class="status-pill positive">运行中</span><small>可直接输出 NO_VALID_PICK</small></div></div></article><article class="panel"><header class="panel-header"><div><h3 class="panel-title">术语边界</h3><p class="panel-subtitle">分数、概率与动作不能混用</p></div></header><dl class="term-list"><dt>规则分</dt><dd>现有规则匹配程度，不等于上涨概率</dd><dt>影子 P10</dt><dd>留出样本概率观察；不参与正式决策</dd><dt>净超额收益</dt><dd>股票净收益减去同期可投资宽基净收益</dd><dt>正式正收益概率</dt><dd>仅已授权生产模型的 P(R10&gt;0)</dd><dt>置信度</dt><dd>数据和模型不确定性</dd><dt>研究优先</dt><dd>值得继续核验，不等于建议买入</dd></dl></article></section>
     <div class="model-grid">
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">旧因子仍然保留</h3><p class="panel-subtitle">回答“之前的评分还在吗”</p></div>${badge("Active", "positive")}</header><div class="legacy-map"><div><b>初筛 pre_score</b><span>成交额、换手、量比、涨幅等</span></div><div><b>缠论近似 chan_score</b><span>均线结构、二买 / 三买、箱体回踩</span></div><div><b>CZSC 近似</b><span>中枢、趋势、箱体位置与背驰风险</span></div><div><b>UZI + 评审团</b><span>买点纪律、流动性、过热和杀猪盘门控</span></div><div><b>Serenity 先验</b><span>AI capex 上游稀缺环节与融资风险</span></div><div><b>推荐度与动作</b><span>只决定市场内 Legacy 排名与信号；能否执行由 global 严格门禁决定</span></div></div></article>
       <article class="panel"><header class="panel-header"><div><h3 class="panel-title">V2 分组权重</h3><p class="panel-subtitle">随市场状态采用规则先验；分数只作影子观察</p></div>${badge(snapshot.weights_version || "示意基准", "purple")}</header><div class="weight-list">${weights.map(([label, value]) => `<div><span>${esc(label)}</span><div class="progress-bar"><span style="width:${clamp(value)}%"></span></div><b>${fmt(value, 0)}%</b></div>`).join("")}</div><p class="fine-print">若市场基准数据不足，状态为 unknown 并保守处理；这里不声称是机器学习概率。</p></article>

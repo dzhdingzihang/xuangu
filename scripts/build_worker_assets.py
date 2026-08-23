@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import history_evaluation
+import model_observation_ledger
 
 
 PUBLIC = ROOT / "public"
@@ -81,6 +82,29 @@ TEN_DAY_VALIDATION_SUMMARY_FIELDS = (
     "top_decile_mean_net_return",
     "top_decile_excess_vs_mean",
     "expected_shortfall_10pct",
+)
+TEN_DAY_RANK_SUMMARY_FIELDS = (
+    "model_id",
+    "status",
+    "target",
+    "label_version",
+    "feature_schema_version",
+    "training_provenance",
+    "benchmark_registry",
+    "sampling_policy",
+    "validation_method",
+    "minimum_train_days",
+    "test_block_days",
+    "sample_count",
+    "signal_date_count",
+    "fold_count",
+    "first_signal_date",
+    "last_signal_date",
+    "calibrated",
+    "participates_in_decision",
+    "production_eligible",
+    "artifact_sha256",
+    "reason_codes",
 )
 
 
@@ -376,6 +400,15 @@ def summarize_analysis_models(pick: dict) -> dict:
                 ]
         if ten_day_summary:
             result["ten_day_return"] = ten_day_summary
+    rank_model = ((pick.get("analysis_models") or {}).get("ten_day_excess_rank") or {})
+    if isinstance(rank_model, dict):
+        rank_summary = {
+            key: rank_model.get(key)
+            for key in TEN_DAY_RANK_SUMMARY_FIELDS
+            if key in rank_model
+        }
+        if rank_summary:
+            result["ten_day_excess_rank"] = rank_summary
     return result
 
 
@@ -634,6 +667,10 @@ def main() -> None:
         shadow_inventory,
         executable_inventory,
     )
+    observation_summary = model_observation_ledger.summarize_observation_cohorts(
+        model_observation_ledger.load_observation_cohorts(outcome_root / "observations")
+    )
+    evaluation["observation_ledger"] = observation_summary
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "schema_version": latest_summary.get("schema_version"),
@@ -649,6 +686,7 @@ def main() -> None:
         "history_evaluation": evaluation,
         "shadow_ledger": evaluation["shadow_ledger"],
         "executable_ledger": evaluation["executable_ledger"],
+        "observation_ledger": observation_summary,
     }
     (public_picks / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
