@@ -20,6 +20,7 @@ PICKS = ROOT / "data" / "picks"
 OUTCOMES = ROOT / "data" / "outcomes"
 REQUIRED_STATIC_FILES = ("index.html", "styles.css", "app.js")
 MANIFEST_VERSION = "selector-manifest-v2"
+MAX_PUBLIC_FULL_SNAPSHOT_DAYS = 30
 DUAL_LOW_SUMMARY_FIELDS = (
     "status",
     "mode",
@@ -34,6 +35,52 @@ DUAL_LOW_SUMMARY_FIELDS = (
     "eligible_count",
     "rejected_count",
     "rank_universe_size",
+)
+TEN_DAY_SUMMARY_FIELDS = (
+    "model_id",
+    "status",
+    "label_version",
+    "feature_schema_version",
+    "training_cutoff",
+    "fit_data_cutoff",
+    "validation_cutoff",
+    "last_training_signal_date",
+    "last_calibration_signal_date",
+    "training_provenance",
+    "quality_gate",
+    "calibrated",
+    "costs_ready",
+    "tail_risk_ready",
+    "participates_in_decision",
+    "production_eligible",
+    "shadow_prediction_count",
+    "prediction_count",
+    "probability",
+    "artifact_sha256",
+)
+TEN_DAY_VALIDATION_SUMMARY_FIELDS = (
+    "status",
+    "independent_train_date_count",
+    "independent_calibration_date_count",
+    "independent_test_date_count",
+    "independent_test_dates",
+    "test_date_count",
+    "held_out_days",
+    "validation_weighting",
+    "top_decile_policy",
+    "train_row_count",
+    "calibration_row_count",
+    "test_row_count",
+    "brier_score",
+    "baseline_brier_score",
+    "brier_skill",
+    "ece_10bin",
+    "auc",
+    "positive_rate",
+    "mean_net_return",
+    "top_decile_mean_net_return",
+    "top_decile_excess_vs_mean",
+    "expected_shortfall_10pct",
 )
 
 
@@ -74,6 +121,8 @@ def public_outcome(outcome: dict | None) -> dict | None:
         "prediction_id",
         "model_id",
         "label_version",
+        "artifact_sha256",
+        "training_cutoff",
         "sampling_policy",
         "scheduled_slot",
         "source_snapshot",
@@ -270,17 +319,61 @@ def summarize_analysis_models(pick: dict) -> dict:
     if isinstance(ten_day, dict):
         ten_day_summary = {
             key: ten_day.get(key)
-            for key in (
-                "model_id",
-                "status",
-                "calibrated",
-                "costs_ready",
-                "tail_risk_ready",
-                "participates_in_decision",
-                "probability",
-            )
+            for key in TEN_DAY_SUMMARY_FIELDS
             if key in ten_day
         }
+        validation = ten_day.get("validation")
+        if isinstance(validation, dict):
+            validation_summary = {
+                key: validation.get(key)
+                for key in TEN_DAY_VALIDATION_SUMMARY_FIELDS
+                if key in validation
+            }
+            if validation_summary:
+                ten_day_summary["validation"] = validation_summary
+        market_models = ten_day.get("market_models")
+        if isinstance(market_models, dict):
+            market_summaries = {}
+            for market in ("a_share", "hk", "us"):
+                model = market_models.get(market)
+                if not isinstance(model, dict):
+                    continue
+                model_summary = {
+                    key: model.get(key)
+                    for key in (
+                        "status",
+                        "model_id",
+                        "artifact_sha256",
+                        "training_cutoff",
+                        "fit_data_cutoff",
+                        "validation_cutoff",
+                        "last_training_signal_date",
+                        "last_calibration_signal_date",
+                        "transaction_cost",
+                        "quality_gate",
+                        "reason_codes",
+                    )
+                    if key in model
+                }
+                market_validation = model.get("validation")
+                if isinstance(market_validation, dict):
+                    compact_validation = {
+                        key: market_validation.get(key)
+                        for key in TEN_DAY_VALIDATION_SUMMARY_FIELDS
+                        if key in market_validation
+                    }
+                    if compact_validation:
+                        model_summary["validation"] = compact_validation
+                if model_summary:
+                    market_summaries[market] = model_summary
+            if market_summaries:
+                ten_day_summary["market_models"] = market_summaries
+        for list_field in ("reason_codes", "limitations"):
+            values = ten_day.get(list_field)
+            if isinstance(values, list):
+                ten_day_summary[list_field] = [
+                    str(value) for value in values[:12] if isinstance(value, str) and value
+                ]
         if ten_day_summary:
             result["ten_day_return"] = ten_day_summary
     return result
@@ -347,6 +440,40 @@ def history_kind(global_decision: dict | None) -> str:
     ):
         return "global_10d_v1"
     return "legacy_snapshot"
+
+
+def select_public_snapshot_files(summaries: list[dict], limit: int = MAX_PUBLIC_FULL_SNAPSHOT_DAYS) -> set[str]:
+    """Select bounded full assets while retaining every compact history row."""
+
+    if limit <= 0:
+        return set()
+    ordered = sorted(
+        (item for item in summaries if isinstance(item, dict)),
+        key=lambda item: f"{item.get('target_date') or ''}{item.get('generated_at') or ''}",
+        reverse=True,
+    )
+    representatives: dict[str, dict] = {}
+    for item in ordered:
+        day_key = str(
+            item.get("target_date")
+            or item.get("signal_date")
+            or item.get("snapshot_key")
+            or item.get("cache_key")
+            or ""
+        )
+        if not day_key:
+            continue
+        current = representatives.get(day_key)
+        if current is None or (
+            current.get("history_kind") != "global_10d_v1"
+            and item.get("history_kind") == "global_10d_v1"
+        ):
+            representatives[day_key] = item
+    return {
+        str(item.get("cache_key"))
+        for item in list(representatives.values())[:limit]
+        if isinstance(item.get("cache_key"), str) and item.get("cache_key")
+    }
 
 
 def summarize_pick(
@@ -463,18 +590,10 @@ def main() -> None:
     )
     shadow_outcome_map = shadow_inventory["records"]
     executable_outcome_map = executable_inventory["records"]
-    files = []
     summaries = []
     snapshots = {}
     for path in sorted(PICKS.glob("*.json")):
-        write_public_pick(
-            path,
-            public_picks / path.name,
-            shadow_outcome_map,
-            executable_outcome_map,
-        )
         if path.name != "latest.json":
-            files.append(path.name)
             try:
                 snapshot = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -495,6 +614,20 @@ def main() -> None:
         else None
     )
     latest_summary = latest_summary or {}
+    published_files = select_public_snapshot_files(summaries)
+    latest_immutable = latest_summary.get("snapshot_key")
+    if isinstance(latest_immutable, str) and (PICKS / latest_immutable).is_file():
+        published_files.add(latest_immutable)
+    for summary in summaries:
+        summary["full_snapshot_available"] = summary.get("cache_key") in published_files
+    for path in sorted(PICKS.glob("*.json")):
+        if path.name == "latest.json" or path.name in published_files:
+            write_public_pick(
+                path,
+                public_picks / path.name,
+                shadow_outcome_map,
+                executable_outcome_map,
+            )
     evaluation = history_evaluation.build_history_evaluation(
         summaries,
         snapshots,
@@ -510,7 +643,8 @@ def main() -> None:
         "universe_version": latest_summary.get("universe_version"),
         "market_regimes": latest_summary.get("market_regimes") or {},
         "analysis_models": latest_summary.get("analysis_models") or {},
-        "files": files,
+        "files": sorted(published_files),
+        "full_snapshot_retention_days": MAX_PUBLIC_FULL_SNAPSHOT_DAYS,
         "summaries": summaries,
         "history_evaluation": evaluation,
         "shadow_ledger": evaluation["shadow_ledger"],

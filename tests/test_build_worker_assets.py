@@ -10,15 +10,151 @@ from scripts import build_worker_assets
 
 
 class BuildWorkerAssetsTests(unittest.TestCase):
-    def test_shadow_outcome_is_joined_by_full_frozen_contract(self) -> None:
+    def test_full_worker_snapshots_are_bounded_to_representative_decision_days(self) -> None:
+        summaries = []
+        for day in range(1, 36):
+            date = f"2026-07-{day:02d}"
+            summaries.extend(
+                [
+                    {
+                        "target_date": date,
+                        "generated_at": f"{date}T22:47:00+08:00",
+                        "cache_key": f"{date}-late.json",
+                        "history_kind": "global_10d_v1",
+                    },
+                    {
+                        "target_date": date,
+                        "generated_at": f"{date}T08:17:00+08:00",
+                        "cache_key": f"{date}-early.json",
+                        "history_kind": "global_10d_v1",
+                    },
+                ]
+            )
+
+        selected = build_worker_assets.select_public_snapshot_files(summaries, limit=30)
+
+        self.assertEqual(len(selected), 30)
+        self.assertIn("2026-07-35-late.json", selected)
+        self.assertNotIn("2026-07-35-early.json", selected)
+        self.assertNotIn("2026-07-01-late.json", selected)
+
+    def test_technical_shadow_outcome_publishes_nested_model_probability(self) -> None:
+        technical_id = "pred_abcdef0123456789abcdef01"
+        rule_id = "pred_0123456789abcdef01234567"
         pick = {
-            "snapshot_key": "shadow.json",
-            "automation": {},
+            "snapshot_key": "technical.json",
+            "automation": {
+                "trigger": "schedule",
+                "scheduled_slot": "2026-08-21T22:47:00+08:00",
+            },
             "global_decision": {
                 "contract_version": "global-10d-v1",
                 "decision_scope": "global_10d",
                 "action_basis": "strict_cross_market_gate_v1",
                 "action": "NO_VALID_PICK",
+                "probability": None,
+                "market_states": {
+                    "a_share": {"state": "READY"},
+                    "hk": {"state": "READY"},
+                    "us": {"state": "READY"},
+                },
+                "research_priority": {
+                    "status": "RESEARCH_ONLY",
+                    "prediction_id": rule_id,
+                    "model_id": "ten-day-rule-shadow-v1",
+                    "label_version": "shadow-net-return-10-session-v1",
+                    "market": "us",
+                    "code": "NVDA",
+                    "probability": None,
+                    "entry_trade_date": "2026-08-24",
+                    "forecast_end_trade_date": "2026-09-04",
+                    "calendar_id": "XNYS",
+                    "calendar_version": "exchange-calendars-4.13.2",
+                    "shadow_model": {
+                        "status": "SHADOW_ONLY",
+                        "rank_eligible": True,
+                        "prediction_id": technical_id,
+                        "model_id": "ten-day-technical-shadow-v1",
+                        "label_version": "r10-net-total-return-v1",
+                        "probability": 0.62,
+                        "expected_net_utility": 0.031,
+                        "tail_risk": 0.084,
+                        "transaction_cost": 0.0018,
+                        "artifact_sha256": "a" * 64,
+                        "training_cutoff": "2026-08-08",
+                        "calibrated": False,
+                        "participates_in_decision": False,
+                        "production_eligible": False,
+                    },
+                },
+            },
+        }
+        technical_outcome = {
+            "schema_version": "shadow-outcome-v1",
+            "track": "SHADOW_RESEARCH",
+            "status": "PENDING",
+            "prediction_id": technical_id,
+            "model_id": "ten-day-technical-shadow-v1",
+            "label_version": "r10-net-total-return-v1",
+            "market": "us",
+            "code": "NVDA",
+            "probability": 0.62,
+            "expected_net_utility": 0.031,
+            "tail_risk": 0.084,
+            "transaction_cost": 0.0018,
+            "artifact_sha256": "a" * 64,
+            "training_cutoff": "2026-08-08",
+            "source_snapshot": "technical.json",
+            "entry_trade_date": "2026-08-24",
+            "forecast_end_trade_date": "2026-09-04",
+            "horizon_trade_sessions": 10,
+            "entry_policy": "next_session_open_v1",
+            "exit_policy": "tenth_session_close_v1",
+            "sampling_policy": "daily_last_primary_checkpoint_v1",
+            "calendar_id": "XNYS",
+            "calendar_version": "exchange-calendars-4.13.2",
+        }
+        old_rule_outcome = dict(
+            technical_outcome,
+            prediction_id=rule_id,
+            model_id="ten-day-rule-shadow-v1",
+            label_version="shadow-net-return-10-session-v1",
+            probability=None,
+            expected_net_utility=None,
+            tail_risk=None,
+            artifact_sha256=None,
+            training_cutoff=None,
+        )
+
+        published = build_worker_assets.matching_shadow_outcome(
+            pick,
+            {technical_id: technical_outcome, rule_id: old_rule_outcome},
+        )
+
+        self.assertEqual(published["prediction_id"], technical_id)
+        self.assertEqual(published["model_id"], "ten-day-technical-shadow-v1")
+        self.assertEqual(published["probability"], 0.62)
+        self.assertEqual(published["artifact_sha256"], "a" * 64)
+        self.assertEqual(published["training_cutoff"], "2026-08-08")
+        self.assertIsNone(pick["global_decision"]["research_priority"]["probability"])
+
+    def test_shadow_outcome_is_joined_by_full_frozen_contract(self) -> None:
+        pick = {
+            "snapshot_key": "shadow.json",
+            "automation": {
+                "trigger": "schedule",
+                "scheduled_slot": "2026-08-21T22:47:00+08:00",
+            },
+            "global_decision": {
+                "contract_version": "global-10d-v1",
+                "decision_scope": "global_10d",
+                "action_basis": "strict_cross_market_gate_v1",
+                "action": "NO_VALID_PICK",
+                "market_states": {
+                    "a_share": {"state": "READY"},
+                    "hk": {"state": "READY"},
+                    "us": {"state": "READY"},
+                },
                 "research_priority": {
                     "status": "RESEARCH_ONLY",
                     "prediction_id": "pred_0123456789abcdef01234567",
@@ -30,6 +166,22 @@ class BuildWorkerAssetsTests(unittest.TestCase):
                     "forecast_end_trade_date": "2026-09-04",
                     "calendar_id": "XSHG",
                     "calendar_version": "exchange-calendars-4.13.2",
+                    "shadow_model": {
+                        "status": "SHADOW_ONLY",
+                        "rank_eligible": True,
+                        "prediction_id": "pred_0123456789abcdef01234567",
+                        "model_id": "shadow-model",
+                        "label_version": "shadow-label",
+                        "probability": 0.61,
+                        "expected_net_utility": 0.02,
+                        "tail_risk": 0.08,
+                        "transaction_cost": 0.0015,
+                        "artifact_sha256": "a" * 64,
+                        "training_cutoff": "2026-08-08",
+                        "calibrated": False,
+                        "participates_in_decision": False,
+                        "production_eligible": False,
+                    },
                 },
             }
         }
@@ -43,19 +195,21 @@ class BuildWorkerAssetsTests(unittest.TestCase):
                 "label_version": "shadow-label",
                 "market": "a_share",
                 "code": "600000",
-                "probability": None,
-                "expected_net_utility": None,
-                "tail_risk": None,
+                "probability": 0.61,
+                "expected_net_utility": 0.02,
+                "tail_risk": 0.08,
                 "source_snapshot": "shadow.json",
                 "entry_trade_date": "2026-08-24",
                 "forecast_end_trade_date": "2026-09-04",
                 "horizon_trade_sessions": 10,
                 "entry_policy": "next_session_open_v1",
                 "exit_policy": "tenth_session_close_v1",
-                "sampling_policy": "legacy_snapshot_v1",
+                "sampling_policy": "daily_last_primary_checkpoint_v1",
                 "calendar_id": "XSHG",
                 "calendar_version": "exchange-calendars-4.13.2",
                 "transaction_cost": 0.0015,
+                "artifact_sha256": "a" * 64,
+                "training_cutoff": "2026-08-08",
                 "secret_internal_field": "must-not-publish",
             }
         }
@@ -68,7 +222,10 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         prediction_id = "pred_aaaaaaaaaaaaaaaaaaaaaaaa"
         pick = {
             "snapshot_key": "shared.json",
-            "automation": {},
+            "automation": {
+                "trigger": "schedule",
+                "scheduled_slot": "2026-08-21T22:47:00+08:00",
+            },
             "global_decision": {
                 "contract_version": "global-10d-v1",
                 "decision_scope": "global_10d",
@@ -79,6 +236,11 @@ class BuildWorkerAssetsTests(unittest.TestCase):
                 "probability": 0.7,
                 "calibrated": True,
                 "blocker_codes": [],
+                "market_states": {
+                    "a_share": {"state": "READY"},
+                    "hk": {"state": "READY"},
+                    "us": {"state": "READY"},
+                },
                 "research_priority": {
                     "status": "RESEARCH_ONLY",
                     "prediction_id": prediction_id,
@@ -90,6 +252,22 @@ class BuildWorkerAssetsTests(unittest.TestCase):
                     "forecast_end_trade_date": "2026-09-04",
                     "calendar_id": "XSHG",
                     "calendar_version": "exchange-calendars-4.13.2",
+                    "shadow_model": {
+                        "status": "SHADOW_ONLY",
+                        "rank_eligible": True,
+                        "prediction_id": prediction_id,
+                        "model_id": "shadow-model",
+                        "label_version": "shadow-label",
+                        "probability": 0.61,
+                        "expected_net_utility": 0.02,
+                        "tail_risk": 0.08,
+                        "transaction_cost": 0.0015,
+                        "artifact_sha256": "a" * 64,
+                        "training_cutoff": "2026-08-08",
+                        "calibrated": False,
+                        "participates_in_decision": False,
+                        "production_eligible": False,
+                    },
                 },
                 "primary": {
                     "status": "EXECUTABLE",
@@ -121,19 +299,21 @@ class BuildWorkerAssetsTests(unittest.TestCase):
                 "label_version": "shadow-label",
                 "market": "a_share",
                 "code": "600000",
-                "probability": None,
-                "expected_net_utility": None,
-                "tail_risk": None,
+                "probability": 0.61,
+                "expected_net_utility": 0.02,
+                "tail_risk": 0.08,
                 "source_snapshot": "shared.json",
                 "entry_trade_date": "2026-08-24",
                 "forecast_end_trade_date": "2026-09-04",
                 "horizon_trade_sessions": 10,
                 "entry_policy": "next_session_open_v1",
                 "exit_policy": "tenth_session_close_v1",
-                "sampling_policy": "legacy_snapshot_v1",
+                "sampling_policy": "daily_last_primary_checkpoint_v1",
                 "calendar_id": "XSHG",
                 "calendar_version": "exchange-calendars-4.13.2",
                 "transaction_cost": 0.0015,
+                "artifact_sha256": "a" * 64,
+                "training_cutoff": "2026-08-08",
             }
         }
         executable = {
@@ -348,6 +528,50 @@ class BuildWorkerAssetsTests(unittest.TestCase):
             path = pathlib.Path(directory) / "wrong.json"
             path.write_text(json.dumps({"prediction_id": "pred_right"}), encoding="utf-8")
             self.assertEqual(build_worker_assets.read_outcome_map(path.parent), {})
+
+    def test_shadow_model_history_summary_keeps_audit_evidence_not_pool_predictions(self) -> None:
+        pick = {
+            "analysis_models": {
+                "ten_day_return": {
+                    "model_id": "ten-day-technical-shadow-v1",
+                    "status": "SHADOW_READY",
+                    "label_version": "r10-net-total-return-v1",
+                    "feature_schema_version": "technical-d1-v1",
+                    "training_cutoff": "2026-08-21",
+                    "training_provenance": "current_universe_historical_backfill",
+                    "calibrated": False,
+                    "participates_in_decision": False,
+                    "production_eligible": False,
+                    "shadow_prediction_count": 800,
+                    "validation": {
+                        "independent_test_date_count": 20,
+                        "brier_score": 0.22,
+                        "ece_10bin": 0.08,
+                        "auc": 0.61,
+                        "private_fold_rows": [1, 2, 3],
+                    },
+                    "market_models": {
+                        "a_share": {
+                            "status": "SHADOW_READY",
+                            "artifact_sha256": "a" * 64,
+                            "transaction_cost": 0.0015,
+                            "validation": {"test_row_count": 100, "brier_score": 0.21},
+                            "coefficients": [0.1] * 14,
+                        }
+                    },
+                    "limitations": ["CURRENT_UNIVERSE_BACKFILL"],
+                    "shadow_predictions": [{"code": str(index)} for index in range(800)],
+                }
+            }
+        }
+
+        result = build_worker_assets.summarize_analysis_models(pick)["ten_day_return"]
+        self.assertEqual(result["shadow_prediction_count"], 800)
+        self.assertEqual(result["validation"]["brier_score"], 0.22)
+        self.assertEqual(result["market_models"]["a_share"]["validation"]["test_row_count"], 100)
+        self.assertNotIn("shadow_predictions", result)
+        self.assertNotIn("private_fold_rows", result["validation"])
+        self.assertNotIn("coefficients", result["market_models"]["a_share"])
 
 
 if __name__ == "__main__":

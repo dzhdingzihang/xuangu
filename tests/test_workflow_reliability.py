@@ -163,6 +163,16 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertIn("AUTOMATION_TRIGGER: ${{ github.event_name }}", workflow)
         self.assertIn("SCHEDULED_SLOT: ${{ steps.schedule_gate.outputs.slot }}", workflow)
         self.assertIn('GENERATION_ATTEMPT="${attempt}" python server.py --once --force', workflow)
+        self.assertIn('python server.py --once --force --quiet', workflow)
+
+    def test_workflow_rotates_long_history_kline_caches_to_v2(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        for prefix in ("a-share-d1-v2-", "hk-us-d1-v2-"):
+            with self.subTest(prefix=prefix):
+                self.assertIn(prefix, workflow)
+        for stale_prefix in ("a-share-d1-v1-", "hk-us-d1-v1-"):
+            with self.subTest(stale_prefix=stale_prefix):
+                self.assertNotIn(stale_prefix, workflow)
 
     def test_production_configuration_has_no_device_quote_gateway_dependency(self) -> None:
         production_configuration = "\n".join(
@@ -192,6 +202,10 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertIn("Archive push attempt ${attempt}/3", workflow)
         self.assertIn("Archive failed after 3 bounded attempts", workflow)
         self.assertIn("[skip ci]", workflow)
+        self.assertIn("daily_2247_or_executable_v1", workflow)
+        self.assertIn('daily_checkpoint = trigger == "schedule" and "T22:47:" in scheduled_slot', workflow)
+        self.assertIn('global_decision.get("action") == "REVIEW_EXECUTABLE_PICK"', workflow)
+        self.assertIn("if: steps.snapshot_bundle.outcome == 'success'", workflow)
         self.assertNotIn("continue-on-error", workflow)
         self.assertNotIn("git-auto-commit-action", workflow)
 

@@ -32,6 +32,11 @@ import requests
 
 import history_evaluation
 
+try:
+    import ten_day_model
+except ImportError:  # The selector must still publish an explicit fail-closed card.
+    ten_day_model = None
+
 from market_calendar import (
     CALENDAR_VERSION,
     calendar_id,
@@ -39,6 +44,8 @@ from market_calendar import (
     market_trade_windows,
     quote_session_phase,
     session_dates,
+    session_close_at,
+    session_open_at,
 )
 
 
@@ -72,6 +79,16 @@ DUAL_LOW_STRATEGY_ID = "dual_low"
 DUAL_LOW_POOL_SCOPE = "a_share.merged_recall_quote_pool.pre_kline_v1"
 DUAL_LOW_BRIDGE = ROOT / "scripts" / "score_dual_low.mjs"
 DUAL_LOW_FACTOR_KEYS = ("value", "stability", "liquidity", "momentum", "activity", "reversal", "size")
+MODEL_KLINE_HISTORY_LIMIT = 260
+# 220 bars are the minimum needed for 100 train dates, two 10-date
+# embargoes, 30 calibration dates, 40 test dates, 20 feature lookback bars and
+# the 10-session label horizon.  A shorter current cache must be refreshed.
+MODEL_KLINE_MIN_HISTORY = 220
+A_SHARE_KLINE_CACHE_VERSION = "a-share-daily-kline-v2"
+A_SHARE_KLINE_ADJUSTMENT_POLICY = "qfq-forward-adjusted-v1"
+HK_US_KLINE_CACHE_VERSION = "hk-us-daily-kline-v2"
+TEN_DAY_SHADOW_MODEL_ID = "ten-day-technical-shadow-v1"
+TEN_DAY_SHADOW_FEATURE_SCHEMA = "technical-d1-v1"
 NETWORK_RETRY_ATTEMPTS = 3
 NETWORK_RETRY_BASE_DELAY_SECONDS = 0.25
 NETWORK_RETRY_MAX_DELAY_SECONDS = 1.0
@@ -2921,21 +2938,27 @@ def build_factor_groups(candidate: dict, weights: dict) -> dict:
 
 
 def legacy_score_contract(candidate: dict) -> dict:
+    legacy_complete = not (
+        candidate.get("legacy_complete") is False
+        or candidate.get("score_tier") == "technical_only"
+    )
     recommendation_degree = candidate.get("recommendation_degree")
     if recommendation_degree is None:
         recommendation_degree = candidate.get("confidence")
     return {
-        "active": True,
-        "score": candidate.get("score"),
-        "recommendation_degree": recommendation_degree,
+        "active": legacy_complete,
+        "complete": legacy_complete,
+        "score": candidate.get("score") if legacy_complete else None,
+        "recommendation_degree": recommendation_degree if legacy_complete else None,
         "components": {
             "preliminary": safe_float(candidate.get("pre_score")),
             "chan": safe_float(candidate.get("chan_score")),
             "czsc": safe_float(candidate.get("czsc_score")),
-            "serenity": safe_float(candidate.get("serenity_score")),
-            "uzi": safe_float(candidate.get("uzi_score")),
-            "uzi_panel": safe_float(candidate.get("uzi_panel_score")),
+            "serenity": safe_float(candidate.get("serenity_score")) if legacy_complete else None,
+            "uzi": safe_float(candidate.get("uzi_score")) if legacy_complete else None,
+            "uzi_panel": safe_float(candidate.get("uzi_panel_score")) if legacy_complete else None,
         },
+        "reason_code": None if legacy_complete else "LEGACY_DEEP_SCORE_NOT_RUN",
     }
 
 
@@ -3039,6 +3062,14 @@ def build_risk_items(candidate: dict, quality: dict) -> list[dict]:
     trade_status = str(candidate.get("trade_status") or "").lower()
     if candidate.get("suspended") or trade_status in {"suspended", "halted"}:
         items.append({"code": "SUSPENDED", "severity": "hard", "evidence": trade_status or "suspended=true"})
+    if candidate.get("technical_screen_eligible") is False:
+        items.append(
+            {
+                "code": "SECURITY_NOT_DEEP_RESEARCH_ELIGIBLE",
+                "severity": "hard",
+                "evidence": "A-share tradability screen rejected the security",
+            }
+        )
     if "退市" in name or candidate.get("delisting"):
         items.append({"code": "DELISTING", "severity": "hard", "evidence": candidate.get("name")})
     realtime = candidate.get("realtime") or {}
@@ -3067,6 +3098,7 @@ def evaluate_decision_gates(candidate: dict, quality: dict, risk_items: list[dic
     hard_codes = {item["code"] for item in risk_items if item.get("severity") == "hard"}
     price = safe_float(candidate.get("entry_price") or candidate.get("price"))
     kline_count = len(candidate.get("kline") or [])
+    tradability_codes = {"SUSPENDED", "DELISTING", "SECURITY_NOT_DEEP_RESEARCH_ELIGIBLE"}
     return [
         {
             "id": "quote_valid",
@@ -3083,8 +3115,8 @@ def evaluate_decision_gates(candidate: dict, quality: dict, risk_items: list[dic
         },
         {
             "id": "tradability",
-            "status": "BLOCK" if hard_codes & {"SUSPENDED", "DELISTING"} else "PASS",
-            "reason": "存在停牌/退市硬风险" if hard_codes & {"SUSPENDED", "DELISTING"} else "未发现明确停牌/退市状态",
+            "status": "BLOCK" if hard_codes & tradability_codes else "PASS",
+            "reason": "证券可交易性或深研准入未通过" if hard_codes & tradability_codes else "未发现明确停牌/退市状态",
         },
         {
             "id": "quote_freshness",
@@ -3329,6 +3361,198 @@ def _candidate_prediction(model: dict, market_key: str, code: str) -> dict | Non
     return result
 
 
+def _candidate_shadow_prediction(model: dict, market_key: str, code: str) -> dict | None:
+    """Return auditable Shadow evidence without creating a formal prediction.
+
+    Shadow probabilities intentionally live under ``shadow_predictions`` and
+    are never consumed by :func:`_candidate_prediction`.  This separate parser
+    is also a trust boundary: malformed or production-claiming rows disappear
+    from research output instead of affecting the strict global gate.
+    """
+
+    predictions = model.get("shadow_predictions")
+    prediction = None
+    if isinstance(predictions, list):
+        prediction = next(
+            (
+                item
+                for item in predictions
+                if isinstance(item, dict)
+                and str(item.get("market") or "").lower() == market_key.lower()
+                and str(item.get("code") or item.get("symbol") or "").lower() == code.lower()
+            ),
+            None,
+        )
+    elif isinstance(predictions, dict):
+        prediction = predictions.get(f"{market_key}:{code}") or predictions.get(code)
+    if not isinstance(prediction, dict):
+        return None
+
+    required_numbers = (
+        "probability",
+        "expected_net_return",
+        "expected_net_utility",
+        "transaction_cost",
+        "tail_risk",
+    )
+    if not all(_finite_number(prediction.get(key)) for key in required_numbers):
+        return None
+    if (
+        not 0 <= prediction["probability"] <= 1
+        or prediction["transaction_cost"] < 0
+        or prediction["tail_risk"] < 0
+    ):
+        return None
+    if prediction.get("participates_in_decision") is True or prediction.get("production_eligible") is True:
+        return None
+
+    market_model = (model.get("market_models") or {}).get(market_key) or {}
+    model_id = prediction.get("model_id") or market_model.get("model_id") or model.get("model_id")
+    label_version = prediction.get("label_version") or market_model.get("label_version") or model.get("label_version")
+    if not model_id or not label_version:
+        return None
+    result = {
+        key: prediction.get(key)
+        for key in (
+            "probability",
+            "expected_net_return",
+            "expected_net_utility",
+            "transaction_cost",
+            "tail_risk",
+            "market_validation_status",
+            "prediction_as_of",
+        )
+        if key in prediction
+    }
+    result["market_validation_status"] = (
+        prediction.get("market_validation_status")
+        or prediction.get("validation_status")
+        or prediction.get("status")
+    )
+    result.update(
+        {
+            "status": "SHADOW_ONLY",
+            "model_id": model_id,
+            "label_version": label_version,
+            "feature_schema_version": model.get("feature_schema_version"),
+            # Each market is fit independently.  Keep the selected row joined
+            # to that market's artifact/cutoff rather than the aggregate
+            # three-market envelope, otherwise outcome replay cannot identify
+            # the exact model that emitted the probability.
+            "artifact_sha256": (
+                prediction.get("artifact_sha256")
+                or market_model.get("artifact_sha256")
+                or model.get("artifact_sha256")
+            ),
+            "training_cutoff": (
+                prediction.get("training_cutoff")
+                or market_model.get("training_cutoff")
+                or model.get("training_cutoff")
+            ),
+            "fit_data_cutoff": (
+                prediction.get("fit_data_cutoff")
+                or market_model.get("fit_data_cutoff")
+                or model.get("fit_data_cutoff")
+            ),
+            "validation_cutoff": market_model.get("validation_cutoff") or model.get("validation_cutoff"),
+            "last_training_signal_date": (
+                market_model.get("last_training_signal_date") or model.get("last_training_signal_date")
+            ),
+            "last_calibration_signal_date": (
+                market_model.get("last_calibration_signal_date") or model.get("last_calibration_signal_date")
+            ),
+            "training_provenance": model.get("training_provenance"),
+            "calibrated": False,
+            "participates_in_decision": False,
+            "production_eligible": False,
+        }
+    )
+    return result
+
+
+def unavailable_ten_day_shadow_contract(reason_code: str, error_type: str | None = None) -> dict:
+    """Publish an explicit model card when Shadow construction cannot run."""
+
+    result = {
+        "model_id": TEN_DAY_SHADOW_MODEL_ID,
+        "label_version": TEN_DAY_LABEL_VERSION,
+        "feature_schema_version": TEN_DAY_SHADOW_FEATURE_SCHEMA,
+        "status": "UNAVAILABLE",
+        "calibrated": False,
+        "costs_ready": False,
+        "tail_risk_ready": False,
+        "participates_in_decision": False,
+        "production_eligible": False,
+        "probability": None,
+        "training_cutoff": None,
+        "training_provenance": "current_universe_historical_backfill",
+        "market_models": {},
+        "validation": {},
+        "limitations": [
+            "Shadow 模型不参与正式决策；输入、样本或模型完整性异常时严格降级。"
+        ],
+        "artifact_sha256": None,
+        "shadow_predictions": [],
+        "reason_codes": [reason_code],
+    }
+    if error_type:
+        result["error_type"] = error_type
+    return result
+
+
+def build_ten_day_shadow_model_contract(snapshot: dict, generated_at: dt.datetime | str) -> dict:
+    """Build one in-memory Shadow contract from the freshly populated caches.
+
+    The model implementation owns statistical validation.  The selector owns
+    the production safety boundary and forcibly strips every field that could
+    make a current-universe backfill look executable.
+    """
+
+    if ten_day_model is None:
+        return unavailable_ten_day_shadow_contract("TEN_DAY_SHADOW_MODEL_MODULE_UNAVAILABLE")
+    kline_maps = {
+        "a_share": _load_a_share_kline_cache(),
+        "hk": _load_hk_us_kline_cache("hk"),
+        "us": _load_hk_us_kline_cache("us"),
+    }
+    try:
+        contract = ten_day_model.build_snapshot_model_contract(
+            snapshot,
+            kline_maps,
+            generated_at,
+        )
+        if not isinstance(contract, dict):
+            raise TypeError("ten-day Shadow builder returned a non-object")
+        if not contract.get("model_id") or not contract.get("label_version"):
+            raise ValueError("ten-day Shadow model identity is incomplete")
+        if contract.get("training_provenance") != "current_universe_historical_backfill":
+            raise ValueError("ten-day Shadow training provenance is invalid")
+        if any(
+            contract.get(key) is True
+            for key in ("calibrated", "participates_in_decision", "production_eligible")
+        ):
+            raise ValueError("ten-day Shadow contract attempted to self-authorize")
+        predictions = contract.get("shadow_predictions")
+        if not isinstance(predictions, list):
+            raise ValueError("ten-day Shadow predictions must be a list")
+    except Exception as exc:
+        return unavailable_ten_day_shadow_contract(
+            "TEN_DAY_SHADOW_MODEL_INTEGRITY_ERROR",
+            type(exc).__name__,
+        )
+
+    result = dict(contract)
+    # These assignments are deliberate, even when the model implementation
+    # already emits the same values.  A Shadow artifact can never unlock the
+    # formal gate through an accidental future schema change.
+    result["calibrated"] = False
+    result["participates_in_decision"] = False
+    result["production_eligible"] = False
+    result["probability"] = None
+    result.pop("predictions", None)
+    return result
+
+
 def _stable_prediction_id(snapshot: dict, prediction: dict, market_key: str, code: str) -> str:
     scheduled_slot = (snapshot.get("automation") or {}).get("scheduled_slot")
     identity = "|".join(
@@ -3344,6 +3568,137 @@ def _stable_prediction_id(snapshot: dict, prediction: dict, market_key: str, cod
         )
     )
     return f"pred_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _research_candidate_snapshot(candidate: dict, market_key: str, shadow_prediction: dict | None) -> dict:
+    """Freeze the minimum UI evidence needed to display the selected research row.
+
+    The complete 800-name in-memory pool is intentionally not published.  This
+    compact object prevents the UI from silently substituting a Legacy
+    watchlist row when the server selected a technical-only candidate.
+    """
+
+    fields = (
+        "code",
+        "symbol",
+        "name",
+        "role",
+        "price",
+        "entry_price",
+        "signal_price",
+        "change_pct",
+        "current_change_pct",
+        "signal_change_pct",
+        "realtime",
+        "amount_yi",
+        "amount_currency",
+        "turnover_pct",
+        "vol_ratio",
+        "float_mcap_yi",
+        "market_liquidity_percentile",
+        "market_cap_percentile",
+        "reason_tags",
+        "theme_tags",
+        "candidate_lineage",
+        "score",
+        "pre_score",
+        "screen_score",
+        "screen_rank",
+        "score_tier",
+        "technical_screen_eligible",
+        "legacy_complete",
+        "deep_scored",
+        "legacy_rank",
+        "confidence",
+        "recommendation_degree",
+        "legacy",
+        "v2",
+        "analysis_projects",
+        "data_quality",
+        "risk_items",
+        "risk_flags",
+        "decision_gates",
+        "execution_state",
+        "estimated_2d_range",
+        "estimated_10d_range",
+        "estimated_2w_range",
+        "stop_loss",
+        "take_profit_reference",
+        "reasons",
+    )
+    result = {key: candidate.get(key) for key in fields if key in candidate}
+    result.update(
+        {
+            "candidate_snapshot_version": "research-candidate-v1",
+            "market_key": market_key,
+            "research_only": True,
+            "legacy_complete": (candidate.get("legacy") or {}).get("complete") is not False
+            and candidate.get("legacy_complete") is not False
+            and candidate.get("score_tier") != "technical_only",
+        }
+    )
+    if shadow_prediction:
+        result["shadow_model"] = dict(shadow_prediction)
+    return result
+
+
+def _latest_completed_market_session(
+    market_key: str,
+    generated_at: dt.datetime | str,
+) -> dt.date:
+    """Return the latest exchange session whose regular close is observable."""
+
+    if isinstance(generated_at, dt.datetime):
+        anchor = generated_at
+    else:
+        anchor = dt.datetime.fromisoformat(str(generated_at or "").replace("Z", "+00:00"))
+    if anchor.tzinfo is None or anchor.utcoffset() is None:
+        raise ValueError("generated_at must be timezone-aware")
+
+    quote_session = expected_quote_session(market_key, anchor)
+    session_close = dt.datetime.fromisoformat(session_close_at(market_key, quote_session))
+    if anchor >= session_close:
+        return quote_session
+
+    # During a regular session expected_quote_session points at today's still
+    # incomplete bar. Asking immediately before that session's open returns the
+    # previous completed exchange session, including across holidays/weekends.
+    session_open = dt.datetime.fromisoformat(session_open_at(market_key, quote_session))
+    return expected_quote_session(market_key, session_open - dt.timedelta(microseconds=1))
+
+
+def _shadow_rank_eligible(
+    model: dict,
+    market_key: str,
+    shadow_prediction: dict | None,
+    generated_at: dt.datetime | str | None,
+) -> bool:
+    """Gate Shadow utility separately from evidence visibility."""
+
+    if not isinstance(shadow_prediction, dict):
+        return False
+    top_status = str(model.get("status") or model.get("calibration_status") or "").upper()
+    market_model = (model.get("market_models") or {}).get(market_key) or {}
+    market_status = str(market_model.get("status") or "").upper()
+    row_status = str(
+        shadow_prediction.get("market_validation_status")
+        or shadow_prediction.get("validation_status")
+        or ""
+    ).upper()
+    utility = shadow_prediction.get("expected_net_utility")
+    try:
+        latest_completed = _latest_completed_market_session(market_key, generated_at)
+    except (TypeError, ValueError, KeyError):
+        return False
+    prediction_as_of = str(shadow_prediction.get("prediction_as_of") or "")
+    return bool(
+        top_status == "SHADOW_READY"
+        and market_status == "SHADOW_READY"
+        and row_status == "SHADOW_READY"
+        and prediction_as_of == latest_completed.isoformat()
+        and _finite_number(utility)
+        and utility > 0
+    )
 
 
 def build_event_feed(snapshot: dict) -> dict:
@@ -3497,6 +3852,7 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
     market_states: dict[str, dict] = {}
     evaluated: list[dict] = []
     research_rows: list[dict] = []
+    research_candidate_snapshots: dict[tuple[str, str], dict] = {}
     executable: list[dict] = []
     for market_key in ("a_share", "hk", "us"):
         section = ((snapshot.get("markets") or {}).get(market_key) or {}) or {}
@@ -3578,9 +3934,25 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 _material_negative_event(item, snapshot, market_key=market_key, symbol=code) for item in events
             )
             prediction = _candidate_prediction(model, market_key, code) if model_ready else None
+            shadow_prediction = _candidate_shadow_prediction(model, market_key, code)
             if prediction:
                 prediction["prediction_id"] = prediction.get("prediction_id") or _stable_prediction_id(
                     snapshot, prediction, market_key, code
+                )
+            if shadow_prediction:
+                # The technical model owns a separate identity from the
+                # rule-based research_priority ledger row.
+                shadow_prediction["prediction_id"] = _stable_prediction_id(
+                    snapshot,
+                    shadow_prediction,
+                    market_key,
+                    code,
+                )
+                shadow_prediction["rank_eligible"] = _shadow_rank_eligible(
+                    model,
+                    market_key,
+                    shadow_prediction,
+                    snapshot.get("generated_at"),
                 )
             candidate_blockers = list(reasons)
             if hard_blocked:
@@ -3589,6 +3961,8 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 candidate_blockers.append("DECISION_GATES_NOT_ALL_PASS")
             if not quality_ready:
                 candidate_blockers.append("REQUIRED_INPUTS_INCOMPLETE")
+            if candidate.get("legacy_complete") is False or candidate.get("score_tier") == "technical_only":
+                candidate_blockers.append("LEGACY_DEEP_SCORE_MISSING")
             if not pipeline_scanned:
                 candidate_blockers.append("EVENT_PIPELINE_NOT_SCANNED")
             if material_negative:
@@ -3644,24 +4018,62 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 "entry_price": candidate.get("entry_price") or candidate.get("price"),
                 "estimated_2d_range": candidate.get("estimated_2d_range"),
                 "estimated_10d_range": candidate.get("estimated_10d_range") or candidate.get("estimated_2w_range"),
+                "shadow_model": shadow_prediction,
                 "blocker_codes": list(dict.fromkeys(candidate_blockers)),
             }
             evaluated.append(row)
-            if not hard_blocked and not material_negative:
+            research_candidate_snapshots[(market_key, code)] = _research_candidate_snapshot(
+                candidate,
+                market_key,
+                shadow_prediction,
+            )
+            if state_name != "BLOCKED" and not hard_blocked and not material_negative:
                 research_rows.append(row)
             if not candidate_blockers:
                 executable.append(row)
 
-    research_rows.sort(
-        key=lambda item: (safe_float(item.get("rule_priority_score")), item.get("market", ""), item.get("code", "")),
-        reverse=True,
-    )
+    def research_sort_key(item: dict) -> tuple:
+        shadow = item.get("shadow_model")
+        shadow_eligible = bool(isinstance(shadow, dict) and shadow.get("rank_eligible") is True)
+        shadow_utility = (
+            shadow.get("expected_net_utility")
+            if shadow_eligible and _finite_number(shadow.get("expected_net_utility"))
+            else None
+        )
+        return (
+            shadow_eligible,
+            float(shadow_utility) if shadow_utility is not None else safe_float(item.get("rule_priority_score")),
+            safe_float((shadow or {}).get("probability")) if shadow_eligible else 0.0,
+            safe_float(item.get("rule_priority_score")),
+            item.get("market", ""),
+            item.get("code", ""),
+        )
+
+    research_rows.sort(key=research_sort_key, reverse=True)
     research_priority = dict(research_rows[0]) if research_rows else None
     if research_priority:
+        selected_candidate_snapshot = research_candidate_snapshots.get(
+            (research_priority["market"], research_priority["code"])
+        )
+        research_priority["candidate_snapshot"] = selected_candidate_snapshot
+        # ``research_priority`` is itself a published live candidate consumed
+        # by the Worker and deployment verifier.  Keep the compact nested
+        # snapshot for the full UI evidence, but also repeat the canonical
+        # quote envelope at the row boundary so it cannot be mistaken for an
+        # unverified price when the winner came from the technical-only pool.
+        if isinstance(selected_candidate_snapshot, dict):
+            realtime = selected_candidate_snapshot.get("realtime")
+            if isinstance(realtime, dict):
+                research_priority["realtime"] = dict(realtime)
         research_priority.update(
             {
                 "status": "RESEARCH_ONLY",
                 "score_kind": "RULE_PRIORITY",
+                "research_sort_basis": (
+                    "SHADOW_EXPECTED_NET_UTILITY"
+                    if (research_priority.get("shadow_model") or {}).get("rank_eligible") is True
+                    else "RULE_PRIORITY"
+                ),
                 "priority_score_kind": "auditable_rule_priority_v1",
                 "model_id": SHADOW_TEN_DAY_MODEL_ID,
                 "label_version": SHADOW_TEN_DAY_LABEL_VERSION,
@@ -4754,7 +5166,7 @@ def industry_heat() -> dict:
     return {"top": top, "total": len(rows)}
 
 
-def baidu_stock_kline(code: str, limit: int = 70) -> list[dict]:
+def baidu_stock_kline(code: str, limit: int = MODEL_KLINE_HISTORY_LIMIT) -> list[dict]:
     url = "https://finance.pae.baidu.com/selfselect/getstockquotation"
     params = {
         "all": "1",
@@ -4806,7 +5218,7 @@ def baidu_stock_kline(code: str, limit: int = 70) -> list[dict]:
     return rows
 
 
-def eastmoney_stock_kline(code: str, limit: int = 70) -> list[dict]:
+def eastmoney_stock_kline(code: str, limit: int = MODEL_KLINE_HISTORY_LIMIT) -> list[dict]:
     url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     params = {
         "secid": eastmoney_secid(code),
@@ -4839,12 +5251,18 @@ def eastmoney_stock_kline(code: str, limit: int = 70) -> list[dict]:
                 "amplitude": safe_float(parts[7]),
                 "change_pct": safe_float(parts[8]),
                 "turnover": safe_float(parts[10]),
+                "price_adjustment": "eastmoney_fqt_1_qfq",
             }
         )
     return rows
 
 
-def tencent_stock_kline(code: str, limit: int = 70) -> list[dict]:
+def tencent_stock_kline(
+    code: str,
+    limit: int = MODEL_KLINE_HISTORY_LIMIT,
+    *,
+    require_qfq: bool = False,
+) -> list[dict]:
     symbol = market_prefix(code) + code
     url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     params = {"param": f"{symbol},day,,,{limit},qfq"}
@@ -4857,7 +5275,11 @@ def tencent_stock_kline(code: str, limit: int = 70) -> list[dict]:
         )
         data = response.json()
         payload = ((data.get("data") or {}).get(symbol) or {})
-        klines = payload.get("qfqday") or payload.get("day") or []
+        qfq_klines = payload.get("qfqday") or []
+        # ``day`` has no verifiable adjustment basis. Legacy charts may retain
+        # it as a last-resort fallback, but model/cache history must fail closed
+        # unless Tencent explicitly returns its qfq series.
+        klines = qfq_klines if require_qfq else qfq_klines or payload.get("day") or []
     except Exception:
         return []
     rows = []
@@ -4880,12 +5302,15 @@ def tencent_stock_kline(code: str, limit: int = 70) -> list[dict]:
                 "amplitude": pct_change(high, low) if low else 0,
                 "change_pct": pct_change(close, prev_close),
                 "turnover": 0,
+                "price_adjustment": "tencent_qfqday" if qfq_klines else "tencent_adjustment_unknown",
             }
         )
     return rows
 
 
-def stock_kline(code: str, limit: int = 70) -> list[dict]:
+def stock_kline(code: str, limit: int = MODEL_KLINE_HISTORY_LIMIT) -> list[dict]:
+    """Legacy chart chain; Baidu remains available outside model training."""
+
     rows = baidu_stock_kline(code, limit)
     if rows:
         return rows
@@ -4895,12 +5320,42 @@ def stock_kline(code: str, limit: int = 70) -> list[dict]:
     return tencent_stock_kline(code, limit)
 
 
+def yahoo_a_share_symbol(code: str) -> str:
+    """Map the production Shanghai/Shenzhen boards to Yahoo symbols."""
+
+    return f"{code}.SS" if str(code).startswith(("5", "6", "9")) else f"{code}.SZ"
+
+
+def qfq_stock_kline(code: str, limit: int = MODEL_KLINE_HISTORY_LIMIT) -> list[dict]:
+    """Return only a series with an explicit corporate-action adjustment.
+
+    Eastmoney ``fqt=1`` and Tencent ``qfqday`` are explicit qfq contracts.
+    Baidu is intentionally absent because its response does not expose a
+    verifiable adjustment basis suitable for total-return model training.
+    Yahoo is the final independent fallback and is accepted only through
+    :func:`yahoo_chart_kline`, which requires ``adjclose`` and adjusts the full
+    OHLC row with the same factor.
+    """
+
+    rows = eastmoney_stock_kline(code, limit)
+    if rows:
+        return rows
+    rows = tencent_stock_kline(code, limit, require_qfq=True)
+    if rows:
+        return rows
+    return yahoo_chart_kline(yahoo_a_share_symbol(code), limit)
+
+
 def _load_a_share_kline_cache() -> dict[str, list[dict]]:
     try:
         payload = json.loads(A_SHARE_KLINE_CACHE.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return {}
-    if not isinstance(payload, dict) or payload.get("version") != "a-share-daily-kline-v1":
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != A_SHARE_KLINE_CACHE_VERSION
+        or payload.get("adjustment_policy") != A_SHARE_KLINE_ADJUSTMENT_POLICY
+    ):
         return {}
     rows_by_code = payload.get("rows")
     if not isinstance(rows_by_code, dict):
@@ -4908,7 +5363,7 @@ def _load_a_share_kline_cache() -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {}
     for code, rows in rows_by_code.items():
         if isinstance(code, str) and isinstance(rows, list) and rows:
-            result[code] = rows[-70:]
+            result[code] = rows[-MODEL_KLINE_HISTORY_LIMIT:]
     return result
 
 
@@ -4916,9 +5371,14 @@ def _save_a_share_kline_cache(rows_by_code: dict[str, list[dict]]) -> None:
     if not rows_by_code:
         return
     payload = {
-        "version": "a-share-daily-kline-v1",
+        "version": A_SHARE_KLINE_CACHE_VERSION,
+        "adjustment_policy": A_SHARE_KLINE_ADJUSTMENT_POLICY,
         "updated_at": now_cn().isoformat(timespec="seconds"),
-        "rows": {code: rows[-70:] for code, rows in sorted(rows_by_code.items()) if rows},
+        "rows": {
+            code: rows[-MODEL_KLINE_HISTORY_LIMIT:]
+            for code, rows in sorted(rows_by_code.items())
+            if rows
+        },
     }
     try:
         A_SHARE_KLINE_CACHE.parent.mkdir(parents=True, exist_ok=True)
@@ -4968,7 +5428,10 @@ def _kline_rows_are_current(rows: list[dict], expected_session: dt.date) -> bool
     return age_days == 0 or _kline_cache_is_previous_session(rows, expected_session)
 
 
-def a_share_kline_map(codes: list[str], limit: int = 70) -> dict[str, list[dict]]:
+def a_share_kline_map(
+    codes: list[str],
+    limit: int = MODEL_KLINE_HISTORY_LIMIT,
+) -> dict[str, list[dict]]:
     unique = list(dict.fromkeys(str(code or "") for code in codes if code))
     if not unique:
         return {}
@@ -4980,14 +5443,17 @@ def a_share_kline_map(codes: list[str], limit: int = 70) -> dict[str, list[dict]
     result: dict[str, list[dict]] = {}
     fallback: dict[str, list[dict]] = {}
     refresh_codes: list[str] = []
+    minimum_history = min(max(1, int(limit)), MODEL_KLINE_MIN_HISTORY)
     for code in unique:
         rows = cached.get(code) or []
         age_days = _kline_cache_age_days(rows, expected_session)
-        if age_days == 0:
+        if age_days == 0 and len(rows) >= minimum_history:
             result[code] = rows[-limit:]
         else:
             refresh_codes.append(code)
-            if len(rows) >= 31 and _kline_cache_is_previous_session(rows, expected_session):
+            if len(rows) >= 31 and (
+                age_days == 0 or _kline_cache_is_previous_session(rows, expected_session)
+            ):
                 fallback[code] = rows[-limit:]
 
     def fetch_batch(batch: list[str], workers: int) -> dict[str, list[dict]]:
@@ -4995,7 +5461,7 @@ def a_share_kline_map(codes: list[str], limit: int = 70) -> dict[str, list[dict]
         if not batch:
             return fetched
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(batch))) as executor:
-            futures = {executor.submit(stock_kline, code, limit): code for code in batch}
+            futures = {executor.submit(qfq_stock_kline, code, limit): code for code in batch}
             for future in concurrent.futures.as_completed(futures):
                 code = futures[future]
                 try:
@@ -5087,14 +5553,14 @@ def _load_hk_us_kline_cache(market_key: str) -> dict[str, list[dict]]:
         payload = json.loads(HK_US_KLINE_CACHE.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return {}
-    if not isinstance(payload, dict) or payload.get("version") != "hk-us-daily-kline-v1":
+    if not isinstance(payload, dict) or payload.get("version") != HK_US_KLINE_CACHE_VERSION:
         return {}
     section = ((payload.get("markets") or {}).get(market_key) or {})
     rows_by_symbol = section.get("rows") if isinstance(section, dict) else None
     if not isinstance(rows_by_symbol, dict):
         return {}
     return {
-        str(symbol): rows[-90:]
+        str(symbol): rows[-MODEL_KLINE_HISTORY_LIMIT:]
         for symbol, rows in rows_by_symbol.items()
         if isinstance(symbol, str) and isinstance(rows, list) and rows
     }
@@ -5105,14 +5571,14 @@ def _save_hk_us_kline_cache(market_key: str, rows_by_symbol: dict[str, list[dict
         return
     try:
         payload = json.loads(HK_US_KLINE_CACHE.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or payload.get("version") != "hk-us-daily-kline-v1":
-            payload = {"version": "hk-us-daily-kline-v1", "markets": {}}
+        if not isinstance(payload, dict) or payload.get("version") != HK_US_KLINE_CACHE_VERSION:
+            payload = {"version": HK_US_KLINE_CACHE_VERSION, "markets": {}}
     except (OSError, ValueError, TypeError):
-        payload = {"version": "hk-us-daily-kline-v1", "markets": {}}
+        payload = {"version": HK_US_KLINE_CACHE_VERSION, "markets": {}}
     payload.setdefault("markets", {})[market_key] = {
         "updated_at": now_cn().isoformat(timespec="seconds"),
         "rows": {
-            symbol: rows[-90:]
+            symbol: rows[-MODEL_KLINE_HISTORY_LIMIT:]
             for symbol, rows in sorted(rows_by_symbol.items())
             if rows
         },
@@ -5143,9 +5609,14 @@ def _hk_us_cached_kline_is_usable(rows: list[dict], market_key: str, expected_se
     )
 
 
-def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
+def yahoo_chart_kline(symbol: str, limit: int = MODEL_KLINE_HISTORY_LIMIT) -> list[dict]:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}"
-    params = {"range": "6mo", "interval": "1d", "includePrePost": "false"}
+    params = {
+        "range": "1y",
+        "interval": "1d",
+        "includePrePost": "false",
+        "events": "div,splits",
+    }
     try:
         req = urllib.request.Request(
             url + "?" + urllib.parse.urlencode(params),
@@ -5158,11 +5629,15 @@ def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
             return []
         timestamps = result.get("timestamp") or []
         quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+        adjusted = ((result.get("indicators") or {}).get("adjclose") or [{}])[0]
         opens = quote.get("open") or []
         highs = quote.get("high") or []
         lows = quote.get("low") or []
         closes = quote.get("close") or []
         volumes = quote.get("volume") or []
+        adjusted_closes = adjusted.get("adjclose") or []
+        timezone_name = (result.get("meta") or {}).get("exchangeTimezoneName")
+        exchange_tz = ZoneInfo(timezone_name or "UTC")
     except Exception:
         return []
 
@@ -5173,23 +5648,39 @@ def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
             high = highs[idx]
             low = lows[idx]
             open_ = opens[idx]
+            adjusted_close = adjusted_closes[idx]
         except Exception:
             continue
-        if close in (None, 0) or high in (None, 0) or low in (None, 0):
+        if (
+            close in (None, 0)
+            or open_ in (None, 0)
+            or high in (None, 0)
+            or low in (None, 0)
+            or adjusted_close in (None, 0)
+        ):
             continue
-        prev_close = rows[-1]["close"] if rows else close
+        factor = safe_float(adjusted_close) / safe_float(close)
+        if not math.isfinite(factor) or factor <= 0:
+            continue
+        adjusted_open = safe_float(open_) * factor
+        adjusted_high = safe_float(high) * factor
+        adjusted_low = safe_float(low) * factor
+        adjusted_close_value = safe_float(adjusted_close)
+        prev_close = rows[-1]["close"] if rows else adjusted_close_value
         rows.append(
             {
-                "date": dt.datetime.fromtimestamp(ts, CN_TZ).date().isoformat(),
-                "open": safe_float(open_),
-                "close": safe_float(close),
-                "high": safe_float(high),
-                "low": safe_float(low),
+                "date": dt.datetime.fromtimestamp(ts, exchange_tz).date().isoformat(),
+                "open": adjusted_open,
+                "close": adjusted_close_value,
+                "high": adjusted_high,
+                "low": adjusted_low,
                 "volume": safe_float(volumes[idx] if idx < len(volumes) else 0),
                 "amount": 0,
-                "amplitude": pct_change(high, low) if low else 0,
-                "change_pct": pct_change(close, prev_close),
+                "amplitude": pct_change(adjusted_high, adjusted_low) if adjusted_low else 0,
+                "change_pct": pct_change(adjusted_close_value, prev_close),
                 "turnover": 0,
+                "adjustment_factor": factor,
+                "price_adjustment": "yahoo_adjclose_factor_v1",
             }
         )
     return rows[-limit:]
@@ -5197,7 +5688,7 @@ def yahoo_chart_kline(symbol: str, limit: int = 90) -> list[dict]:
 
 def yahoo_kline_map(
     symbols: list[str],
-    limit: int = 90,
+    limit: int = MODEL_KLINE_HISTORY_LIMIT,
     market_key: str | None = None,
     *,
     as_of: dt.datetime | None = None,
@@ -6216,7 +6707,7 @@ def score_serenity_candidates(
             kline_future = executor.submit(
                 yahoo_kline_map,
                 symbols,
-                90,
+                MODEL_KLINE_HISTORY_LIMIT,
                 market_key,
                 as_of=freshness_as_of,
             )
@@ -6414,6 +6905,8 @@ def score_serenity_candidates(
             }
         )
     final.sort(key=lambda item: (item.get("hard_risk_count", 0), -item["confidence"], -item["score"]))
+    for legacy_rank, candidate in enumerate(final, 1):
+        candidate["legacy_rank"] = legacy_rank
     requested_count = len(candidates)
     quote_count = len(final)
     realtime_count = sum(1 for symbol in symbols if (freshness_by_symbol.get(symbol) or {}).get("fresh"))
@@ -6830,8 +7323,79 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
             -item["score"],
         )
     )
+    for legacy_rank, candidate in enumerate(final, 1):
+        candidate["legacy_rank"] = legacy_rank
+    deep_by_code = {str(item.get("code") or ""): item for item in final}
+    research_candidates: list[dict] = []
+    for item in technical_items:
+        quote = item["quote"]
+        code = str(quote.get("code") or "")
+        if code in deep_by_code:
+            research_candidates.append(deep_by_code[code])
+            continue
+        chan = item["chan"]
+        czsc = item["czsc"]
+        technical_risks = list(dict.fromkeys([
+            *item.get("risk_flags", []),
+            *chan.get("warnings", []),
+            *czsc.get("warnings", []),
+        ]))
+        research_candidates.append(
+            {
+                "code": code,
+                "name": quote.get("name"),
+                "price": quote.get("price"),
+                "entry_price": quote.get("entry_price", quote.get("price")),
+                "signal_price": quote.get("last_close"),
+                "change_pct": quote.get("change_pct"),
+                "current_change_pct": quote.get("current_change_pct", quote.get("change_pct")),
+                "signal_change_pct": quote.get("change_pct"),
+                "realtime": quote.get("realtime") or {},
+                "amount_yi": round(safe_float(quote.get("amount_wan")) / 10000, 2),
+                "turnover_pct": quote.get("turnover_pct"),
+                "vol_ratio": quote.get("vol_ratio"),
+                "float_mcap_yi": quote.get("float_mcap_yi"),
+                "limit_up": quote.get("limit_up"),
+                "limit_down": quote.get("limit_down"),
+                "fundamentals": quote.get("fundamentals") or {},
+                "analysis_projects": {
+                    "dual_low": dual_low_batch["by_code"].get(
+                        code,
+                        dual_low_unavailable("a_share", "MODEL_RESULT_MISSING"),
+                    )
+                },
+                "reason_tags": item["hot"].get("reason", ""),
+                "theme_tags": item.get("theme_tags") or [],
+                "candidate_lineage": item["hot"].get("candidate_lineage"),
+                # This row has real quote + technical evidence, but deliberately
+                # has no fabricated Legacy recommendation, Serenity or UZI score.
+                "score": None,
+                "pre_score": item.get("pre_score"),
+                "screen_score": item.get("screen_score"),
+                "screen_rank": item.get("screen_rank"),
+                "score_tier": "technical_only",
+                "technical_screen_eligible": bool(item.get("screen_eligible")),
+                "legacy_complete": False,
+                "deep_scored": False,
+                "chan_score": chan.get("score"),
+                "czsc_score": czsc.get("score"),
+                "setup_flags": (chan.get("metrics") or {}).get("setup_flags") or [],
+                "confidence": None,
+                "recommendation_degree": None,
+                "dragon_net_wan": item.get("dragon_net_wan"),
+                "dragon_reason": (dragon_map.get(code) or {}).get("reason", ""),
+                "reasons": [
+                    "已完成全召回池技术预筛；未进入本轮 96 只 Legacy 深度评分。"
+                ],
+                "risk_flags": technical_risks[:6],
+                "kline": compact_kline(item.get("kline") or []),
+                "chan": chan,
+                "czsc": czsc,
+            }
+        )
     return {
         "candidates": final,
+        "research_candidates": research_candidates,
         "raw_pool_size": len(hot_rows),
         "scored_size": len(final),
         "base_scored_size": base_scored_size,
@@ -7278,7 +7842,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "label": "A股",
             "description": "A股实时价 + UZI评审团/风控重权重 + CZSC结构 + Serenity AI 上游瓶颈。",
             "decision": decision,
-            "_candidate_pool": scored["candidates"],
+            "_candidate_pool": scored.get("research_candidates", scored["candidates"]),
             "pool_health": pool_health,
             "quote_health": quote_health,
             "stats": {
@@ -7427,6 +7991,10 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         ),
         "disclaimer": "本工具是量化决策辅助，不构成投资建议，不保证盈利。",
     }
+    result.setdefault("analysis_models", {})["ten_day_return"] = build_ten_day_shadow_model_contract(
+        result,
+        generated_at,
+    )
     result = enrich_snapshot_v2(result)
     cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     (PICKS / "latest.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -7556,11 +8124,34 @@ def main() -> None:
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8790")))
     parser.add_argument("--once", action="store_true", help="Run selector once and print JSON.")
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="With --once, print only a compact run summary instead of the full snapshot.",
+    )
     parser.add_argument("--date", help="Target date, YYYY-MM-DD.")
     parser.add_argument("--force", action="store_true", help="Ignore cache.")
     args = parser.parse_args()
     if args.once:
-        print(json.dumps(run_selector(args.date, force=args.force), ensure_ascii=False, indent=2))
+        snapshot = run_selector(args.date, force=args.force)
+        if args.quiet:
+            print(
+                json.dumps(
+                    {
+                        "snapshot_key": snapshot.get("snapshot_key"),
+                        "target_date": snapshot.get("target_date"),
+                        "generated_at": snapshot.get("generated_at"),
+                        "global_action": (snapshot.get("global_decision") or {}).get("action"),
+                        "ten_day_model_status": (
+                            ((snapshot.get("analysis_models") or {}).get("ten_day_return") or {}).get("status")
+                        ),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        else:
+            print(json.dumps(snapshot, ensure_ascii=False, indent=2))
         return
     serve(args.port, args.host)
 

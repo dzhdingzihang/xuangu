@@ -5,6 +5,7 @@ import datetime as dt
 import json
 import pathlib
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -209,6 +210,126 @@ def dynamic_hk_us_snapshot_fixture() -> dict:
 
 
 class SnapshotContractTests(unittest.TestCase):
+    def test_kline_cache_v2_retains_260_sessions_and_rejects_v1(self) -> None:
+        self.assertEqual(server.MODEL_KLINE_MIN_HISTORY, 220)
+        rows = [
+            {
+                "date": (dt.date(2025, 1, 1) + dt.timedelta(days=index)).isoformat(),
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.5,
+                "close": 10.1,
+                "volume": 1000,
+            }
+            for index in range(280)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = pathlib.Path(directory) / "a_share_daily.json"
+            with mock.patch.object(server, "A_SHARE_KLINE_CACHE", cache_path):
+                server._save_a_share_kline_cache({"600000": rows})
+                payload = json.loads(cache_path.read_text(encoding="utf-8"))
+                self.assertEqual(payload["version"], server.A_SHARE_KLINE_CACHE_VERSION)
+                self.assertEqual(
+                    payload["adjustment_policy"],
+                    server.A_SHARE_KLINE_ADJUSTMENT_POLICY,
+                )
+                self.assertEqual(len(payload["rows"]["600000"]), server.MODEL_KLINE_HISTORY_LIMIT)
+                self.assertEqual(
+                    len(server._load_a_share_kline_cache()["600000"]),
+                    server.MODEL_KLINE_HISTORY_LIMIT,
+                )
+
+                payload["version"] = "a-share-daily-kline-v1"
+                cache_path.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertEqual(server._load_a_share_kline_cache(), {})
+
+                payload["version"] = server.A_SHARE_KLINE_CACHE_VERSION
+                payload.pop("adjustment_policy")
+                cache_path.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertEqual(server._load_a_share_kline_cache(), {})
+
+                payload["adjustment_policy"] = "raw-unadjusted"
+                cache_path.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertEqual(server._load_a_share_kline_cache(), {})
+
+    def test_selector_shadow_builder_receives_three_caches_and_cannot_self_authorize(self) -> None:
+        captured = {}
+
+        def build(snapshot, kline_maps, generated_at):
+            captured["snapshot"] = snapshot
+            captured["kline_maps"] = kline_maps
+            captured["generated_at"] = generated_at
+            return {
+                "model_id": server.TEN_DAY_SHADOW_MODEL_ID,
+                "label_version": server.TEN_DAY_LABEL_VERSION,
+                "feature_schema_version": server.TEN_DAY_SHADOW_FEATURE_SCHEMA,
+                "status": "INSUFFICIENT_DATA",
+                "calibrated": False,
+                "costs_ready": True,
+                "tail_risk_ready": True,
+                "participates_in_decision": False,
+                "production_eligible": False,
+                "probability": None,
+                "training_cutoff": None,
+                "training_provenance": "current_universe_historical_backfill",
+                "market_models": {},
+                "validation": {},
+                "limitations": ["fixture"],
+                "artifact_sha256": "b" * 64,
+                "shadow_predictions": [],
+            }
+
+        module = types.SimpleNamespace(build_snapshot_model_contract=build)
+        snapshot = snapshot_fixture()
+        generated_at = dt.datetime.fromisoformat(snapshot["generated_at"])
+        maps = {
+            "a_share": {"603228": [{"date": "2026-08-18"}]},
+            "hk": {"0700.HK": [{"date": "2026-08-18"}]},
+            "us": {"NVDA": [{"date": "2026-08-18"}]},
+        }
+        with (
+            mock.patch.object(server, "ten_day_model", module),
+            mock.patch.object(server, "_load_a_share_kline_cache", return_value=maps["a_share"]),
+            mock.patch.object(server, "_load_hk_us_kline_cache", side_effect=lambda market: maps[market]),
+        ):
+            contract = server.build_ten_day_shadow_model_contract(snapshot, generated_at)
+
+        self.assertEqual(set(captured["kline_maps"]), {"a_share", "hk", "us"})
+        self.assertIs(captured["snapshot"], snapshot)
+        self.assertEqual(captured["generated_at"], generated_at)
+        self.assertEqual(contract["status"], "INSUFFICIENT_DATA")
+        self.assertFalse(contract["calibrated"])
+        self.assertFalse(contract["participates_in_decision"])
+        self.assertFalse(contract["production_eligible"])
+        self.assertNotIn("predictions", contract)
+
+    def test_selector_rejects_a_shadow_contract_that_self_authorizes(self) -> None:
+        module = types.SimpleNamespace(
+            build_snapshot_model_contract=lambda *_: {
+                "model_id": server.TEN_DAY_SHADOW_MODEL_ID,
+                "label_version": server.TEN_DAY_LABEL_VERSION,
+                "training_provenance": "current_universe_historical_backfill",
+                "calibrated": True,
+                "participates_in_decision": True,
+                "production_eligible": True,
+                "shadow_predictions": [],
+            }
+        )
+        with (
+            mock.patch.object(server, "ten_day_model", module),
+            mock.patch.object(server, "_load_a_share_kline_cache", return_value={}),
+            mock.patch.object(server, "_load_hk_us_kline_cache", return_value={}),
+        ):
+            contract = server.build_ten_day_shadow_model_contract(
+                snapshot_fixture(),
+                "2026-08-19T16:30:00+08:00",
+            )
+
+        self.assertEqual(contract["status"], "UNAVAILABLE")
+        self.assertEqual(contract["reason_codes"], ["TEN_DAY_SHADOW_MODEL_INTEGRITY_ERROR"])
+        self.assertFalse(contract["calibrated"])
+        self.assertFalse(contract["participates_in_decision"])
+
     def test_dynamic_hk_us_snapshot_contract_is_auditable(self) -> None:
         enriched = dynamic_hk_us_snapshot_fixture()
 
@@ -605,6 +726,20 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertIn(
             "us:GLOBAL realtime quote is required for live publication",
             errors,
+        )
+
+    def test_research_priority_repeats_candidate_snapshot_quote_for_live_contract(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        research = enriched["global_decision"]["research_priority"]
+
+        self.assertIsInstance(research.get("candidate_snapshot"), dict)
+        self.assertEqual(research.get("realtime"), research["candidate_snapshot"].get("realtime"))
+        self.assertFalse(
+            any(
+                error.startswith(f"{research['market']}:{research['code']} ")
+                and "realtime" in error
+                for error in validate_snapshot(enriched)
+            )
         )
 
     def test_snapshot_validator_requires_safe_snapshot_key(self) -> None:

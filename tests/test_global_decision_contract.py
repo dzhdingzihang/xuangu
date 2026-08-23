@@ -8,6 +8,13 @@ from scripts.validate_snapshot import validate_snapshot
 from tests.test_snapshot_contract import dynamic_hk_us_snapshot_fixture, snapshot_fixture
 
 
+FIXTURE_COMPLETED_SESSIONS = {
+    "a_share": "2026-08-19",
+    "hk": "2026-08-19",
+    "us": "2026-08-18",
+}
+
+
 def valid_no_pick_snapshot() -> dict:
     return server.enrich_snapshot_v2(snapshot_fixture())
 
@@ -151,6 +158,300 @@ def executable_builder_input() -> dict:
 
 
 class GlobalDecisionContractTests(unittest.TestCase):
+    def test_shadow_model_evidence_never_unlocks_formal_decision(self) -> None:
+        snapshot = snapshot_fixture()
+        predictions = []
+        utilities = {"a_share": 0.006, "hk": 0.011, "us": 0.024}
+        returns = {"a_share": 0.011, "hk": 0.016, "us": 0.029}
+        probabilities = {"a_share": 0.55, "hk": 0.58, "us": 0.64}
+        costs = {"a_share": 0.0015, "hk": 0.003, "us": 0.0015}
+        for market_key, section in snapshot["markets"].items():
+            candidate = section["decision"]["primary"]
+            predictions.append(
+                {
+                    "market": market_key,
+                    "code": candidate["code"],
+                    "market_validation_status": "SHADOW_READY",
+                    "probability": probabilities[market_key],
+                    "expected_net_return": returns[market_key],
+                    "expected_net_utility": utilities[market_key],
+                    "transaction_cost": costs[market_key],
+                    "tail_risk": 0.02,
+                    "prediction_as_of": FIXTURE_COMPLETED_SESSIONS[market_key],
+                    "model_id": "ten-day-technical-shadow-v1",
+                    "label_version": server.TEN_DAY_LABEL_VERSION,
+                }
+            )
+        snapshot["analysis_models"] = {
+            "ten_day_return": {
+                "model_id": "ten-day-technical-shadow-v1",
+                "label_version": server.TEN_DAY_LABEL_VERSION,
+                "feature_schema_version": "technical-d1-v1",
+                "status": "SHADOW_READY",
+                "calibrated": False,
+                "costs_ready": True,
+                "tail_risk_ready": True,
+                "participates_in_decision": False,
+                "production_eligible": False,
+                "probability": None,
+                "training_cutoff": "2026-08-08",
+                "training_provenance": "current_universe_historical_backfill",
+                "artifact_sha256": "a" * 64,
+                "market_models": {
+                    market_key: {"status": "SHADOW_READY"}
+                    for market_key in ("a_share", "hk", "us")
+                },
+                "shadow_predictions": predictions,
+            }
+        }
+
+        decision = server.enrich_snapshot_v2(snapshot)["global_decision"]
+
+        self.assertEqual(decision["action"], "NO_VALID_PICK")
+        self.assertIsNone(decision["primary"])
+        self.assertFalse(decision["calibrated"])
+        self.assertIn("TEN_DAY_PROBABILITY_UNCALIBRATED", decision["blocker_codes"])
+        self.assertIn("TEN_DAY_MODEL_NOT_AUTHORIZED", decision["blocker_codes"])
+        self.assertEqual(decision["research_priority"]["code"], "NVDA")
+        self.assertEqual(decision["research_priority"]["score_kind"], "RULE_PRIORITY")
+        self.assertIsNone(decision["research_priority"]["probability"])
+        self.assertEqual(
+            decision["research_priority"]["shadow_model"]["probability"],
+            probabilities["us"],
+        )
+        self.assertEqual(decision["research_priority"]["research_sort_basis"], "SHADOW_EXPECTED_NET_UTILITY")
+        self.assertRegex(decision["research_priority"]["shadow_model"]["prediction_id"], r"^pred_[0-9a-f]{24}$")
+        self.assertNotEqual(
+            decision["research_priority"]["prediction_id"],
+            decision["research_priority"]["shadow_model"]["prediction_id"],
+        )
+        self.assertEqual(
+            decision["research_priority"]["candidate_snapshot"]["code"],
+            decision["research_priority"]["code"],
+        )
+        us_row = next(
+            row
+            for row in decision["evaluated_candidates"]
+            if row["market"] == "us" and row["code"] == "NVDA"
+        )
+        self.assertEqual(us_row["status"], "RESEARCH_ONLY")
+        self.assertEqual(us_row["score_kind"], "RULE_PRIORITY")
+        self.assertIsNone(us_row["probability"])
+        self.assertFalse(us_row["shadow_model"]["participates_in_decision"])
+
+    def test_shadow_research_can_select_a_technical_only_pool_row_without_ui_substitution(self) -> None:
+        snapshot = snapshot_fixture()
+        technical = copy.deepcopy(snapshot["markets"]["a_share"]["decision"]["primary"])
+        technical.update(
+            {
+                "code": "600001",
+                "symbol": "600001",
+                "name": "技术预筛候选",
+                "score": None,
+                "confidence": None,
+                "recommendation_degree": None,
+                "score_tier": "technical_only",
+                "legacy_complete": False,
+                "deep_scored": False,
+                "screen_rank": 97,
+            }
+        )
+        snapshot["markets"]["a_share"]["_candidate_pool"] = [technical]
+        snapshot["analysis_models"] = {
+            "ten_day_return": {
+                "model_id": "ten-day-technical-shadow-v1",
+                "label_version": server.TEN_DAY_LABEL_VERSION,
+                "feature_schema_version": "technical-d1-v1",
+                "status": "SHADOW_READY",
+                "calibrated": False,
+                "costs_ready": True,
+                "tail_risk_ready": True,
+                "participates_in_decision": False,
+                "production_eligible": False,
+                "training_provenance": "current_universe_historical_backfill",
+                "market_models": {"a_share": {"status": "SHADOW_READY"}},
+                "shadow_predictions": [
+                    {
+                        "market": "a_share",
+                        "code": "600001",
+                        "model_id": "ten-day-technical-shadow-v1",
+                        "label_version": server.TEN_DAY_LABEL_VERSION,
+                        "market_validation_status": "SHADOW_READY",
+                        "probability": 0.71,
+                        "expected_net_return": 0.08,
+                        "expected_net_utility": 0.06,
+                        "transaction_cost": 0.0015,
+                        "tail_risk": 0.02,
+                        "prediction_as_of": FIXTURE_COMPLETED_SESSIONS["a_share"],
+                    }
+                ],
+            }
+        }
+
+        decision = server.enrich_snapshot_v2(snapshot)["global_decision"]
+
+        research = decision["research_priority"]
+        self.assertEqual(research["code"], "600001")
+        self.assertEqual(research["candidate_snapshot"]["code"], "600001")
+        self.assertFalse(research["candidate_snapshot"]["legacy_complete"])
+        self.assertIsNone(research["candidate_snapshot"]["recommendation_degree"])
+        self.assertEqual(research["realtime"], technical["realtime"])
+        self.assertIn("LEGACY_DEEP_SCORE_MISSING", research["blocker_codes"])
+        self.assertIsNone(research["probability"])
+        self.assertRegex(research["shadow_model"]["prediction_id"], r"^pred_[0-9a-f]{24}$")
+        self.assertNotIn("_candidate_pool", snapshot["markets"]["a_share"])
+
+    def test_rejected_or_negative_shadow_rows_fall_back_to_rule_priority(self) -> None:
+        baseline_snapshot = snapshot_fixture()
+        baseline = server.enrich_snapshot_v2(copy.deepcopy(baseline_snapshot))["global_decision"]["research_priority"]
+        shadow_snapshot = copy.deepcopy(baseline_snapshot)
+        hk_code = shadow_snapshot["markets"]["hk"]["decision"]["primary"]["code"]
+        us_code = shadow_snapshot["markets"]["us"]["decision"]["primary"]["code"]
+        shadow_snapshot["analysis_models"] = {
+            "ten_day_return": {
+                "model_id": "ten-day-technical-shadow-v1",
+                "label_version": server.TEN_DAY_LABEL_VERSION,
+                "status": "SHADOW_READY",
+                "calibrated": False,
+                "costs_ready": True,
+                "tail_risk_ready": True,
+                "participates_in_decision": False,
+                "production_eligible": False,
+                "market_models": {
+                    "hk": {"status": "SHADOW_READY"},
+                    "us": {"status": "SHADOW_READY"},
+                },
+                "shadow_predictions": [
+                    {
+                        "market": "hk",
+                        "code": hk_code,
+                        "market_validation_status": "SHADOW_REJECTED",
+                        "probability": 0.99,
+                        "expected_net_return": 1.0,
+                        "expected_net_utility": 0.9,
+                        "transaction_cost": 0.003,
+                        "tail_risk": 0.01,
+                        "prediction_as_of": FIXTURE_COMPLETED_SESSIONS["hk"],
+                    },
+                    {
+                        "market": "us",
+                        "code": us_code,
+                        "market_validation_status": "SHADOW_READY",
+                        "probability": 0.9,
+                        "expected_net_return": -0.1,
+                        "expected_net_utility": -0.2,
+                        "transaction_cost": 0.0015,
+                        "tail_risk": 0.1,
+                        "prediction_as_of": FIXTURE_COMPLETED_SESSIONS["us"],
+                    },
+                ],
+            }
+        }
+
+        research = server.enrich_snapshot_v2(shadow_snapshot)["global_decision"]["research_priority"]
+
+        self.assertEqual((research["market"], research["code"]), (baseline["market"], baseline["code"]))
+        self.assertEqual(research["research_sort_basis"], "RULE_PRIORITY")
+
+    def test_blocked_market_never_enters_shadow_research_priority(self) -> None:
+        snapshot = snapshot_fixture()
+        us_code = snapshot["markets"]["us"]["decision"]["primary"]["code"]
+        snapshot["markets"]["us"]["pool_health"] = {
+            "status": "DEGRADED",
+            "reason_codes": ["POOL_COVERAGE_INCOMPLETE"],
+        }
+        snapshot["analysis_models"] = {
+            "ten_day_return": {
+                "model_id": "ten-day-technical-shadow-v1",
+                "label_version": server.TEN_DAY_LABEL_VERSION,
+                "status": "SHADOW_READY",
+                "calibrated": False,
+                "costs_ready": True,
+                "tail_risk_ready": True,
+                "participates_in_decision": False,
+                "production_eligible": False,
+                "market_models": {"us": {"status": "SHADOW_READY"}},
+                "shadow_predictions": [
+                    {
+                        "market": "us",
+                        "code": us_code,
+                        "market_validation_status": "SHADOW_READY",
+                        "probability": 0.99,
+                        "expected_net_return": 1.0,
+                        "expected_net_utility": 0.9,
+                        "transaction_cost": 0.0015,
+                        "tail_risk": 0.01,
+                        "prediction_as_of": FIXTURE_COMPLETED_SESSIONS["us"],
+                    }
+                ],
+            }
+        }
+
+        decision = server.enrich_snapshot_v2(snapshot)["global_decision"]
+
+        self.assertEqual(decision["market_states"]["us"]["state"], "BLOCKED")
+        self.assertNotEqual(decision["research_priority"]["market"], "us")
+
+    def test_stale_shadow_prediction_remains_visible_but_cannot_rank(self) -> None:
+        snapshot = snapshot_fixture()
+        candidate = snapshot["markets"]["a_share"]["decision"]["primary"]
+        snapshot["analysis_models"] = {
+            "ten_day_return": {
+                "model_id": "ten-day-technical-shadow-v1",
+                "label_version": server.TEN_DAY_LABEL_VERSION,
+                "status": "SHADOW_READY",
+                "calibrated": False,
+                "costs_ready": True,
+                "tail_risk_ready": True,
+                "participates_in_decision": False,
+                "production_eligible": False,
+                "market_models": {"a_share": {"status": "SHADOW_READY"}},
+                "shadow_predictions": [
+                    {
+                        "market": "a_share",
+                        "code": candidate["code"],
+                        "market_validation_status": "SHADOW_READY",
+                        "probability": 0.99,
+                        "expected_net_return": 0.5,
+                        "expected_net_utility": 0.49,
+                        "transaction_cost": 0.0015,
+                        "tail_risk": 0.04,
+                        "prediction_as_of": "2026-08-18",
+                    }
+                ],
+            }
+        }
+
+        decision = server.enrich_snapshot_v2(snapshot)["global_decision"]
+        evaluated = next(
+            row
+            for row in decision["evaluated_candidates"]
+            if row["market"] == "a_share" and row["code"] == candidate["code"]
+        )
+
+        self.assertEqual(evaluated["shadow_model"]["prediction_as_of"], "2026-08-18")
+        self.assertFalse(evaluated["shadow_model"]["rank_eligible"])
+        self.assertNotEqual(
+            decision["research_priority"]["research_sort_basis"],
+            "SHADOW_EXPECTED_NET_UTILITY",
+        )
+
+    def test_latest_completed_session_is_exchange_calendar_aware(self) -> None:
+        generated_at = "2026-08-19T16:30:00+08:00"
+
+        self.assertEqual(
+            server._latest_completed_market_session("a_share", generated_at).isoformat(),
+            "2026-08-19",
+        )
+        self.assertEqual(
+            server._latest_completed_market_session("hk", generated_at).isoformat(),
+            "2026-08-19",
+        )
+        self.assertEqual(
+            server._latest_completed_market_session("us", generated_at).isoformat(),
+            "2026-08-18",
+        )
+
     def test_builder_uses_expected_net_utility_instead_of_market_order(self) -> None:
         decision = server.build_global_ten_day_decision(executable_builder_input())
         self.assertEqual(decision["action"], "REVIEW_EXECUTABLE_PICK")

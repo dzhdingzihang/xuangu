@@ -611,7 +611,7 @@ async function pickForTarget(env, targetDate) {
   if (!manifest) return null;
   const summaries = Array.isArray(manifest.summaries) ? manifest.summaries : [];
   const match = summaries
-    .filter((item) => item.target_date === targetDate && item.cache_key)
+    .filter((item) => item.target_date === targetDate && item.cache_key && item.full_snapshot_available !== false)
     .sort((a, b) => `${b.generated_at || ""}`.localeCompare(`${a.generated_at || ""}`))[0];
   if (match) return loadPickByFile(env, match.cache_key);
   return null;

@@ -85,9 +85,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: data/runtime-cache/a_share_daily.json
-          key: a-share-d1-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          key: a-share-d1-v2-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            a-share-d1-v1-
+            a-share-d1-v2-
 
       - name: Restore HK/US dynamic recall cache
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
@@ -103,9 +103,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: data/runtime-cache/hk_us_daily.json
-          key: hk-us-d1-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          key: hk-us-d1-v2-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            hk-us-d1-v1-
+            hk-us-d1-v2-
 
       - name: Generate smart pick snapshot
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
@@ -115,7 +115,7 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             echo "Snapshot generation attempt ${attempt}/3"
-            if GENERATION_ATTEMPT="${attempt}" python server.py --once --force; then
+            if GENERATION_ATTEMPT="${attempt}" python server.py --once --force --quiet; then
               break
             fi
             if [ "${attempt}" -eq 3 ]; then
@@ -153,7 +153,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: data/runtime-cache/a_share_daily.json
-          key: a-share-d1-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          key: a-share-d1-v2-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save validated HK/US dynamic recall cache
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
@@ -167,7 +167,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: data/runtime-cache/hk_us_daily.json
-          key: hk-us-d1-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          key: hk-us-d1-v2-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Prepare immutable snapshot recovery bundle
         id: snapshot_bundle
@@ -215,6 +215,19 @@ jobs:
               ledger_files.append(ledger.as_posix())
 
           digest = snapshot_sha256(snapshot)
+          automation = snapshot.get("automation") if isinstance(snapshot.get("automation"), dict) else {}
+          trigger = str(automation.get("trigger") or "")
+          scheduled_slot = str(automation.get("scheduled_slot") or "")
+          daily_checkpoint = trigger == "schedule" and "T22:47:" in scheduled_slot
+          global_decision = snapshot.get("global_decision")
+          global_decision = global_decision if isinstance(global_decision, dict) else {}
+          primary = global_decision.get("primary")
+          executable_prediction = (
+              global_decision.get("action") == "REVIEW_EXECUTABLE_PICK"
+              and isinstance(primary, dict)
+              and primary.get("status") == "EXECUTABLE"
+          )
+          should_archive = daily_checkpoint or executable_prediction
           (recovery / "recovery-manifest.json").write_text(
               json.dumps(
                   {
@@ -223,6 +236,8 @@ jobs:
                       "snapshot_sha256": digest,
                       "ledger_present": bool(ledger_files),
                       "ledger_files": ledger_files,
+                      "archive_policy": "daily_2247_or_executable_v1",
+                      "should_archive": should_archive,
                   },
                   ensure_ascii=False,
                   indent=2,
@@ -230,13 +245,13 @@ jobs:
               encoding="utf-8",
           )
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("should_archive=true\n")
+              output.write(f"should_archive={'true' if should_archive else 'false'}\n")
               output.write(f"snapshot_key={snapshot_key}\n")
               output.write(f"snapshot_sha256={digest}\n")
           PY
 
       - name: Upload immutable snapshot recovery artifact
-        if: steps.snapshot_bundle.outputs.should_archive == 'true'
+        if: steps.snapshot_bundle.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: snapshot-recovery-${{ github.run_id }}

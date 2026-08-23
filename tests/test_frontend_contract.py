@@ -157,6 +157,47 @@ class FrontendContractTests(unittest.TestCase):
         for phrase in prohibited:
             self.assertNotIn(phrase, self.html + self.js)
 
+    def test_shadow_ten_day_probability_is_visible_but_never_promoted_to_formal(self) -> None:
+        self.assertRegex(self.js, r"function candidateShadowModel\(")
+        self.assertRegex(self.js, r"function tenDayModelPresentation\(")
+        self.assertIn('status === "SHADOW_READY"', self.js)
+        for phrase in (
+            "10 日概率模型已参与严格门禁",
+            "10 日概率模型影子运行中",
+            "10 日概率模型留出检验未通过",
+            "10 日概率模型数据积累中",
+            "影子 P10",
+            "不参与正式决策",
+            "当前成分股历史回填",
+            "正式可执行候选",
+        ):
+            self.assertIn(phrase, self.js)
+        for metric in (
+            "independent_test_date_count",
+            "brier_score",
+            "brier_skill",
+            "ece_10bin",
+            "auc",
+            "top_decile_excess_vs_mean",
+        ):
+            self.assertIn(metric, self.js)
+        self.assertIn("evaluated_candidates", self.js)
+        self.assertIn("shadow_model.probability", self.js)
+        self.assertIn("shadow-model-card", self.js + self.css)
+        self.assertNotIn("正式上涨概率", self.js)
+
+    def test_research_priority_uses_the_server_candidate_snapshot_without_silent_substitution(self) -> None:
+        self.assertRegex(self.js, r"function researchCandidateSnapshot\(")
+        self.assertIn("priority?.candidate_snapshot", self.js)
+        self.assertIn("researchCandidate].filter(Boolean)", self.js)
+        self.assertIn(
+            'snapshot?.global_decision?.contract_version === "global-10d-v1"',
+            self.js,
+        )
+        self.assertIn("return null;", self.js)
+        self.assertIn("未深评", self.js)
+        self.assertIn('research: "研究优先"', self.js)
+
     def test_event_links_and_unknown_direction_are_normalized(self) -> None:
         self.assertIn("function safeHttpUrl", self.js)
         self.assertIn('if (!raw) return ""', self.js)
@@ -287,6 +328,10 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("正式十日预测", self.js)
         self.assertIn("prediction_id", self.js)
         self.assertNotIn("空白代表尚未有可靠评估", self.js)
+
+    def test_old_full_history_assets_have_an_explicit_retention_message(self) -> None:
+        self.assertIn("item.full_snapshot_available === false", self.js)
+        self.assertIn("完整交互快照仅保留最近 30 个决策日", self.js)
 
 
 if __name__ == "__main__":

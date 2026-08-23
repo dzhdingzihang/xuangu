@@ -911,6 +911,12 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertEqual(scored["scored_size"], 2)
         self.assertEqual([row["code"] for row in scored["candidates"]], ["000001", "300001"])
         self.assertTrue(all(row["score_tier"] == "deep_legacy" for row in scored["candidates"]))
+        self.assertEqual(len(scored["research_candidates"]), 3)
+        by_code = {row["code"]: row for row in scored["research_candidates"]}
+        self.assertEqual(by_code["600000"]["score_tier"], "technical_only")
+        self.assertFalse(by_code["600000"]["legacy_complete"])
+        self.assertIsNone(by_code["600000"]["recommendation_degree"])
+        self.assertNotIn("uzi_score", by_code["600000"])
 
     def test_a_share_kline_retry_only_refetches_missing_codes(self) -> None:
         calls = {"600000": 0, "000001": 0, "300001": 0}
@@ -927,7 +933,7 @@ class SelectorV2Tests(unittest.TestCase):
             mock.patch.object(server, "_load_a_share_kline_cache", return_value={}),
             mock.patch.object(server, "_save_a_share_kline_cache") as save_cache,
             mock.patch.object(server, "expected_quote_session", return_value=dt.date(2026, 8, 21)),
-            mock.patch.object(server, "stock_kline", side_effect=fetch),
+            mock.patch.object(server, "qfq_stock_kline", side_effect=fetch),
         ):
             result = server.a_share_kline_map(list(calls))
 
@@ -948,12 +954,40 @@ class SelectorV2Tests(unittest.TestCase):
             mock.patch.object(server, "_load_a_share_kline_cache", return_value={}),
             mock.patch.object(server, "_save_a_share_kline_cache") as save_cache,
             mock.patch.object(server, "expected_quote_session", return_value=dt.date(2026, 8, 21)),
-            mock.patch.object(server, "stock_kline", side_effect=fetch),
+            mock.patch.object(server, "qfq_stock_kline", side_effect=fetch),
         ):
             result = server.a_share_kline_map(["600000", "000001"])
 
         self.assertEqual(set(result), {"000001"})
         self.assertEqual(set(save_cache.call_args.args[0]), {"000001"})
+
+    def test_model_kline_chain_excludes_baidu_and_uses_explicit_adjustment_fallbacks(self) -> None:
+        fallback_rows = fixture_kline(32)
+        with (
+            mock.patch.object(server, "baidu_stock_kline") as baidu,
+            mock.patch.object(server, "eastmoney_stock_kline", return_value=[]) as eastmoney,
+            mock.patch.object(server, "tencent_stock_kline", return_value=[]) as tencent,
+            mock.patch.object(server, "yahoo_chart_kline", return_value=fallback_rows) as yahoo,
+        ):
+            rows = server.qfq_stock_kline("600000", 32)
+
+        self.assertEqual(rows, fallback_rows)
+        baidu.assert_not_called()
+        eastmoney.assert_called_once_with("600000", 32)
+        tencent.assert_called_once_with("600000", 32, require_qfq=True)
+        yahoo.assert_called_once_with("600000.SS", 32)
+
+    def test_model_kline_chain_stops_after_explicit_tencent_qfq(self) -> None:
+        fallback_rows = fixture_kline(32)
+        with (
+            mock.patch.object(server, "eastmoney_stock_kline", return_value=[]),
+            mock.patch.object(server, "tencent_stock_kline", return_value=fallback_rows),
+            mock.patch.object(server, "yahoo_chart_kline") as yahoo,
+        ):
+            rows = server.qfq_stock_kline("000001", 32)
+
+        self.assertEqual(rows, fallback_rows)
+        yahoo.assert_not_called()
 
     def test_cached_a_share_kline_uses_current_quote_as_latest_bar(self) -> None:
         rows = fixture_kline(32)
@@ -1080,6 +1114,18 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertEqual(scored["deep_attempted_size"], 2)
         self.assertEqual(scored["deep_scored_size"], 2)
         self.assertNotIn("600001", [row["code"] for row in scored["candidates"]])
+        technical_st = next(row for row in scored["research_candidates"] if row["code"] == "600001")
+        self.assertFalse(technical_st["technical_screen_eligible"])
+        server.attach_candidate_v2(
+            technical_st,
+            "a_share",
+            {"risk": "normal", "items": [{"change_pct": 0.1}]},
+        )
+        self.assertEqual(technical_st["execution_state"], "BLOCKED")
+        self.assertIn(
+            "SECURITY_NOT_DEEP_RESEARCH_ELIGIBLE",
+            {item["code"] for item in technical_st["risk_items"]},
+        )
 
     def test_market_context_uses_benchmark_kline_without_overstating_missing_data(self) -> None:
         with mock.patch.object(server, "yahoo_chart_kline", return_value=fixture_kline(40)):

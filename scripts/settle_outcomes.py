@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import market_calendar  # noqa: E402
+import history_evaluation  # noqa: E402
 import server  # noqa: E402
 
 
@@ -44,8 +45,6 @@ CURRENCIES = {"a_share": "CNY", "hk": "HKD", "us": "USD"}
 PUBLISHED_PRICE_DECIMALS = 8
 PUBLISHED_RETURN_DECIMALS = 8
 VALID_ID = re.compile(r"^pred_[a-f0-9]{16,64}$")
-CN_TZ = ZoneInfo("Asia/Shanghai")
-DAILY_SCHEDULED_LEDGER_SLOT = (22, 47)
 CONTRACT_IDENTITY_KEYS = (
     "schema_version",
     "track",
@@ -68,6 +67,117 @@ CONTRACT_IDENTITY_KEYS = (
     "transaction_cost",
 )
 
+SHADOW_RETRY_INVARIANT_KEYS = (
+    "schema_version",
+    "track",
+    "prediction_id",
+    "model_id",
+    "label_version",
+    "market",
+    "code",
+    "signal_date",
+    "sampling_policy",
+    "entry_session_open_at",
+    "entry_trade_date",
+    "forecast_end_trade_date",
+    "forecast_end_session_close_at",
+    "horizon_trade_sessions",
+    "entry_policy",
+    "exit_policy",
+    "calendar_id",
+    "calendar_version",
+    "currency",
+    "fx_rate_source",
+    "transaction_cost",
+)
+
+
+def contract_identity_keys(contract: dict[str, Any]) -> tuple[str, ...]:
+    if contract.get("track") == SHADOW_TRACK:
+        return CONTRACT_IDENTITY_KEYS + ("artifact_sha256", "training_cutoff")
+    return CONTRACT_IDENTITY_KEYS
+
+
+def _contract_moment(contract: dict[str, Any], key: str) -> dt.datetime | None:
+    try:
+        parsed = dt.datetime.fromisoformat(str(contract.get(key) or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def _shadow_retry_sample_matches(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> bool:
+    """Return whether two contracts are retries of one scheduled sample.
+
+    Technical probability, expected utility, tail estimate, training cutoff and
+    artifact are intentionally absent from the invariant envelope: those are
+    allowed to improve during the same pre-entry health retry.  Slot, selected
+    security and settlement identity are immutable.
+    """
+
+    if (
+        left.get("track") != SHADOW_TRACK
+        or right.get("track") != SHADOW_TRACK
+        or left.get("sampling_policy") != "daily_last_primary_checkpoint_v1"
+        or right.get("sampling_policy") != "daily_last_primary_checkpoint_v1"
+        or any(left.get(key) != right.get(key) for key in SHADOW_RETRY_INVARIANT_KEYS)
+    ):
+        return False
+    left_slot = _contract_moment(left, "scheduled_slot")
+    right_slot = _contract_moment(right, "scheduled_slot")
+    return left_slot is not None and right_slot is not None and left_slot == right_slot
+
+
+def _contract_is_pre_entry(contract: dict[str, Any]) -> bool:
+    generated_at = _contract_moment(contract, "generated_at")
+    entry_at = _contract_moment(contract, "entry_session_open_at")
+    return generated_at is not None and entry_at is not None and generated_at < entry_at
+
+
+def _same_contract_identity(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    keys = contract_identity_keys(right)
+    return all(left.get(key) == right.get(key) for key in keys)
+
+
+def _source_preference(contract: dict[str, Any]) -> tuple[int, str]:
+    """Prefer immutable snapshot names over the mutable latest.json alias."""
+
+    source = str(contract.get("source_snapshot") or "")
+    return (0 if source == "latest.json" else 1, source)
+
+
+def _newest_shadow_retry_contract(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Choose the later healthy pre-entry retry, or fail closed with ``None``."""
+
+    if (
+        not _shadow_retry_sample_matches(left, right)
+        or not _contract_is_pre_entry(left)
+        or not _contract_is_pre_entry(right)
+    ):
+        return None
+    left_generated = _contract_moment(left, "generated_at")
+    right_generated = _contract_moment(right, "generated_at")
+    if left_generated is None or right_generated is None:
+        return None
+    if right_generated > left_generated:
+        return right
+    if left_generated > right_generated:
+        return left
+    # Equal-generation aliases are common because latest.json duplicates the
+    # immutable snapshot.  Differing technical values at the exact same moment
+    # have no well-defined retry order and therefore remain a hard conflict.
+    if not _same_contract_identity(left, right):
+        return None
+    return max((left, right), key=_source_preference)
+
 
 def read_json(path: pathlib.Path) -> dict[str, Any] | None:
     try:
@@ -85,28 +195,14 @@ def write_json_atomic(path: pathlib.Path, payload: dict[str, Any]) -> None:
 
 
 def eligible_for_shadow_ledger(snapshot: dict[str, Any]) -> bool:
-    """Keep all snapshots, but sample scheduled research once per decision day.
+    """Apply the shared healthy technical-Shadow sampling policy.
 
     Health fallbacks inherit the primary checkpoint in ``scheduled_slot``, so a
     successful 23:17 recovery remains eligible for the 22:47 daily sample.
-    Manual workflow runs are operational checks, not independent research
-    samples. Legacy snapshots without automation metadata keep compatibility.
+    It is a retry of that sample rather than an independent observation.
     """
-    automation = snapshot.get("automation")
-    automation = automation if isinstance(automation, dict) else {}
-    trigger = str(automation.get("trigger") or "")
-    if not trigger:
-        return True
-    if trigger != "schedule":
-        return False
-    try:
-        scheduled = dt.datetime.fromisoformat(str(automation.get("scheduled_slot") or ""))
-    except ValueError:
-        return False
-    if scheduled.tzinfo is None or scheduled.utcoffset() is None:
-        return False
-    local = scheduled.astimezone(CN_TZ)
-    return (local.hour, local.minute) == DAILY_SCHEDULED_LEDGER_SLOT
+
+    return history_evaluation.eligible_shadow_snapshot(snapshot)
 
 
 def candidate_contract(snapshot: dict[str, Any], source_name: str) -> dict[str, Any] | None:
@@ -120,8 +216,8 @@ def candidate_contract(snapshot: dict[str, Any], source_name: str) -> dict[str, 
         else "legacy_snapshot_v1"
     )
     decision = snapshot.get("global_decision") or {}
-    candidate = decision.get("research_priority")
-    if not isinstance(candidate, dict) or candidate.get("status") != "RESEARCH_ONLY":
+    candidate = history_evaluation.shadow_research_contract(decision.get("research_priority"))
+    if candidate is None:
         return None
     required = (
         "prediction_id",
@@ -142,6 +238,12 @@ def candidate_contract(snapshot: dict[str, Any], source_name: str) -> dict[str, 
     market = str(candidate["market"])
     if market not in COST_ASSUMPTIONS:
         return None
+    technical_shadow = isinstance(candidate.get("shadow_model"), dict)
+    transaction_cost = (
+        float(candidate["transaction_cost"])
+        if technical_shadow
+        else COST_ASSUMPTIONS[market]
+    )
     try:
         generated_at = dt.datetime.fromisoformat(
             str(snapshot.get("generated_at") or "").replace("Z", "+00:00")
@@ -181,6 +283,8 @@ def candidate_contract(snapshot: dict[str, Any], source_name: str) -> dict[str, 
         "probability": candidate.get("probability"),
         "expected_net_utility": candidate.get("expected_net_utility"),
         "tail_risk": candidate.get("tail_risk"),
+        "artifact_sha256": candidate.get("artifact_sha256"),
+        "training_cutoff": candidate.get("training_cutoff"),
         "entry_session_open_at": expected_window["entry_session_open_at"],
         "entry_trade_date": entry_date.isoformat(),
         "forecast_end_trade_date": exit_date.isoformat(),
@@ -192,7 +296,7 @@ def candidate_contract(snapshot: dict[str, Any], source_name: str) -> dict[str, 
         "calendar_version": expected_window["calendar_version"],
         "currency": CURRENCIES[market],
         "fx_rate_source": "not_required_same_currency_return",
-        "transaction_cost": COST_ASSUMPTIONS[market],
+        "transaction_cost": transaction_cost,
         "corporate_action_adjusted": False,
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
     }
@@ -324,6 +428,8 @@ def executable_candidate_contract(snapshot: dict[str, Any], source_name: str) ->
 def _discover_contracts(
     picks_dir: pathlib.Path,
     builder: Callable[[dict[str, Any], str], dict[str, Any] | None],
+    *,
+    shadow_retry_policy: bool = False,
 ) -> dict[str, dict[str, Any]]:
     contracts: dict[str, dict[str, Any]] = {}
     paths = sorted(picks_dir.glob("*.json"))
@@ -339,16 +445,24 @@ def _discover_contracts(
         if contract:
             prediction_id = str(contract["prediction_id"])
             existing = contracts.get(prediction_id)
-            if existing and any(existing.get(key) != contract.get(key) for key in CONTRACT_IDENTITY_KEYS):
+            if existing is None:
+                contracts[prediction_id] = contract
+                continue
+            if shadow_retry_policy:
+                selected = _newest_shadow_retry_contract(existing, contract)
+                if selected is None:
+                    raise RuntimeError(f"outcome identity conflict: {prediction_id}")
+                contracts[prediction_id] = selected
+                continue
+            if not _same_contract_identity(existing, contract):
                 raise RuntimeError(f"outcome identity conflict: {prediction_id}")
-            contracts.setdefault(prediction_id, contract)
     return contracts
 
 
 def discover_contracts(picks_dir: pathlib.Path = PICKS) -> dict[str, dict[str, Any]]:
-    """Discover legacy-compatible shadow contracts."""
+    """Discover one newest eligible technical Shadow contract per daily slot."""
 
-    return _discover_contracts(picks_dir, candidate_contract)
+    return _discover_contracts(picks_dir, candidate_contract, shadow_retry_policy=True)
 
 
 def discover_executable_contracts(picks_dir: pathlib.Path = PICKS) -> dict[str, dict[str, Any]]:
@@ -357,7 +471,12 @@ def discover_executable_contracts(picks_dir: pathlib.Path = PICKS) -> dict[str, 
 
 def market_rows(market: str, code: str) -> tuple[list[dict[str, Any]], str, bool]:
     if market == "a_share":
-        rows = server.eastmoney_stock_kline(str(code), 180) or server.tencent_stock_kline(str(code), 180)
+        # Settlement labels represent total return, so A-share entry/exit bars
+        # must come from the same explicit qfq-only chain as model history.
+        # ``qfq_stock_kline`` deliberately excludes providers/series whose
+        # adjustment basis cannot be verified and returns no rows when neither
+        # explicit qfq source is available.
+        rows = server.qfq_stock_kline(str(code), 180)
         return rows, "a_share_qfq_daily", bool(rows)
     symbol = str(code).upper()
     if market == "hk":
@@ -511,9 +630,33 @@ def _settle_contracts(
     for prediction_id, discovered in contracts.items():
         path = outcomes_dir / f"{prediction_id}.json"
         existing = read_json(path)
-        contract = existing or discovered
-        if existing and any(existing.get(key) != discovered.get(key) for key in CONTRACT_IDENTITY_KEYS):
-            raise RuntimeError(f"outcome identity conflict: {prediction_id}")
+        contract = discovered
+        if existing:
+            if discovered.get("track") == SHADOW_TRACK:
+                newest = _newest_shadow_retry_contract(existing, discovered)
+                if newest is None:
+                    raise RuntimeError(f"outcome identity conflict: {prediction_id}")
+                existing_status = str(existing.get("status") or "").upper()
+                try:
+                    entry_date = dt.date.fromisoformat(str(existing.get("entry_trade_date") or ""))
+                except ValueError:
+                    raise RuntimeError(f"outcome identity conflict: {prediction_id}") from None
+                if existing_status == "SETTLED":
+                    # A settled sample is immutable even if a later archive scan
+                    # discovers another same-slot retry.
+                    contract = existing
+                elif existing_status != "PENDING":
+                    raise RuntimeError(f"outcome identity conflict: {prediction_id}")
+                elif newest is discovered and today < entry_date:
+                    contract = discovered
+                else:
+                    # Once entry day begins, preserve the first frozen PENDING
+                    # identity and settle that exact sample.
+                    contract = existing
+            else:
+                if not _same_contract_identity(existing, discovered):
+                    raise RuntimeError(f"outcome identity conflict: {prediction_id}")
+                contract = existing
         result = settle_contract(contract, today)
         if existing == result:
             counters["unchanged"] += 1

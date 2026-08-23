@@ -19,6 +19,8 @@ from market_calendar import (
     expected_quote_session,
     market_trade_windows,
     quote_session_phase,
+    session_close_at,
+    session_open_at,
 )
 
 
@@ -53,6 +55,24 @@ DYNAMIC_DISCOVERY_MAX_REGULAR_SOURCE_AGE = dt.timedelta(minutes=45)
 DYNAMIC_DISCOVERY_MAX_SOURCE_FUTURE_SKEW = dt.timedelta(minutes=5)
 A_SHARE_DEEP_SCORE_LIMIT = 96
 YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
+TEN_DAY_SHADOW_MODEL_ID = "ten-day-technical-shadow-v1"
+TEN_DAY_SHADOW_LABEL_VERSION = "r10-net-total-return-v1"
+TEN_DAY_SHADOW_FEATURE_SCHEMA = "technical-d1-v1"
+TEN_DAY_SHADOW_PROVENANCE = "current_universe_historical_backfill"
+TEN_DAY_SHADOW_STATUSES = {
+    "SHADOW_READY",
+    "SHADOW_REJECTED",
+    "INSUFFICIENT_DATA",
+    "UNAVAILABLE",
+}
+TEN_DAY_SHADOW_QUALITY_GATE = {
+    "minimum_independent_test_dates": 40,
+    "minimum_brier_skill": 0.01,
+    "minimum_auc": 0.55,
+    "maximum_ece_10bin": 0.10,
+    "minimum_top_decile_excess_vs_mean": 0.005,
+    "minimum_top_decile_mean_net_return": 0.0,
+}
 
 
 def finite_number(value) -> bool:
@@ -65,6 +85,384 @@ def probability(value) -> bool:
 
 def strict_boolean(value) -> bool:
     return type(value) is bool
+
+
+def ten_day_shadow_quality_ready(validation: dict) -> bool:
+    required = (
+        "independent_test_date_count",
+        "brier_skill",
+        "auc",
+        "ece_10bin",
+        "top_decile_excess_vs_mean",
+        "top_decile_mean_net_return",
+    )
+    if not isinstance(validation, dict) or not all(finite_number(validation.get(field)) for field in required):
+        return False
+    return bool(
+        int(validation["independent_test_date_count"])
+        >= TEN_DAY_SHADOW_QUALITY_GATE["minimum_independent_test_dates"]
+        and validation["brier_skill"] >= TEN_DAY_SHADOW_QUALITY_GATE["minimum_brier_skill"]
+        and validation["auc"] >= TEN_DAY_SHADOW_QUALITY_GATE["minimum_auc"]
+        and validation["ece_10bin"] <= TEN_DAY_SHADOW_QUALITY_GATE["maximum_ece_10bin"]
+        and validation["top_decile_excess_vs_mean"]
+        >= TEN_DAY_SHADOW_QUALITY_GATE["minimum_top_decile_excess_vs_mean"]
+        and validation["top_decile_mean_net_return"]
+        > TEN_DAY_SHADOW_QUALITY_GATE["minimum_top_decile_mean_net_return"]
+    )
+
+
+def _append_ten_day_shadow_errors(model: dict, errors: list[str]) -> None:
+    """Validate Shadow evidence without ever treating it as production-ready."""
+
+    status = str(model.get("status") or "").upper()
+    if status not in TEN_DAY_SHADOW_STATUSES:
+        errors.append("ten-day Shadow status is invalid")
+    if model.get("model_id") != TEN_DAY_SHADOW_MODEL_ID:
+        errors.append("ten-day Shadow model_id is invalid")
+    if model.get("label_version") != TEN_DAY_SHADOW_LABEL_VERSION:
+        errors.append("ten-day Shadow label_version is invalid")
+    if model.get("feature_schema_version") != TEN_DAY_SHADOW_FEATURE_SCHEMA:
+        errors.append("ten-day Shadow feature_schema_version is invalid")
+    if model.get("training_provenance") != TEN_DAY_SHADOW_PROVENANCE:
+        errors.append("ten-day Shadow training_provenance is invalid")
+    if model.get("calibrated") is not False:
+        errors.append("ten-day Shadow calibrated must remain false")
+    if model.get("participates_in_decision") is not False:
+        errors.append("ten-day Shadow must not participate in the decision")
+    if model.get("production_eligible") is not False:
+        errors.append("ten-day Shadow production_eligible must remain false")
+    if model.get("probability") is not None:
+        errors.append("ten-day Shadow top-level probability must be null")
+    if status != "UNAVAILABLE" and model.get("quality_gate") != TEN_DAY_SHADOW_QUALITY_GATE:
+        errors.append("ten-day Shadow quality_gate does not match the registered policy")
+    if status in {"SHADOW_READY", "SHADOW_REJECTED"}:
+        training_cutoff = model.get("training_cutoff")
+        try:
+            dt.date.fromisoformat(str(training_cutoff))
+        except ValueError:
+            errors.append("ten-day Shadow training_cutoff must be an ISO date")
+        artifact_sha256 = model.get("artifact_sha256")
+        if not isinstance(artifact_sha256, str) or re.fullmatch(r"[a-f0-9]{64}", artifact_sha256.lower()) is None:
+            errors.append("ten-day Shadow artifact_sha256 is invalid")
+    for list_field in ("reason_codes", "limitations"):
+        values = model.get(list_field)
+        if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
+            errors.append(f"ten-day Shadow {list_field} must be a string list")
+
+    predictions = model.get("shadow_predictions")
+    if not isinstance(predictions, list):
+        errors.append("ten-day Shadow predictions must be a list")
+        predictions = []
+    prediction_count = model.get("shadow_prediction_count", model.get("prediction_count"))
+    if prediction_count is not None and (
+        not isinstance(prediction_count, int)
+        or isinstance(prediction_count, bool)
+        or prediction_count != len(predictions)
+    ):
+        errors.append("ten-day Shadow prediction count is inconsistent")
+
+    seen_predictions: set[tuple[str, str]] = set()
+    for index, prediction_row in enumerate(predictions):
+        prefix = f"ten-day Shadow prediction[{index}]"
+        if not isinstance(prediction_row, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        market = prediction_row.get("market")
+        code = str(prediction_row.get("code") or prediction_row.get("symbol") or "")
+        if market not in MARKET_RECALL_TARGETS or not code:
+            errors.append(f"{prefix} identity is invalid")
+        elif (market, code) in seen_predictions:
+            errors.append(f"{prefix} identity is duplicated")
+        else:
+            seen_predictions.add((market, code))
+        if prediction_row.get("model_id", model.get("model_id")) != model.get("model_id"):
+            errors.append(f"{prefix} model_id must match ten_day_return.model_id")
+        if prediction_row.get("label_version", model.get("label_version")) != model.get("label_version"):
+            errors.append(f"{prefix} label_version must match ten_day_return.label_version")
+        probability_value = prediction_row.get("probability")
+        if not probability(probability_value):
+            errors.append(f"{prefix} probability must be between 0 and 1")
+        for field in ("expected_net_return", "expected_net_utility"):
+            if not finite_number(prediction_row.get(field)):
+                errors.append(f"{prefix} {field} must be finite")
+        for field in ("transaction_cost", "tail_risk"):
+            value = prediction_row.get(field)
+            if not finite_number(value) or value < 0:
+                errors.append(f"{prefix} {field} must be a non-negative finite number")
+        expected_cost = {"a_share": 0.0015, "hk": 0.0030, "us": 0.0015}.get(market)
+        if expected_cost is not None and finite_number(prediction_row.get("transaction_cost")):
+            if not math.isclose(
+                float(prediction_row["transaction_cost"]),
+                expected_cost,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                errors.append(f"{prefix} transaction_cost is inconsistent with market policy")
+        expected_return = prediction_row.get("expected_net_return")
+        tail_risk = prediction_row.get("tail_risk")
+        utility = prediction_row.get("expected_net_utility")
+        if all(finite_number(value) for value in (expected_return, tail_risk, utility)):
+            expected_utility = float(expected_return) - 0.25 * float(tail_risk)
+            if not math.isclose(float(utility), expected_utility, rel_tol=0.0, abs_tol=1e-6):
+                errors.append(f"{prefix} expected_net_utility is inconsistent")
+        if prediction_row.get("participates_in_decision") is True:
+            errors.append(f"{prefix} must not participate in the decision")
+        if prediction_row.get("production_eligible") is True:
+            errors.append(f"{prefix} must not be production eligible")
+        market_model = (
+            (model.get("market_models") or {}).get(market)
+            if isinstance(model.get("market_models"), dict)
+            else None
+        )
+        if isinstance(market_model, dict):
+            expected_market_status = str(market_model.get("status") or "").upper()
+            if prediction_row.get("market_validation_status") != expected_market_status:
+                errors.append(f"{prefix} market_validation_status must match its market model")
+            for field in ("artifact_sha256", "training_cutoff", "fit_data_cutoff"):
+                expected = market_model.get(field)
+                if expected is not None and prediction_row.get(field) != expected:
+                    errors.append(f"{prefix} {field} must match its market model")
+
+    validation = model.get("validation")
+    if status in {"SHADOW_READY", "SHADOW_REJECTED"}:
+        if not isinstance(validation, dict) or not validation:
+            errors.append("ten-day Shadow held-out validation is required")
+        else:
+            date_count = next(
+                (
+                    validation.get(field)
+                    for field in (
+                        "independent_test_date_count",
+                        "independent_test_dates",
+                        "test_date_count",
+                        "held_out_days",
+                    )
+                    if field in validation
+                ),
+                None,
+            )
+            if not isinstance(date_count, int) or isinstance(date_count, bool) or date_count <= 0:
+                errors.append("ten-day Shadow independent test date count is invalid")
+            for field in ("brier_score", "ece_10bin"):
+                if not probability(validation.get(field)):
+                    errors.append(f"ten-day Shadow validation.{field} must be between 0 and 1")
+            auc_value = validation.get("auc")
+            if auc_value is not None and not probability(auc_value):
+                errors.append("ten-day Shadow validation.auc must be between 0 and 1 or null")
+
+    market_models = model.get("market_models")
+    if not isinstance(market_models, dict):
+        errors.append("ten-day Shadow market_models must be an object")
+    elif any(key not in MARKET_RECALL_TARGETS for key in market_models):
+        errors.append("ten-day Shadow market_models contains an invalid market")
+    elif status != "UNAVAILABLE":
+        if set(market_models) != set(MARKET_RECALL_TARGETS):
+            errors.append("ten-day Shadow market_models must cover three markets")
+        else:
+            market_statuses = []
+            for market, market_model in market_models.items():
+                if not isinstance(market_model, dict):
+                    errors.append(f"ten-day Shadow market_models.{market} must be an object")
+                    continue
+                market_status = str(market_model.get("status") or "").upper()
+                market_statuses.append(market_status)
+                if market_status not in {"SHADOW_READY", "SHADOW_REJECTED", "INSUFFICIENT_DATA"}:
+                    errors.append(f"ten-day Shadow market_models.{market}.status is invalid")
+                    continue
+                if market_model.get("quality_gate") != TEN_DAY_SHADOW_QUALITY_GATE:
+                    errors.append(f"ten-day Shadow market_models.{market}.quality_gate is invalid")
+                market_validation = market_model.get("validation")
+                quality_ready = ten_day_shadow_quality_ready(market_validation)
+                if market_status == "SHADOW_READY" and not quality_ready:
+                    errors.append(f"ten-day Shadow market_models.{market} READY gate is not met")
+                if market_status == "SHADOW_REJECTED" and quality_ready:
+                    errors.append(f"ten-day Shadow market_models.{market} rejection contradicts its metrics")
+            expected_status = (
+                "SHADOW_READY"
+                if "SHADOW_READY" in market_statuses
+                else "SHADOW_REJECTED"
+                if "SHADOW_REJECTED" in market_statuses
+                else "INSUFFICIENT_DATA"
+            )
+            if status != expected_status:
+                errors.append("ten-day Shadow top-level status does not match market models")
+    if status == "SHADOW_READY" and not predictions:
+        errors.append("ten-day SHADOW_READY requires at least one prediction")
+
+
+def _latest_completed_market_session(market: str, generated_at: object) -> dt.date | None:
+    """Independently derive the latest regular session observable at publication."""
+
+    if not isinstance(generated_at, str) or not generated_at:
+        return None
+    try:
+        anchor = dt.datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if anchor.tzinfo is None or anchor.utcoffset() is None:
+        return None
+    try:
+        quote_session = expected_quote_session(market, anchor)
+        close_at = dt.datetime.fromisoformat(session_close_at(market, quote_session))
+        if anchor >= close_at:
+            return quote_session
+        open_at = dt.datetime.fromisoformat(session_open_at(market, quote_session))
+        return expected_quote_session(market, open_at - dt.timedelta(microseconds=1))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _append_ten_day_shadow_join_errors(
+    model: dict,
+    decision: dict,
+    generated_at: object,
+    errors: list[str],
+) -> None:
+    """Cross-check the exact Shadow values consumed by the browser and ledger."""
+
+    predictions = model.get("shadow_predictions")
+    if not isinstance(predictions, list):
+        return
+    prediction_index = {
+        (str(row.get("market") or ""), str(row.get("code") or row.get("symbol") or "")): row
+        for row in predictions
+        if isinstance(row, dict)
+    }
+    evaluated = decision.get("evaluated_candidates")
+    if not isinstance(evaluated, list):
+        errors.append("global_decision.evaluated_candidates must be a list")
+        return
+    evaluated_index: dict[tuple[str, str], dict] = {}
+    comparable_numbers = (
+        "probability",
+        "expected_net_return",
+        "expected_net_utility",
+        "transaction_cost",
+        "tail_risk",
+    )
+    for index, row in enumerate(evaluated):
+        prefix = f"global_decision.evaluated_candidates[{index}]"
+        if not isinstance(row, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        identity = (str(row.get("market") or ""), str(row.get("code") or row.get("symbol") or ""))
+        evaluated_index[identity] = row
+        published_prediction = prediction_index.get(identity)
+        nested = row.get("shadow_model")
+        if published_prediction is not None and not isinstance(nested, dict):
+            errors.append(f"{prefix}.shadow_model must join the published prediction")
+            continue
+        if not isinstance(nested, dict):
+            continue
+        if nested.get("status") != "SHADOW_ONLY":
+            errors.append(f"{prefix}.shadow_model.status is invalid")
+        if published_prediction is None:
+            errors.append(f"{prefix}.shadow_model has no matching published prediction")
+            continue
+        for field in comparable_numbers:
+            left = nested.get(field)
+            right = published_prediction.get(field)
+            if not (finite_number(left) and finite_number(right)):
+                errors.append(f"{prefix}.shadow_model.{field} must be finite")
+            elif not math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=1e-8):
+                errors.append(f"{prefix}.shadow_model.{field} does not match the published prediction")
+        for field, expected in (
+            ("model_id", model.get("model_id")),
+            ("label_version", model.get("label_version")),
+            ("feature_schema_version", model.get("feature_schema_version")),
+            ("training_provenance", model.get("training_provenance")),
+        ):
+            if nested.get(field) != expected:
+                errors.append(f"{prefix}.shadow_model.{field} does not match ten_day_return")
+        market_model = (model.get("market_models") or {}).get(identity[0]) or {}
+        for field in (
+            "artifact_sha256",
+            "training_cutoff",
+            "fit_data_cutoff",
+            "validation_cutoff",
+            "last_training_signal_date",
+            "last_calibration_signal_date",
+        ):
+            expected = published_prediction.get(field)
+            if expected is None:
+                expected = market_model.get(field)
+            if expected is None and field in {"artifact_sha256", "training_cutoff", "fit_data_cutoff"}:
+                expected = model.get(field)
+            if nested.get(field) != expected:
+                errors.append(f"{prefix}.shadow_model.{field} does not match its market model")
+        if not isinstance(nested.get("prediction_id"), str) or re.fullmatch(
+            r"pred_[a-f0-9]{16,64}", nested.get("prediction_id") or ""
+        ) is None:
+            errors.append(f"{prefix}.shadow_model.prediction_id is invalid")
+        for field in ("calibrated", "participates_in_decision", "production_eligible"):
+            if nested.get(field) is not False:
+                errors.append(f"{prefix}.shadow_model.{field} must be false")
+        if not strict_boolean(nested.get("rank_eligible")):
+            errors.append(f"{prefix}.shadow_model.rank_eligible must be a boolean")
+        if nested.get("market_validation_status") != published_prediction.get("market_validation_status"):
+            errors.append(f"{prefix}.shadow_model.market_validation_status does not match the published prediction")
+        if nested.get("prediction_as_of") != published_prediction.get("prediction_as_of"):
+            errors.append(f"{prefix}.shadow_model.prediction_as_of does not match the published prediction")
+        if nested.get("rank_eligible") is True:
+            market_model = (model.get("market_models") or {}).get(identity[0]) or {}
+            if (
+                str(model.get("status") or "").upper() != "SHADOW_READY"
+                or str(market_model.get("status") or "").upper() != "SHADOW_READY"
+                or str(nested.get("market_validation_status") or "").upper() != "SHADOW_READY"
+                or not finite_number(nested.get("expected_net_utility"))
+                or nested.get("expected_net_utility") <= 0
+            ):
+                errors.append(f"{prefix}.shadow_model.rank_eligible is inconsistent")
+            prediction_as_of = nested.get("prediction_as_of")
+            try:
+                parsed_prediction_as_of = dt.date.fromisoformat(str(prediction_as_of))
+            except ValueError:
+                parsed_prediction_as_of = None
+                errors.append(
+                    f"{prefix}.shadow_model.prediction_as_of is required as an ISO date when rank_eligible=true"
+                )
+            expected_prediction_as_of = _latest_completed_market_session(identity[0], generated_at)
+            if expected_prediction_as_of is None:
+                errors.append(
+                    f"{prefix}.shadow_model rank eligibility cannot be verified from generated_at"
+                )
+            elif (
+                parsed_prediction_as_of is not None
+                and parsed_prediction_as_of != expected_prediction_as_of
+            ):
+                errors.append(
+                    f"{prefix}.shadow_model.prediction_as_of must equal latest completed "
+                    f"{identity[0]} session {expected_prediction_as_of.isoformat()}"
+                )
+        if row.get("score_kind") == "RULE_PRIORITY":
+            for field in ("probability", "expected_net_utility", "transaction_cost", "tail_risk"):
+                if row.get(field) is not None:
+                    errors.append(f"{prefix}.{field} must remain null for RULE_PRIORITY")
+
+    research = decision.get("research_priority")
+    if not isinstance(research, dict):
+        return
+    identity = (str(research.get("market") or ""), str(research.get("code") or research.get("symbol") or ""))
+    evaluated_row = evaluated_index.get(identity)
+    research_shadow = research.get("shadow_model")
+    if isinstance(research_shadow, dict):
+        if not isinstance(evaluated_row, dict) or research_shadow != evaluated_row.get("shadow_model"):
+            errors.append("research_priority.shadow_model must match its evaluated candidate")
+    candidate_snapshot = research.get("candidate_snapshot")
+    if candidate_snapshot is not None:
+        if not isinstance(candidate_snapshot, dict):
+            errors.append("research_priority.candidate_snapshot must be an object")
+        elif (
+            str(candidate_snapshot.get("market_key") or "") != identity[0]
+            or str(candidate_snapshot.get("code") or candidate_snapshot.get("symbol") or "") != identity[1]
+        ):
+            errors.append("research_priority.candidate_snapshot identity is invalid")
+        elif isinstance(research_shadow, dict) and candidate_snapshot.get("shadow_model") != research_shadow:
+            errors.append("research_priority.candidate_snapshot shadow_model is inconsistent")
+    if research.get("research_sort_basis") == "SHADOW_EXPECTED_NET_UTILITY" and not (
+        isinstance(research_shadow, dict) and research_shadow.get("rank_eligible") is True
+    ):
+        errors.append("research_priority Shadow sort basis requires rank-eligible evidence")
 
 
 def positive_number(value) -> bool:
@@ -361,6 +759,8 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                 errors.append("uncalibrated ten-day model probability must be null")
             if ten_day_probability is not None and not probability(ten_day_probability):
                 errors.append("analysis_models.ten_day_return.probability must be between 0 and 1")
+            if ten_day_model.get("model_id") == TEN_DAY_SHADOW_MODEL_ID:
+                _append_ten_day_shadow_errors(ten_day_model, errors)
 
     markets = snapshot.get("markets") or {}
     derived_market_states: dict[str, tuple[str, list[str]]] = {}
@@ -1184,6 +1584,13 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                             errors.append("research_priority forecast_end_trade_date is invalid")
                     else:
                         errors.append("research_priority market is invalid")
+            if isinstance(ten_day_model, dict) and ten_day_model.get("model_id") == TEN_DAY_SHADOW_MODEL_ID:
+                _append_ten_day_shadow_join_errors(
+                    ten_day_model,
+                    global_decision,
+                    snapshot.get("generated_at"),
+                    errors,
+                )
             market_states = global_decision.get("market_states") or {}
             if not isinstance(market_states, dict) or set(market_states) != {"a_share", "hk", "us"}:
                 errors.append("global_decision.market_states must cover three markets")

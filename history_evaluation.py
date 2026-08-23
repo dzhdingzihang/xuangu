@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import math
 import pathlib
+import re
 from collections import Counter, defaultdict
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -30,6 +31,18 @@ SETTLEMENT_TOLERANCE = 1e-6
 SHADOW_DAILY_SLOT = (22, 47)
 VALID_LEDGER_STATUSES = {"PENDING", "SETTLED"}
 SHADOW_COST_ASSUMPTIONS = {"a_share": 0.0015, "hk": 0.0030, "us": 0.0015}
+VALID_PREDICTION_ID = re.compile(r"^pred_[a-f0-9]{16,64}$")
+SHADOW_MODEL_IDENTITY_FIELDS = (
+    "prediction_id",
+    "model_id",
+    "label_version",
+    "probability",
+    "expected_net_utility",
+    "tail_risk",
+    "transaction_cost",
+    "artifact_sha256",
+    "training_cutoff",
+)
 CONTRACT_IDENTITY_FIELDS = (
     "schema_version",
     "track",
@@ -79,20 +92,53 @@ def is_global_ten_day_decision(decision: Any) -> bool:
 
 
 def eligible_shadow_snapshot(snapshot: dict[str, Any]) -> bool:
-    """Apply the current one-scheduled-sample-per-decision-day policy."""
+    """Admit one healthy technical Shadow sample for the daily primary slot.
+
+    The 23:17 health recovery deliberately inherits the 22:47
+    ``scheduled_slot``.  It is therefore the same statistical sample, not a
+    second observation.  Legacy rule rows, manual runs, degraded market
+    envelopes and non-rankable model rows remain visible in history but cannot
+    create an outcome-ledger contract.
+    """
 
     automation = snapshot.get("automation")
     automation = automation if isinstance(automation, dict) else {}
     trigger = str(automation.get("trigger") or "")
-    if not trigger:
-        return True
     if trigger != "schedule":
         return False
     scheduled = parse_moment(automation.get("scheduled_slot"))
     if scheduled is None:
         return False
     local = scheduled.astimezone(CN_TZ)
-    return (local.hour, local.minute) == SHADOW_DAILY_SLOT
+    if (local.hour, local.minute) != SHADOW_DAILY_SLOT:
+        return False
+
+    decision = snapshot.get("global_decision")
+    if not is_global_ten_day_decision(decision):
+        return False
+    research_priority = decision.get("research_priority")
+    if not isinstance(research_priority, dict):
+        return False
+    nested = research_priority.get("shadow_model")
+    if not isinstance(nested, dict) or nested.get("rank_eligible") is not True:
+        return False
+
+    selected_market = research_priority.get("market")
+    market_states = decision.get("market_states")
+    required_markets = {"a_share", "hk", "us"}
+    if (
+        not isinstance(selected_market, str)
+        or not selected_market
+        or not isinstance(market_states, dict)
+        or set(market_states) != required_markets
+        or selected_market not in market_states
+    ):
+        return False
+    for state in market_states.values():
+        state_name = state.get("state") if isinstance(state, dict) else state
+        if str(state_name or "").upper() != "READY":
+            return False
+    return True
 
 
 def snapshot_source_name(snapshot: dict[str, Any], explicit: str | None = None) -> str | None:
@@ -103,6 +149,81 @@ def snapshot_source_name(snapshot: dict[str, Any], explicit: str | None = None) 
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def shadow_research_contract(research_priority: Any) -> dict[str, Any] | None:
+    """Select the auditable Shadow identity without relabeling model output.
+
+    Legacy rule-only snapshots have no nested ``shadow_model`` and retain their
+    historical identity.  Once a nested technical model is present, however,
+    it must be complete and explicitly research-only.  A malformed nested
+    model fails closed instead of silently falling back to the old rule model.
+    """
+
+    if not isinstance(research_priority, dict) or research_priority.get("status") != "RESEARCH_ONLY":
+        return None
+    nested = research_priority.get("shadow_model")
+    if nested is None:
+        return dict(research_priority)
+    if not isinstance(nested, dict):
+        return None
+    if nested.get("rank_eligible") is False:
+        legacy = dict(research_priority)
+        legacy.pop("shadow_model", None)
+        return legacy
+    if nested.get("rank_eligible") is not True:
+        return None
+    if (
+        nested.get("status") != "SHADOW_ONLY"
+        or nested.get("calibrated") is not False
+        or nested.get("participates_in_decision") is not False
+        or nested.get("production_eligible") is not False
+    ):
+        return None
+
+    prediction_id = nested.get("prediction_id")
+    model_id = nested.get("model_id")
+    label_version = nested.get("label_version")
+    artifact_sha256 = nested.get("artifact_sha256")
+    training_cutoff = nested.get("training_cutoff")
+    if (
+        not isinstance(prediction_id, str)
+        or not VALID_PREDICTION_ID.fullmatch(prediction_id)
+        or not isinstance(model_id, str)
+        or not model_id
+        or not isinstance(label_version, str)
+        or not label_version
+        or not isinstance(artifact_sha256, str)
+        or re.fullmatch(r"[a-f0-9]{64}", artifact_sha256.lower()) is None
+        or not isinstance(training_cutoff, str)
+    ):
+        return None
+    try:
+        dt.date.fromisoformat(training_cutoff)
+    except ValueError:
+        return None
+
+    probability = nested.get("probability")
+    expected_net_utility = nested.get("expected_net_utility")
+    tail_risk = nested.get("tail_risk")
+    transaction_cost = nested.get("transaction_cost")
+    if (
+        not finite_number(probability)
+        or not 0.0 <= float(probability) <= 1.0
+        or not finite_number(expected_net_utility)
+        or not finite_number(tail_risk)
+        or float(tail_risk) < 0.0
+        or not finite_number(transaction_cost)
+        or float(transaction_cost) < 0.0
+    ):
+        return None
+    for key in ("market", "code"):
+        if key in nested and nested.get(key) != research_priority.get(key):
+            return None
+
+    selected = dict(research_priority)
+    selected.update({key: nested.get(key) for key in SHADOW_MODEL_IDENTITY_FIELDS})
+    return selected
 
 
 def _frozen_contract_fields(snapshot: dict[str, Any], track: str) -> dict[str, Any]:
@@ -135,8 +256,8 @@ def prediction_contract(snapshot: dict[str, Any], track: str) -> dict[str, Any] 
     if track == SHADOW_TRACK:
         if not eligible_shadow_snapshot(snapshot):
             return None
-        contract = decision.get("research_priority")
-        if not isinstance(contract, dict) or contract.get("status") != "RESEARCH_ONLY":
+        contract = shadow_research_contract(decision.get("research_priority"))
+        if contract is None:
             return None
     elif track == EXECUTABLE_TRACK:
         if (
@@ -196,9 +317,14 @@ def prediction_contract(snapshot: dict[str, Any], track: str) -> dict[str, Any] 
         if not finite_number(contract.get("transaction_cost")) or contract.get("transaction_cost") < 0:
             return None
     else:
-        transaction_cost = SHADOW_COST_ASSUMPTIONS.get(str(contract.get("market") or ""))
-        if transaction_cost is None:
-            return None
+        if isinstance(contract.get("shadow_model"), dict):
+            transaction_cost = contract.get("transaction_cost")
+            if not finite_number(transaction_cost) or float(transaction_cost) < 0:
+                return None
+        else:
+            transaction_cost = SHADOW_COST_ASSUMPTIONS.get(str(contract.get("market") or ""))
+            if transaction_cost is None:
+                return None
         normalized["transaction_cost"] = transaction_cost
     return normalized
 
@@ -213,7 +339,10 @@ def contract_matches_outcome(
         return False
     if contract.get("track") != track:
         return False
-    for key in CONTRACT_IDENTITY_FIELDS:
+    identity_fields = CONTRACT_IDENTITY_FIELDS
+    if track == SHADOW_TRACK:
+        identity_fields += ("artifact_sha256", "training_cutoff")
+    for key in identity_fields:
         if outcome.get(key) != contract.get(key):
             return False
     return str(outcome.get("status") or "").upper() in VALID_LEDGER_STATUSES
@@ -287,7 +416,10 @@ def matching_outcome(
 
 
 def _contract_signature(contract: dict[str, Any]) -> tuple[Any, ...]:
-    return tuple(contract.get(key) for key in CONTRACT_IDENTITY_FIELDS)
+    identity_fields = CONTRACT_IDENTITY_FIELDS
+    if contract.get("track") == SHADOW_TRACK:
+        identity_fields += ("artifact_sha256", "training_cutoff")
+    return tuple(contract.get(key) for key in identity_fields)
 
 
 def ledger_statistics(
