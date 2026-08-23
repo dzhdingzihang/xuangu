@@ -122,11 +122,20 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("POOL_COVERAGE_INSUFFICIENT", self.js)
         self.assertIn("pool-health-alert", self.css)
 
-    def test_recall_funnel_uses_fixed_market_targets_and_four_layers(self) -> None:
+    def test_recall_funnel_uses_fixed_market_targets_and_full_a_share_stages(self) -> None:
         self.assertRegex(self.js, r"function recallFunnel\(")
         self.assertIn("{ a_share: 300, hk: 200, us: 300 }", self.js)
-        for label in ("实际召回 / 目标", "有效行情 / 深度评分", "300 / 200 / 300"):
+        for label in (
+            "实际召回 / 目标",
+            "有效行情 / 基础评分",
+            "技术评分 / 深度研究",
+            "300 / 200 / 300",
+        ):
             self.assertIn(label, self.js)
+        self.assertIn("A_SHARE_TECHNICAL_COVERAGE_BELOW_MINIMUM", self.js)
+        self.assertIn("hasFullScoringStages", self.js)
+        self.assertIn("旧快照待更新；未发布全池基础/技术评分计数", self.js)
+        self.assertIn('label: "有效行情 / 深度评分"', self.js)
         self.assertIn("target > 0", self.js)
 
     def test_freshness_and_data_quality_have_separate_badges(self) -> None:

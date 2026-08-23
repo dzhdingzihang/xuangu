@@ -36,6 +36,7 @@ from market_calendar import (
     expected_quote_session,
     market_trade_windows,
     quote_session_phase,
+    session_dates,
 )
 
 
@@ -43,10 +44,11 @@ ROOT = pathlib.Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 CACHE = ROOT / "data"
 PICKS = CACHE / "picks"
+A_SHARE_KLINE_CACHE = CACHE / "runtime-cache" / "a_share_daily.json"
 MARKET_RECALL_EXPANSION_PATH = CACHE / "universes" / "market_recall_expansion_v2.json"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-08-22.3-freshness-gated-recall"
+MODEL_VERSION = "smart-selector-2026-08-23.1-a300-full-score"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
@@ -57,7 +59,7 @@ SERENITY_SKILL_DIR = pathlib.Path.home() / ".agents" / "skills" / "serenity-skil
 SCHEMA_VERSION = "selector-snapshot-v2"
 SELECTOR_MODE = "legacy_active_v2_dual_low_shadow"
 V2_WEIGHTS_VERSION = "v2-rule-prior-1"
-UNIVERSE_VERSION = "recall-v2-3-diversified-300-200-300"
+UNIVERSE_VERSION = "recall-v2-4-a300-full-score"
 DUAL_LOW_MODEL_ID = "dsa-screening-score-v1"
 DUAL_LOW_PACKAGE_VERSION = "1.0.0"
 DUAL_LOW_STRATEGY_ID = "dual_low"
@@ -90,8 +92,9 @@ A_SHARE_BOARD_ROUTE_TARGETS = {
     "star": {"event": 8, "momentum": 16, "pullback": 13, "liquidity": 18, "history": 5},
 }
 A_SHARE_MIN_BROAD_POOL_COUNT = 240
-A_SHARE_MIN_QUOTE_COVERAGE = 0.80
+A_SHARE_MIN_QUOTE_COVERAGE = 0.98
 A_SHARE_DEEP_SCORE_LIMIT = 96
+A_SHARE_MIN_TECHNICAL_SCORE_COVERAGE = 0.98
 A_SHARE_MIN_DEEP_SCORE_COVERAGE = 0.98
 YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
 MARKET_SOURCE_TIMEZONES = {
@@ -3893,23 +3896,169 @@ def stock_kline(code: str, limit: int = 70) -> list[dict]:
     return tencent_stock_kline(code, limit)
 
 
-def a_share_kline_map(codes: list[str], limit: int = 70) -> dict[str, list[dict]]:
+def _load_a_share_kline_cache() -> dict[str, list[dict]]:
+    try:
+        payload = json.loads(A_SHARE_KLINE_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("version") != "a-share-daily-kline-v1":
+        return {}
+    rows_by_code = payload.get("rows")
+    if not isinstance(rows_by_code, dict):
+        return {}
     result: dict[str, list[dict]] = {}
+    for code, rows in rows_by_code.items():
+        if isinstance(code, str) and isinstance(rows, list) and rows:
+            result[code] = rows[-70:]
+    return result
+
+
+def _save_a_share_kline_cache(rows_by_code: dict[str, list[dict]]) -> None:
+    if not rows_by_code:
+        return
+    payload = {
+        "version": "a-share-daily-kline-v1",
+        "updated_at": now_cn().isoformat(timespec="seconds"),
+        "rows": {code: rows[-70:] for code, rows in sorted(rows_by_code.items()) if rows},
+    }
+    try:
+        A_SHARE_KLINE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = A_SHARE_KLINE_CACHE.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        temp_path.replace(A_SHARE_KLINE_CACHE)
+    except OSError:
+        # The cache is an optimization only. A read-only or full filesystem
+        # must not prevent an otherwise valid snapshot from being generated.
+        return
+
+
+def _kline_cache_age_days(rows: list[dict], expected_session: dt.date) -> int | None:
+    if not rows:
+        return None
+    try:
+        last_session = dt.date.fromisoformat(str(rows[-1].get("date") or "")[:10])
+    except ValueError:
+        return None
+    return (expected_session - last_session).days
+
+
+def _kline_cache_is_previous_session(rows: list[dict], expected_session: dt.date) -> bool:
+    if not rows:
+        return False
+    try:
+        last_session = dt.date.fromisoformat(str(rows[-1].get("date") or "")[:10])
+        missing_sessions = session_dates(
+            "a_share",
+            last_session + dt.timedelta(days=1),
+            expected_session,
+        )
+    except Exception:
+        return False
+    return len(missing_sessions) == 1 and missing_sessions[0] == expected_session
+
+
+def _kline_rows_are_current(rows: list[dict], expected_session: dt.date) -> bool:
+    """Accept only the expected A-share session or its immediate predecessor.
+
+    Daily providers can lag the current trading session while it is still open,
+    so one exchange session of lag is valid and is completed by the realtime
+    quote overlay. Older or future data must not count toward K-line coverage.
+    """
+
+    age_days = _kline_cache_age_days(rows, expected_session)
+    return age_days == 0 or _kline_cache_is_previous_session(rows, expected_session)
+
+
+def a_share_kline_map(codes: list[str], limit: int = 70) -> dict[str, list[dict]]:
     unique = list(dict.fromkeys(str(code or "") for code in codes if code))
     if not unique:
-        return result
-    workers = min(12, max(1, len(unique)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(stock_kline, code, limit): code for code in unique}
-        for future in concurrent.futures.as_completed(futures):
-            code = futures[future]
-            try:
-                rows = future.result()
-            except Exception:
-                rows = []
-            if rows:
-                result[code] = rows
+        return {}
+    try:
+        expected_session = expected_quote_session("a_share", now_cn())
+    except Exception:
+        expected_session = now_cn().date()
+    cached = _load_a_share_kline_cache()
+    result: dict[str, list[dict]] = {}
+    fallback: dict[str, list[dict]] = {}
+    refresh_codes: list[str] = []
+    for code in unique:
+        rows = cached.get(code) or []
+        age_days = _kline_cache_age_days(rows, expected_session)
+        if age_days == 0:
+            result[code] = rows[-limit:]
+        else:
+            refresh_codes.append(code)
+            if len(rows) >= 31 and _kline_cache_is_previous_session(rows, expected_session):
+                fallback[code] = rows[-limit:]
+
+    def fetch_batch(batch: list[str], workers: int) -> dict[str, list[dict]]:
+        fetched: dict[str, list[dict]] = {}
+        if not batch:
+            return fetched
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(batch))) as executor:
+            futures = {executor.submit(stock_kline, code, limit): code for code in batch}
+            for future in concurrent.futures.as_completed(futures):
+                code = futures[future]
+                try:
+                    rows = future.result()
+                except Exception:
+                    rows = []
+                if rows and _kline_rows_are_current(rows, expected_session):
+                    fetched[code] = rows[-limit:]
+        return fetched
+
+    result.update(fetch_batch(refresh_codes, 12))
+    # Public providers occasionally omit a random subset under concurrency.
+    # Retry only missing codes at low concurrency; never repeat all 300.
+    for _ in range(2):
+        missing = [code for code in refresh_codes if code not in result]
+        if not missing:
+            break
+        result.update(fetch_batch(missing, 4))
+    for code, rows in fallback.items():
+        result.setdefault(code, rows)
+    _save_a_share_kline_cache({code: result[code] for code in unique if code in result})
     return result
+
+
+def overlay_a_share_quote_bar(kline: list[dict], quote: dict, limit: int = 70) -> list[dict]:
+    """Append/replace today's partial daily bar with the realtime quote.
+
+    Cached history therefore remains useful across the seven daily checkpoints
+    without freezing the technical score at the first request of the day.
+    """
+
+    rows = [dict(row) for row in (kline or []) if isinstance(row, dict)]
+    source_as_of = str(((quote.get("realtime") or {}).get("source_as_of") or ""))
+    bar_date = source_as_of[:10]
+    try:
+        dt.date.fromisoformat(bar_date)
+    except ValueError:
+        return rows[-limit:]
+    close = safe_float(quote.get("price"))
+    if close <= 0:
+        return rows[-limit:]
+    open_ = safe_float(quote.get("open")) or close
+    high = max(safe_float(quote.get("high")), open_, close)
+    low_value = safe_float(quote.get("low"))
+    low = min(value for value in (low_value, open_, close) if value > 0)
+    bar = {
+        "date": bar_date,
+        "open": open_,
+        "close": close,
+        "high": high,
+        "low": low,
+        "volume": safe_float(quote.get("volume")),
+        "amount": safe_float(quote.get("amount_wan")) * 10000,
+        "amplitude": safe_float(quote.get("amplitude_pct")),
+        "change_pct": safe_float(quote.get("change_pct")),
+        "turnover": safe_float(quote.get("turnover_pct")),
+    }
+    if rows and str(rows[-1].get("date") or "")[:10] == bar_date:
+        rows[-1] = bar
+    elif not rows or str(rows[-1].get("date") or "")[:10] < bar_date:
+        rows.append(bar)
+    return rows[-limit:]
 
 
 def cached_market_kline(market_key: str, symbol: str) -> list[dict]:
@@ -5293,6 +5442,11 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
     except Exception:
         quotes = {}
         quote_failed = True
+    quotes = {
+        code: quote
+        for code, quote in quotes.items()
+        if isinstance(quote, dict) and safe_float(quote.get("price")) > 0
+    }
     quote_health = quote_health_contract(len(codes), len(quotes), failed=quote_failed)
     dragon_map = daily_dragon_tiger(signal_date) if quotes else {}
 
@@ -5300,28 +5454,71 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
     for hot in hot_rows:
         code = hot.get("code") or ""
         quote = quotes.get(code)
-        if not quote or quote["price"] <= 0:
+        if not quote:
             continue
         name = quote["name"]
-        if "ST" in name.upper() or code.startswith(("8", "4", "9")):
-            continue
         pre = preliminary_score(hot, quote, dragon_map.get(code))
-        preliminary.append({"hot": hot, "quote": quote, **pre})
+        screen_eligible = bool(
+            a_share_board(code)
+            and "ST" not in name.upper()
+            and "退" not in name
+            and not name.upper().startswith(("N", "C"))
+            and not code.startswith(("8", "4", "9"))
+        )
+        if not screen_eligible:
+            pre["risk_flags"] = [*pre["risk_flags"], "基础行情有效，但证券暂不满足深度研究可交易性"]
+        preliminary.append({"hot": hot, "quote": quote, "screen_eligible": screen_eligible, **pre})
 
     preliminary.sort(key=lambda item: item["pre_score"], reverse=True)
     dual_low_batch = run_dual_low_analysis([item["quote"] for item in preliminary])
+    base_scored_size = len(preliminary)
+    kline_map = a_share_kline_map([item["quote"]["code"] for item in preliminary])
+    technical_items: list[dict] = []
+    for item in preliminary:
+        quote = item["quote"]
+        code = quote["code"]
+        kline = overlay_a_share_quote_bar(kline_map.get(code) or [], quote)
+        kline_complete = len(kline) >= 32
+        chan = chan_signal(kline)
+        czsc = czsc_structure_score(kline)
+        screen_score = (
+            item["pre_score"] * 0.75
+            + chan["score"] * 0.55
+            + czsc["score"] * 0.75
+            - (18.0 if not kline_complete else 0.0)
+        )
+        technical_items.append(
+            {
+                **item,
+                "kline": kline,
+                "chan": chan,
+                "czsc": czsc,
+                "screen_score": round(screen_score, 2),
+                "technical_kline_complete": kline_complete,
+            }
+        )
+
+    technical_items.sort(
+        key=lambda item: (item["screen_score"], item["pre_score"]),
+        reverse=True,
+    )
+    for screen_rank, item in enumerate(technical_items, 1):
+        item["screen_rank"] = screen_rank
+
     final = []
     max_kline_checks = int(os.environ.get("CHAN_MAX_KLINE_CHECKS", str(A_SHARE_DEEP_SCORE_LIMIT)))
-    deep_items = preliminary[:max_kline_checks]
-    kline_map = a_share_kline_map([item["quote"]["code"] for item in deep_items])
+    deep_eligible_items = [
+        item
+        for item in technical_items
+        if item["screen_eligible"] and item["technical_kline_complete"]
+    ]
+    deep_items = deep_eligible_items[: max(0, max_kline_checks)]
     for item in deep_items:
         quote = item["quote"]
         code = quote["code"]
-        kline = kline_map.get(code) or []
-        if len(kline) < 32:
-            continue
-        chan = chan_signal(kline)
-        czsc = czsc_structure_score(kline)
+        kline = item["kline"]
+        chan = item["chan"]
+        czsc = item["czsc"]
         metrics = chan.get("metrics") or {}
         serenity_candidate = SERENITY_A_BY_CODE.get(code)
         if serenity_candidate:
@@ -5412,6 +5609,9 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
                 "candidate_lineage": item["hot"].get("candidate_lineage"),
                 "score": round(total, 2),
                 "pre_score": item["pre_score"],
+                "screen_score": item["screen_score"],
+                "screen_rank": item["screen_rank"],
+                "score_tier": "deep_legacy",
                 "chan_score": chan["score"],
                 "czsc_score": czsc["score"],
                 "serenity_score": serenity_score,
@@ -5455,6 +5655,20 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
         "candidates": final,
         "raw_pool_size": len(hot_rows),
         "scored_size": len(final),
+        "base_scored_size": base_scored_size,
+        "technical_attempted_size": base_scored_size,
+        "technical_scored_size": len(technical_items),
+        "technical_kline_complete_size": sum(
+            1 for item in technical_items if item["technical_kline_complete"]
+        ),
+        "technical_kline_coverage": round(
+            sum(1 for item in technical_items if item["technical_kline_complete"])
+            / base_scored_size,
+            4,
+        )
+        if base_scored_size
+        else 0.0,
+        "deep_eligible_size": len(deep_eligible_items),
         "deep_attempted_size": len(deep_items),
         "deep_scored_size": len(final),
         "deep_kline_coverage": round(len(final) / len(deep_items), 4) if deep_items else 0.0,
@@ -5470,12 +5684,17 @@ def a_share_pool_health(
     event_count: int = 0,
     cached_count: int = 0,
     quote_count: int = 0,
+    technical_attempted_count: int = 0,
+    technical_completed_count: int = 0,
+    deep_eligible_count: int = 0,
     deep_attempted_count: int = 0,
     deep_completed_count: int = 0,
+    deep_score_limit: int = A_SHARE_DEEP_SCORE_LIMIT,
     merged_count: int | None = None,
     recall_coverage: dict | None = None,
     min_broad_pool_count: int = A_SHARE_MIN_BROAD_POOL_COUNT,
     min_quote_coverage: float = A_SHARE_MIN_QUOTE_COVERAGE,
+    min_technical_score_coverage: float = A_SHARE_MIN_TECHNICAL_SCORE_COVERAGE,
     min_deep_score_coverage: float = A_SHARE_MIN_DEEP_SCORE_COVERAGE,
 ) -> dict:
     broad_pool_count = len(broad_rows)
@@ -5483,6 +5702,10 @@ def a_share_pool_health(
         merged_count = broad_pool_count + max(0, int(event_count)) + max(0, int(cached_count))
     merged_pool_count = max(0, int(merged_count))
     quote_count = max(0, int(quote_count))
+    technical_attempted_count = max(0, int(technical_attempted_count))
+    technical_completed_count = max(0, min(int(technical_completed_count), technical_attempted_count))
+    deep_eligible_count = max(0, min(int(deep_eligible_count), technical_completed_count))
+    deep_score_limit = max(0, int(deep_score_limit))
     deep_attempted_count = max(0, int(deep_attempted_count))
     deep_completed_count = max(0, min(int(deep_completed_count), deep_attempted_count))
     quote_coverage = (
@@ -5493,6 +5716,11 @@ def a_share_pool_health(
     deep_score_coverage = (
         round(deep_completed_count / deep_attempted_count, 4)
         if deep_attempted_count
+        else 0.0
+    )
+    technical_score_coverage = (
+        round(technical_completed_count / technical_attempted_count, 4)
+        if technical_attempted_count
         else 0.0
     )
     reason_codes: list[str] = []
@@ -5515,8 +5743,20 @@ def a_share_pool_health(
         reason_codes.append("MERGED_POOL_EMPTY")
     elif quote_coverage < min_quote_coverage:
         reason_codes.append("QUOTE_COVERAGE_BELOW_MINIMUM")
-    if deep_attempted_count == 0 or deep_score_coverage < min_deep_score_coverage:
-        reason_codes.append("A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM")
+    if (
+        technical_attempted_count != quote_count
+        or technical_attempted_count == 0
+        or technical_score_coverage < min_technical_score_coverage
+    ):
+        reason_codes.append("A_SHARE_TECHNICAL_COVERAGE_BELOW_MINIMUM")
+    expected_deep_attempted = min(deep_score_limit, deep_eligible_count)
+    if (
+        deep_eligible_count < min(deep_score_limit, technical_completed_count)
+        or deep_attempted_count != expected_deep_attempted
+        or deep_attempted_count == 0
+        or deep_score_coverage < min_deep_score_coverage
+    ):
+        reason_codes.append("A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM")
     return {
         "status": "degraded" if reason_codes else "healthy",
         "reason_codes": reason_codes,
@@ -5526,10 +5766,16 @@ def a_share_pool_health(
         "quote_coverage": quote_coverage,
         "min_broad_pool_count": min_broad_pool_count,
         "min_quote_coverage": min_quote_coverage,
+        "technical_attempted_count": technical_attempted_count,
+        "technical_completed_count": technical_completed_count,
+        "technical_score_coverage": technical_score_coverage,
+        "min_technical_score_coverage": min_technical_score_coverage,
+        "deep_eligible_count": deep_eligible_count,
         "deep_attempted_count": deep_attempted_count,
         "deep_completed_count": deep_completed_count,
         "deep_score_coverage": deep_score_coverage,
         "min_deep_score_coverage": min_deep_score_coverage,
+        "deep_score_limit": deep_score_limit,
         "target_count": target_count,
         "selected_count": selected_count,
         "recall_coverage": round(selected_count / target_count, 4) if target_count else 0.0,
@@ -5674,8 +5920,12 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         event_count=len(event_rows),
         cached_count=len(cached_rows),
         quote_count=int(quote_health.get("quote_count") or 0),
+        technical_attempted_count=int(scored.get("technical_attempted_size") or 0),
+        technical_completed_count=int(scored.get("technical_kline_complete_size") or 0),
+        deep_eligible_count=int(scored.get("deep_eligible_size") or 0),
         deep_attempted_count=int(scored.get("deep_attempted_size") or 0),
         deep_completed_count=int(scored.get("deep_scored_size") or 0),
+        deep_score_limit=int(os.environ.get("CHAN_MAX_KLINE_CHECKS", str(A_SHARE_DEEP_SCORE_LIMIT))),
         merged_count=len(hot_rows),
         recall_coverage=recall_coverage,
     )
@@ -5747,12 +5997,23 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
                 "source_counts": recall_source_counts(hot_rows, "a_share"),
                 "recall_backfill_count": recall_coverage["backfill_count"],
                 "deep_score_limit": int(os.environ.get("CHAN_MAX_KLINE_CHECKS", str(A_SHARE_DEEP_SCORE_LIMIT))),
+                "deep_eligible_size": scored.get("deep_eligible_size", 0),
                 "deep_attempted_size": scored.get("deep_attempted_size", 0),
                 "event_pool_size": len(event_rows),
                 "broad_pool_size": len(broad_rows),
                 "cached_pool_size": len(cached_rows),
                 "broad_pool_mode": broad_mode,
                 "valid_quote_size": int(quote_health.get("quote_count") or 0),
+                "base_scored_size": scored.get("base_scored_size", 0),
+                "technical_attempted_size": scored.get("technical_attempted_size", 0),
+                "technical_scored_size": scored.get("technical_scored_size", 0),
+                "technical_kline_complete_size": scored.get("technical_kline_complete_size", 0),
+                "technical_incomplete_size": max(
+                    0,
+                    int(scored.get("technical_attempted_size") or 0)
+                    - int(scored.get("technical_kline_complete_size") or 0),
+                ),
+                "technical_kline_coverage": scored.get("technical_kline_coverage", 0.0),
                 "deep_scored_size": scored.get("deep_scored_size", scored["scored_size"]),
                 "deep_kline_coverage": scored.get("deep_kline_coverage", 0.0),
                 "scored_size": scored["scored_size"],

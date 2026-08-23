@@ -43,7 +43,13 @@ def snapshot_fixture() -> dict:
         if market_key == "a_share":
             stats.update(
                 {
+                    "base_scored_size": targets[market_key],
+                    "technical_attempted_size": targets[market_key],
+                    "technical_scored_size": targets[market_key],
+                    "technical_kline_complete_size": targets[market_key],
+                    "technical_kline_coverage": 1.0,
                     "deep_score_limit": 96,
+                    "deep_eligible_size": targets[market_key],
                     "deep_attempted_size": 96,
                     "deep_kline_coverage": 0.0104,
                     "board_targets": dict(server.A_SHARE_BOARD_TARGETS),
@@ -264,6 +270,56 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertIn("markets.a_share.stats.deep_scored_size exceeds attempted size", errors)
         self.assertIn("markets.a_share.stats.deep_kline_coverage is inconsistent", errors)
         self.assertIn("markets.hk.quote_health.realtime_coverage is inconsistent", errors)
+
+    def test_a_share_full_score_stages_are_required_and_self_consistent(self) -> None:
+        missing = server.enrich_snapshot_v2(snapshot_fixture())
+        del missing["markets"]["a_share"]["stats"]["base_scored_size"]
+
+        errors = validate_snapshot(missing)
+
+        self.assertTrue(any("base_scored_size" in error for error in errors))
+
+        inconsistent = server.enrich_snapshot_v2(snapshot_fixture())
+        inconsistent["markets"]["a_share"]["stats"].update(
+            {
+                "base_scored_size": 299,
+                "technical_attempted_size": 298,
+                "technical_scored_size": 297,
+                "technical_kline_complete_size": 296,
+                "technical_kline_coverage": 0.1,
+            }
+        )
+
+        errors = validate_snapshot(inconsistent)
+
+        self.assertIn("markets.a_share.stats.base_scored_size must equal valid quote size", errors)
+        self.assertIn("markets.a_share.stats.technical_attempted_size must equal base scored size", errors)
+        self.assertIn("markets.a_share.stats.technical_kline_coverage is inconsistent", errors)
+
+    def test_a_share_deep_attempted_uses_only_eligible_complete_kline_rows(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        stats = enriched["markets"]["a_share"]["stats"]
+        stats.update(
+            {
+                "technical_kline_complete_size": 3,
+                "technical_kline_coverage": 0.01,
+                "deep_score_limit": 3,
+                "deep_eligible_size": 2,
+                "deep_attempted_size": 2,
+                "deep_scored_size": 2,
+                "deep_kline_coverage": 1.0,
+                "scored_size": 2,
+            }
+        )
+
+        # The production contract fixes the limit at 96, so validate the
+        # eligible basis with the production limit and a two-name deep pool.
+        stats["deep_score_limit"] = 96
+        self.assertEqual(validate_snapshot(enriched), [])
+
+        stats["deep_attempted_size"] = 3
+        errors = validate_snapshot(enriched)
+        self.assertIn("markets.a_share.stats.deep_attempted_size is invalid", errors)
 
     def test_snapshot_validator_requires_global_ten_day_contract(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())

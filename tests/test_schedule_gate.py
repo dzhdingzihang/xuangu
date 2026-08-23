@@ -56,7 +56,13 @@ def healthy_snapshot(generated_at: str = "2026-08-21T08:25:00+08:00") -> dict:
     }
     snapshot["markets"]["a_share"]["stats"].update(
         {
+            "base_scored_size": 300,
+            "technical_attempted_size": 300,
+            "technical_scored_size": 300,
+            "technical_kline_complete_size": 300,
+            "technical_kline_coverage": 1.0,
             "deep_score_limit": 96,
+            "deep_eligible_size": 300,
             "deep_attempted_size": 96,
             "deep_scored_size": 96,
             "deep_kline_coverage": 1.0,
@@ -290,7 +296,13 @@ class ScheduleGateTests(unittest.TestCase):
                     "stats": {
                         "raw_pool_size": 300,
                         "scored_size": 96,
+                        "base_scored_size": 300,
+                        "technical_attempted_size": 300,
+                        "technical_scored_size": 300,
+                        "technical_kline_complete_size": 300,
+                        "technical_kline_coverage": 1.0,
                         "deep_score_limit": 96,
+                        "deep_eligible_size": 300,
                         "deep_attempted_size": 96,
                         "deep_scored_size": 96,
                         "deep_kline_coverage": 1.0,
@@ -407,11 +419,38 @@ class ScheduleGateTests(unittest.TestCase):
         )
 
         self.assertNotIn(
-            "A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM",
+            "A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM",
             self.module.snapshot_data_source_recovery_reasons(healthy),
         )
         self.assertIn(
-            "A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM",
+            "A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM",
+            self.module.snapshot_data_source_recovery_reasons(degraded),
+        )
+
+    def test_a_share_technical_coverage_boundary_forces_recovery(self) -> None:
+        healthy = healthy_snapshot()
+        healthy["markets"]["a_share"]["stats"].update(
+            {
+                "technical_kline_complete_size": 294,
+                "technical_kline_coverage": 0.98,
+                "deep_eligible_size": 294,
+            }
+        )
+        degraded = healthy_snapshot()
+        degraded["markets"]["a_share"]["stats"].update(
+            {
+                "technical_kline_complete_size": 293,
+                "technical_kline_coverage": 0.9767,
+                "deep_eligible_size": 293,
+            }
+        )
+
+        self.assertNotIn(
+            "A_SHARE_TECHNICAL_COVERAGE_BELOW_MINIMUM",
+            self.module.snapshot_data_source_recovery_reasons(healthy),
+        )
+        self.assertIn(
+            "A_SHARE_TECHNICAL_COVERAGE_BELOW_MINIMUM",
             self.module.snapshot_data_source_recovery_reasons(degraded),
         )
 

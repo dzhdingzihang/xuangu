@@ -36,6 +36,8 @@ RECOVERABLE_SOURCE_REASON_CODES = {
     "QUOTE_INPUT_EMPTY",
     "TENCENT_QUOTE_PARTIAL",
     "TENCENT_QUOTE_UNAVAILABLE",
+    "A_SHARE_TECHNICAL_COVERAGE_BELOW_MINIMUM",
+    "A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM",
     "YAHOO_QUOTE_PARTIAL",
     "YAHOO_QUOTE_UNAVAILABLE",
     "YAHOO_REALTIME_STALE",
@@ -52,6 +54,7 @@ A_SHARE_BOARD_TARGETS = {
     "star": 60,
 }
 A_SHARE_DEEP_SCORE_LIMIT = 96
+A_SHARE_MIN_TECHNICAL_SCORE_COVERAGE = 0.98
 A_SHARE_MIN_DEEP_SCORE_COVERAGE = 0.98
 YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
 
@@ -227,27 +230,68 @@ def snapshot_data_source_recovery_reasons(snapshot: dict) -> list[str]:
             ):
                 reasons.append("A_SHARE_BOARD_QUOTA_PARTIAL")
             deep_limit = stats.get("deep_score_limit")
+            base_scored = stats.get("base_scored_size")
+            technical_attempted = stats.get("technical_attempted_size")
+            technical_scored = stats.get("technical_scored_size")
+            technical_kline_complete = stats.get("technical_kline_complete_size")
+            technical_coverage = stats.get("technical_kline_coverage")
+            deep_eligible = stats.get("deep_eligible_size")
             deep_attempted = stats.get("deep_attempted_size")
             deep_completed = stats.get("deep_scored_size")
             deep_coverage = stats.get("deep_kline_coverage")
             valid_quote_count = quote_health.get("quote_count")
+            technical_shape_known = (
+                isinstance(valid_quote_count, (int, float))
+                and not isinstance(valid_quote_count, bool)
+                and isinstance(base_scored, int)
+                and not isinstance(base_scored, bool)
+                and base_scored == int(valid_quote_count)
+                and isinstance(technical_attempted, int)
+                and not isinstance(technical_attempted, bool)
+                and technical_attempted == base_scored
+                and isinstance(technical_scored, int)
+                and not isinstance(technical_scored, bool)
+                and technical_scored == technical_attempted
+                and isinstance(technical_kline_complete, int)
+                and not isinstance(technical_kline_complete, bool)
+                and 0 <= technical_kline_complete <= technical_scored
+                and isinstance(technical_coverage, (int, float))
+                and not isinstance(technical_coverage, bool)
+                and technical_coverage
+                == (round(technical_kline_complete / technical_attempted, 4) if technical_attempted else 0.0)
+            )
+            required_technical_complete = (
+                math.ceil(technical_attempted * A_SHARE_MIN_TECHNICAL_SCORE_COVERAGE)
+                if isinstance(technical_attempted, int) and technical_attempted > 0
+                else 1
+            )
+            if not technical_shape_known or technical_kline_complete < required_technical_complete:
+                reasons.append("A_SHARE_TECHNICAL_COVERAGE_BELOW_MINIMUM")
             deep_shape_known = (
                 deep_limit == A_SHARE_DEEP_SCORE_LIMIT
-                and isinstance(valid_quote_count, (int, float))
-                and not isinstance(valid_quote_count, bool)
+                and isinstance(technical_kline_complete, int)
+                and not isinstance(technical_kline_complete, bool)
+                and isinstance(deep_eligible, int)
+                and not isinstance(deep_eligible, bool)
+                and 0 <= deep_eligible <= technical_kline_complete
                 and isinstance(deep_attempted, int)
                 and not isinstance(deep_attempted, bool)
                 and isinstance(deep_completed, int)
                 and not isinstance(deep_completed, bool)
                 and isinstance(deep_coverage, (int, float))
                 and not isinstance(deep_coverage, bool)
-                and deep_attempted == min(A_SHARE_DEEP_SCORE_LIMIT, int(valid_quote_count))
+                and deep_attempted == min(A_SHARE_DEEP_SCORE_LIMIT, deep_eligible)
                 and 0 <= deep_completed <= deep_attempted
                 and deep_coverage == (round(deep_completed / deep_attempted, 4) if deep_attempted else 0.0)
             )
             required_complete = math.ceil(deep_attempted * A_SHARE_MIN_DEEP_SCORE_COVERAGE) if isinstance(deep_attempted, int) and deep_attempted > 0 else 1
-            if not deep_shape_known or deep_completed < required_complete:
-                reasons.append("A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM")
+            required_eligible = min(A_SHARE_DEEP_SCORE_LIMIT, technical_kline_complete) if isinstance(technical_kline_complete, int) else 1
+            if (
+                not deep_shape_known
+                or deep_eligible < required_eligible
+                or deep_completed < required_complete
+            ):
+                reasons.append("A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM")
         raw_pool_size = stats.get("raw_pool_size")
         scored_size = stats.get("scored_size")
         if (

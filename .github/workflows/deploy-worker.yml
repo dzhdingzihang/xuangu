@@ -80,6 +80,15 @@ jobs:
           --base-url https://xuangu.alixjd.com
           --adopt-newer-live
 
+      - name: Restore A-share daily K-line cache
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        uses: actions/cache/restore@v4
+        with:
+          path: data/runtime-cache/a_share_daily.json
+          key: a-share-d1-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            a-share-d1-v1-
+
       - name: Generate smart pick snapshot
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
         env:
@@ -120,6 +129,13 @@ jobs:
       - name: Validate published snapshot schema
         if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: python scripts/validate_snapshot.py data/picks/latest.json
+
+      - name: Save validated A-share daily K-line cache
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        uses: actions/cache/save@v4
+        with:
+          path: data/runtime-cache/a_share_daily.json
+          key: a-share-d1-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Prepare immutable snapshot recovery bundle
         id: snapshot_bundle

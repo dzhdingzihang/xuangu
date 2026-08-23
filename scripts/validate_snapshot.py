@@ -23,7 +23,7 @@ VALID_VOLUME_UNITS = {"lot", "share"}
 MARKET_RECALL_TARGETS = {"a_share": 300, "hk": 200, "us": 300}
 A_SHARE_BOARD_TARGETS = {"sh_main": 90, "sz_main": 75, "chinext": 75, "star": 60}
 A_SHARE_ROUTE_TARGETS = {"event": 40, "momentum": 80, "pullback": 65, "liquidity": 85, "history": 30}
-EXPANDED_RECALL_UNIVERSE_VERSION = "recall-v2-3-diversified-300-200-300"
+EXPANDED_RECALL_UNIVERSE_VERSION = "recall-v2-4-a300-full-score"
 A_SHARE_DEEP_SCORE_LIMIT = 96
 YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
 
@@ -366,18 +366,48 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                 for field in ("deep_score_limit", "deep_attempted_size", "deep_kline_coverage"):
                     if field not in stats:
                         errors.append(f"markets.a_share.stats.{field} is required")
+                if expanded_recall_contract:
+                    for field in (
+                        "base_scored_size",
+                        "technical_attempted_size",
+                        "technical_scored_size",
+                        "technical_kline_complete_size",
+                        "technical_kline_coverage",
+                        "deep_eligible_size",
+                    ):
+                        if field not in stats:
+                            errors.append(f"markets.a_share.stats.{field} is required")
                 deep_score_limit = stats.get("deep_score_limit")
                 deep_attempted_size = stats.get("deep_attempted_size")
                 deep_kline_coverage = stats.get("deep_kline_coverage")
                 deep_limit_bound = deep_score_limit if isinstance(deep_score_limit, int) and not isinstance(deep_score_limit, bool) else 0
                 if deep_score_limit != A_SHARE_DEEP_SCORE_LIMIT:
                     errors.append(f"markets.a_share.stats.deep_score_limit must be {A_SHARE_DEEP_SCORE_LIMIT}")
-                if (
+                technical_scored_size = stats.get("technical_scored_size")
+                technical_kline_complete_size = stats.get("technical_kline_complete_size")
+                deep_eligible_size = stats.get("deep_eligible_size")
+                expected_deep_attempted = (
+                    min(deep_limit_bound, deep_eligible_size)
+                    if expanded_recall_contract
+                    and isinstance(deep_eligible_size, int)
+                    and not isinstance(deep_eligible_size, bool)
+                    else None
+                )
+                deep_attempted_invalid = (
                     not isinstance(deep_attempted_size, int)
                     or isinstance(deep_attempted_size, bool)
                     or deep_attempted_size < 0
-                    or (isinstance(valid_quote_size, int) and deep_attempted_size > min(deep_limit_bound, valid_quote_size))
-                ):
+                    or (
+                        expected_deep_attempted is not None
+                        and deep_attempted_size != expected_deep_attempted
+                    )
+                    or (
+                        expected_deep_attempted is None
+                        and isinstance(valid_quote_size, int)
+                        and deep_attempted_size > min(deep_limit_bound, valid_quote_size)
+                    )
+                )
+                if deep_attempted_invalid:
                     errors.append("markets.a_share.stats.deep_attempted_size is invalid")
                 if isinstance(deep_attempted_size, int) and isinstance(deep_scored_size, int) and deep_scored_size > deep_attempted_size:
                     errors.append("markets.a_share.stats.deep_scored_size exceeds attempted size")
@@ -388,6 +418,60 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                 )
                 if not finite_number(deep_kline_coverage) or deep_kline_coverage != expected_deep_coverage:
                     errors.append("markets.a_share.stats.deep_kline_coverage is inconsistent")
+                if expanded_recall_contract:
+                    base_scored_size = stats.get("base_scored_size")
+                    technical_attempted_size = stats.get("technical_attempted_size")
+                    technical_kline_coverage = stats.get("technical_kline_coverage")
+                    if (
+                        not isinstance(base_scored_size, int)
+                        or isinstance(base_scored_size, bool)
+                        or base_scored_size != valid_quote_size
+                    ):
+                        errors.append("markets.a_share.stats.base_scored_size must equal valid quote size")
+                    if (
+                        not isinstance(technical_attempted_size, int)
+                        or isinstance(technical_attempted_size, bool)
+                        or technical_attempted_size != base_scored_size
+                    ):
+                        errors.append("markets.a_share.stats.technical_attempted_size must equal base scored size")
+                    if (
+                        not isinstance(technical_scored_size, int)
+                        or isinstance(technical_scored_size, bool)
+                        or technical_scored_size != technical_attempted_size
+                    ):
+                        errors.append("markets.a_share.stats.technical_scored_size is invalid")
+                    if (
+                        not isinstance(technical_kline_complete_size, int)
+                        or isinstance(technical_kline_complete_size, bool)
+                        or technical_kline_complete_size < 0
+                        or (
+                            isinstance(technical_scored_size, int)
+                            and technical_kline_complete_size > technical_scored_size
+                        )
+                    ):
+                        errors.append("markets.a_share.stats.technical_kline_complete_size is invalid")
+                    if (
+                        not isinstance(deep_eligible_size, int)
+                        or isinstance(deep_eligible_size, bool)
+                        or deep_eligible_size < 0
+                        or (
+                            isinstance(technical_kline_complete_size, int)
+                            and deep_eligible_size > technical_kline_complete_size
+                        )
+                    ):
+                        errors.append("markets.a_share.stats.deep_eligible_size is invalid")
+                    expected_technical_coverage = (
+                        round(technical_kline_complete_size / technical_attempted_size, 4)
+                        if isinstance(technical_attempted_size, int)
+                        and technical_attempted_size > 0
+                        and isinstance(technical_kline_complete_size, int)
+                        else 0.0
+                    )
+                    if (
+                        not finite_number(technical_kline_coverage)
+                        or technical_kline_coverage != expected_technical_coverage
+                    ):
+                        errors.append("markets.a_share.stats.technical_kline_coverage is inconsistent")
                 board_targets = stats.get("board_targets")
                 board_counts = stats.get("board_counts")
                 board_shortfalls = stats.get("board_shortfalls")

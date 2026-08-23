@@ -513,7 +513,141 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertNotEqual(by_code["BBB.HK"]["entry_price"], 13)
         self.assertNotEqual(by_code["CCC.HK"]["entry_price"], 0)
 
-    def test_a_share_deep_score_excludes_incomplete_kline(self) -> None:
+    def test_a_share_full_pool_technical_score_precedes_deep_research(self) -> None:
+        codes = ("600000", "000001", "300001")
+
+        def quote(code: str) -> dict:
+            return {
+                "code": code,
+                "name": code,
+                "price": 10.0,
+                "entry_price": 10.0,
+                "current_price": 10.0,
+                "last_close": 9.9,
+                "open": 9.95,
+                "high": 10.1,
+                "low": 9.9,
+                "volume": 10_000,
+                "change_pct": 1.0,
+                "current_change_pct": 1.0,
+                "amount_wan": 50_000,
+                "turnover_pct": 5.0,
+                "vol_ratio": 1.2,
+                "float_mcap_yi": 200,
+                "limit_up": 10.89,
+                "limit_down": 8.91,
+                "fundamentals": {},
+                "realtime": {"session_label": "盘中", "source_as_of": "2026-08-21T10:00:00+08:00"},
+            }
+
+        klines = {}
+        for code, marker in zip(codes, (1.0, 30.0, 20.0)):
+            rows = fixture_kline(32)
+            rows[-1] = {**rows[-1], "close": marker}
+            klines[code] = rows
+
+        def chan(rows: list[dict]) -> dict:
+            return {"score": rows[-1]["close"], "signals": [], "warnings": [], "metrics": {}}
+
+        with (
+            mock.patch.object(server, "tencent_quote", return_value={code: quote(code) for code in codes}),
+            mock.patch.object(server, "daily_dragon_tiger", return_value={}),
+            mock.patch.object(server, "a_share_kline_map", return_value=klines) as kline_batch,
+            mock.patch.object(server, "overlay_a_share_quote_bar", side_effect=lambda rows, _quote: rows),
+            mock.patch.object(server, "chan_signal", side_effect=chan),
+            mock.patch.object(
+                server,
+                "czsc_structure_score",
+                return_value={"score": 0.0, "signals": [], "warnings": [], "metrics": {}},
+            ),
+            mock.patch.object(server, "run_dual_low_analysis", return_value={"by_code": {}, "metadata": {}}),
+            mock.patch.dict(server.os.environ, {"CHAN_MAX_KLINE_CHECKS": "2"}),
+        ):
+            scored = server.score_candidates(
+                "2026-08-21",
+                [{"code": code, "reason": "测试", "candidate_lineage": {}} for code in codes],
+                {"risk": "normal"},
+            )
+
+        self.assertEqual(kline_batch.call_args.args[0], list(codes))
+        self.assertEqual(scored["base_scored_size"], 3)
+        self.assertEqual(scored["technical_attempted_size"], 3)
+        self.assertEqual(scored["technical_scored_size"], 3)
+        self.assertEqual(scored["technical_kline_complete_size"], 3)
+        self.assertEqual(scored["technical_kline_coverage"], 1.0)
+        self.assertEqual(scored["deep_eligible_size"], 3)
+        self.assertEqual(scored["deep_attempted_size"], 2)
+        self.assertEqual(scored["deep_scored_size"], 2)
+        self.assertEqual(scored["scored_size"], 2)
+        self.assertEqual([row["code"] for row in scored["candidates"]], ["000001", "300001"])
+        self.assertTrue(all(row["score_tier"] == "deep_legacy" for row in scored["candidates"]))
+
+    def test_a_share_kline_retry_only_refetches_missing_codes(self) -> None:
+        calls = {"600000": 0, "000001": 0, "300001": 0}
+
+        def fetch(code: str, _limit: int) -> list[dict]:
+            calls[code] += 1
+            if code == "600000" or (code == "000001" and calls[code] >= 2):
+                rows = fixture_kline(32)
+                rows[-1] = {**rows[-1], "date": "2026-08-20"}
+                return rows
+            return []
+
+        with (
+            mock.patch.object(server, "_load_a_share_kline_cache", return_value={}),
+            mock.patch.object(server, "_save_a_share_kline_cache") as save_cache,
+            mock.patch.object(server, "expected_quote_session", return_value=dt.date(2026, 8, 21)),
+            mock.patch.object(server, "stock_kline", side_effect=fetch),
+        ):
+            result = server.a_share_kline_map(list(calls))
+
+        self.assertEqual(set(result), {"600000", "000001"})
+        self.assertEqual(calls, {"600000": 1, "000001": 2, "300001": 3})
+        self.assertEqual(set(save_cache.call_args.args[0]), {"600000", "000001"})
+
+    def test_a_share_kline_rejects_multi_session_stale_provider_rows(self) -> None:
+        stale_rows = fixture_kline(70)
+        stale_rows[-1] = {**stale_rows[-1], "date": "2026-08-17"}
+        current_rows = fixture_kline(32)
+        current_rows[-1] = {**current_rows[-1], "date": "2026-08-20"}
+
+        def fetch(code: str, _limit: int) -> list[dict]:
+            return stale_rows if code == "600000" else current_rows
+
+        with (
+            mock.patch.object(server, "_load_a_share_kline_cache", return_value={}),
+            mock.patch.object(server, "_save_a_share_kline_cache") as save_cache,
+            mock.patch.object(server, "expected_quote_session", return_value=dt.date(2026, 8, 21)),
+            mock.patch.object(server, "stock_kline", side_effect=fetch),
+        ):
+            result = server.a_share_kline_map(["600000", "000001"])
+
+        self.assertEqual(set(result), {"000001"})
+        self.assertEqual(set(save_cache.call_args.args[0]), {"000001"})
+
+    def test_cached_a_share_kline_uses_current_quote_as_latest_bar(self) -> None:
+        rows = fixture_kline(32)
+        rows[-1] = {**rows[-1], "date": "2026-08-20", "close": 9.8}
+        quote = {
+            "price": 10.5,
+            "open": 10.0,
+            "high": 10.8,
+            "low": 9.9,
+            "volume": 12345,
+            "amount_wan": 6789,
+            "amplitude_pct": 9.0,
+            "change_pct": 7.14,
+            "turnover_pct": 3.2,
+            "realtime": {"source_as_of": "2026-08-21T10:17:00+08:00"},
+        }
+
+        updated = server.overlay_a_share_quote_bar(rows, quote)
+
+        self.assertEqual(updated[-1]["date"], "2026-08-21")
+        self.assertEqual(updated[-1]["close"], 10.5)
+        self.assertEqual(updated[-1]["volume"], 12345)
+
+    def test_a_share_technical_score_excludes_incomplete_kline(self) -> None:
         codes = ("600000", "000001", "300001")
 
         def quote(code: str) -> dict:
@@ -546,6 +680,7 @@ class SelectorV2Tests(unittest.TestCase):
                 "a_share_kline_map",
                 return_value={codes[0]: fixture_kline(32), codes[1]: fixture_kline(31), codes[2]: []},
             ),
+            mock.patch.object(server, "overlay_a_share_quote_bar", side_effect=lambda rows, _quote: rows),
             mock.patch.object(server, "run_dual_low_analysis", return_value={"by_code": {}, "metadata": {}}),
             mock.patch.dict(server.os.environ, {"CHAN_MAX_KLINE_CHECKS": "3"}),
         ):
@@ -555,11 +690,66 @@ class SelectorV2Tests(unittest.TestCase):
                 {"risk": "normal"},
             )
 
-        self.assertEqual(scored["deep_attempted_size"], 3)
+        self.assertEqual(scored["base_scored_size"], 3)
+        self.assertEqual(scored["technical_attempted_size"], 3)
+        self.assertEqual(scored["technical_scored_size"], 3)
+        self.assertEqual(scored["technical_kline_complete_size"], 1)
+        self.assertEqual(scored["technical_kline_coverage"], 0.3333)
+        self.assertEqual(scored["deep_eligible_size"], 1)
+        self.assertEqual(scored["deep_attempted_size"], 1)
         self.assertEqual(scored["deep_scored_size"], 1)
         self.assertEqual(scored["scored_size"], 1)
-        self.assertEqual(scored["deep_kline_coverage"], 0.3333)
+        self.assertEqual(scored["deep_kline_coverage"], 1.0)
         self.assertEqual([row["code"] for row in scored["candidates"]], ["600000"])
+
+    def test_a_share_deep_pool_counts_only_trade_eligible_rows(self) -> None:
+        codes = ("600000", "600001", "300001")
+
+        def quote(code: str) -> dict:
+            return {
+                "code": code,
+                "name": "ST测试" if code == "600001" else code,
+                "price": 10.0,
+                "entry_price": 10.0,
+                "current_price": 10.0,
+                "last_close": 9.9,
+                "open": 9.95,
+                "high": 10.1,
+                "low": 9.9,
+                "volume": 10_000,
+                "change_pct": 1.0,
+                "current_change_pct": 1.0,
+                "amount_wan": 50_000,
+                "turnover_pct": 5.0,
+                "vol_ratio": 1.2,
+                "float_mcap_yi": 200,
+                "limit_up": 10.89,
+                "limit_down": 8.91,
+                "fundamentals": {},
+                "realtime": {"session_label": "盘中", "source_as_of": "2026-08-21T10:00:00+08:00"},
+            }
+
+        with (
+            mock.patch.object(server, "tencent_quote", return_value={code: quote(code) for code in codes}),
+            mock.patch.object(server, "daily_dragon_tiger", return_value={}),
+            mock.patch.object(server, "a_share_kline_map", return_value={code: fixture_kline(32) for code in codes}),
+            mock.patch.object(server, "overlay_a_share_quote_bar", side_effect=lambda rows, _quote: rows),
+            mock.patch.object(server, "run_dual_low_analysis", return_value={"by_code": {}, "metadata": {}}),
+            mock.patch.dict(server.os.environ, {"CHAN_MAX_KLINE_CHECKS": "3"}),
+        ):
+            scored = server.score_candidates(
+                "2026-08-21",
+                [{"code": code, "reason": "测试", "candidate_lineage": {}} for code in codes],
+                {"risk": "normal"},
+            )
+
+        self.assertEqual(scored["base_scored_size"], 3)
+        self.assertEqual(scored["technical_scored_size"], 3)
+        self.assertEqual(scored["technical_kline_complete_size"], 3)
+        self.assertEqual(scored["deep_eligible_size"], 2)
+        self.assertEqual(scored["deep_attempted_size"], 2)
+        self.assertEqual(scored["deep_scored_size"], 2)
+        self.assertNotIn("600001", [row["code"] for row in scored["candidates"]])
 
     def test_market_context_uses_benchmark_kline_without_overstating_missing_data(self) -> None:
         with mock.patch.object(server, "yahoo_chart_kline", return_value=fixture_kline(40)):
@@ -640,7 +830,7 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertIn("QUOTE_COVERAGE_BELOW_MINIMUM", health["reason_codes"])
         self.assertEqual(health["quote_coverage"], 0.39)
 
-    def test_a_share_deep_kline_coverage_requires_95_of_96(self) -> None:
+    def test_a_share_technical_and_deep_coverage_have_separate_gates(self) -> None:
         broad = [{"code": str(index)} for index in range(300)]
         recall = {
             "target_count": 300,
@@ -651,6 +841,9 @@ class SelectorV2Tests(unittest.TestCase):
         healthy = server.a_share_pool_health(
             broad,
             quote_count=300,
+            technical_attempted_count=300,
+            technical_completed_count=294,
+            deep_eligible_count=294,
             deep_attempted_count=96,
             deep_completed_count=95,
             merged_count=300,
@@ -659,16 +852,32 @@ class SelectorV2Tests(unittest.TestCase):
         degraded = server.a_share_pool_health(
             broad,
             quote_count=300,
+            technical_attempted_count=300,
+            technical_completed_count=293,
+            deep_eligible_count=293,
             deep_attempted_count=96,
-            deep_completed_count=94,
+            deep_completed_count=95,
             merged_count=300,
             recall_coverage=recall,
         )
 
         self.assertEqual(healthy["status"], "healthy")
-        self.assertNotIn("A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM", healthy["reason_codes"])
+        self.assertNotIn("A_SHARE_TECHNICAL_COVERAGE_BELOW_MINIMUM", healthy["reason_codes"])
         self.assertEqual(degraded["status"], "degraded")
-        self.assertIn("A_SHARE_KLINE_COVERAGE_BELOW_MINIMUM", degraded["reason_codes"])
+        self.assertIn("A_SHARE_TECHNICAL_COVERAGE_BELOW_MINIMUM", degraded["reason_codes"])
+
+        deep_degraded = server.a_share_pool_health(
+            broad,
+            quote_count=300,
+            technical_attempted_count=300,
+            technical_completed_count=294,
+            deep_eligible_count=294,
+            deep_attempted_count=96,
+            deep_completed_count=94,
+            merged_count=300,
+            recall_coverage=recall,
+        )
+        self.assertIn("A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM", deep_degraded["reason_codes"])
 
     def test_objectively_blocked_candidate_cannot_be_a_share_primary(self) -> None:
         blocked = decision_ready_candidate("600001")
