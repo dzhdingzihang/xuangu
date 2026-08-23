@@ -1,10 +1,19 @@
-# 智能选股（A 股 / 港股 / 美股）
+# XuanGu · 智能选股
 
-[线上站点](https://xuangu.alixjd.com) · [服务状态](https://xuangu.alixjd.com/api/status) · [源码仓库](https://github.com/dzhdingzihang/xuangu)
+[![Deploy Cloudflare Worker](https://github.com/dzhdingzihang/xuangu/actions/workflows/deploy-worker.yml/badge.svg)](https://github.com/dzhdingzihang/xuangu/actions/workflows/deploy-worker.yml)
 
-这是一个面向未来约两周、即 10 个交易日的三市场选股研究系统。系统扫描 A 股、港股和美股候选，结合价格、技术结构、流动性、产业链、事件证据、风险与交易可行性，给出一只跨市场“研究优先项”；只有生产门禁全部满足时，才允许升级为可执行复核候选。
+[线上站点](https://xuangu.alixjd.com) · [服务状态](https://xuangu.alixjd.com/api/status) · [最新快照](https://xuangu.alixjd.com/api/latest) · [运行记录](https://github.com/dzhdingzihang/xuangu/actions)
 
-本项目不会把规则分冒充上涨概率，也不会为了每天一定给出股票而绕过数据问题。当证据、市场覆盖、模型校准或交易成本口径不完整时，跨市场正式答案是 `NO_VALID_PICK`，研究优先项则以 `RESEARCH_ONLY` 单独展示。
+XuanGu 是一个面向未来约两周（10 个交易日）的 A 股、港股、美股智能选股研究系统。它将候选召回、行情校验、因子评分、深度研究、事件证据、风险门禁和历史检验放进同一条可审计流水线，目标是回答：**今天最值得优先研究哪只股票，以及当前证据是否足以支持执行。**
+
+## 核心能力
+
+- **三市场候选池**：A 股动态召回 300 只；港股 200 只、美股 300 只采用版本化策展池，并明确披露其不是全市场扫描。
+- **A 股全量评分**：全部有效行情候选先完成基础评分和技术评分，再从技术数据完整且可交易的候选中选择最多 96 只运行 Legacy、V2、双低、Chan/CZSC、Serenity、UZI 与评审团深研。
+- **严格而诚实的输出**：规则推荐度不等于上涨概率；市场覆盖、事件证据、模型校准、交易成本或尾部风险不完整时，正式答案保持 `NO_VALID_PICK`，研究项单独标记为 `RESEARCH_ONLY`。
+- **纯云端自动更新**：GitHub Actions 在工作日多时点生成、校验和归档不可变快照，Cloudflare Worker 负责发布；不依赖 Render、OpenD 或个人电脑常开。
+
+页面提供今日答案、候选池、事件证据、历史检验、模型逻辑和数据健康六个 Tab。所有数字均来自已发布快照，浏览器只负责展示，不会在本地偷偷重算评分或把计划价冒充实时行情。
 
 > 本项目仅用于研究辅助，不构成投资建议。任何预估区间、分数和历史结果都不是收益承诺。
 
