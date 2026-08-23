@@ -36,6 +36,8 @@ class FrontendContractTests(unittest.TestCase):
     def test_hk_us_dynamic_cross_section_is_visible_without_full_market_overclaim(self) -> None:
         self.assertIn("dynamic_market_snapshot", self.js)
         self.assertIn("本轮公开横截面重新筛选", self.js)
+        self.assertIn("本轮动态多路召回", self.js)
+        self.assertIn('isA && coverage.origin === "dynamic_snapshot"', self.js)
         self.assertIn("动态市场池", self.js)
         self.assertIn("eligible_discovery_size", self.js)
         self.assertIn("三市场有界动态召回", self.js)
@@ -53,6 +55,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("snapshot_as_of", self.js)
         self.assertIn("next_refresh", self.js)
         self.assertIn("下次计划检查点（含健康补跑）", self.html + self.js)
+        self.assertIn("当前证据与模型条件不足以生成跨市场买入结论", self.js)
 
     def test_missing_quote_provenance_is_not_presented_as_market_data(self) -> None:
         self.assertRegex(self.js, r"function candidateQuoteView\(")

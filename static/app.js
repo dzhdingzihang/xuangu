@@ -1326,9 +1326,11 @@ function renderCandidates() {
     const funnel = recallFunnel(coverage.section, coverage.market);
     const originLabel = coverage.origin === "dynamic_market_snapshot" ? "动态" : coverage.origin === "curated_static" ? "静态" : "召回";
     const tone = coverage.state === "READY" ? "positive" : coverage.state === "BLOCKED" ? "negative" : "warning";
-    const readyMeta = coverage.origin === "dynamic_market_snapshot"
-      ? `本轮公开横截面重新筛选 · 发现 ${fmt(coverage.stats.eligible_discovery_size, 0)}`
-      : coverage.origin === "curated_static" ? "版本化静态池（旧快照）" : "动态候选召回未就绪";
+    const readyMeta = isA && coverage.origin === "dynamic_snapshot"
+      ? "本轮动态多路召回"
+      : coverage.origin === "dynamic_market_snapshot"
+        ? `本轮公开横截面重新筛选 · 发现 ${fmt(coverage.stats.eligible_discovery_size, 0)}`
+        : coverage.origin === "curated_static" ? "版本化静态池（旧快照）" : "动态候选召回未就绪";
     return {
       icon: coverage.origin === "curated_static" ? "ph-path" : "ph-stack",
       label: `${MARKET_META[coverage.market].label}${isA ? "召回" : originLabel} / 目标`,
@@ -1960,7 +1962,7 @@ function renderHealth() {
   const usable = truth.action === "REVIEW_EXECUTABLE_PICK";
   root.innerHTML = `
     <div class="principle-strip"><span><b>判断原则</b> 任务运行成功、行情覆盖完整、本轮有界扫描完整和决策可用是四件不同的事。</span><small class="${usable ? "positive" : "negative"}">当前：${usable ? "候选通过严格门禁，仍待人工复核" : "全局结论被严格门禁阻断"}</small></div>
-    <div class="callout ${usable ? "" : "negative"} health-alert">${icon(usable ? "ph-check-circle" : "ph-warning-octagon")}<div><strong>${usable ? "跨市场候选契约完整" : "当前数据质量不足以生成跨市场买入结论"}</strong><br>${usable ? "概率、净效用、成本、尾部风险、市场覆盖和官方证据均已通过契约校验。" : esc(blockers.slice(0, 5).join("；") || "没有候选通过全部严格门禁。")}</div></div>
+    <div class="callout ${usable ? "" : "negative"} health-alert">${icon(usable ? "ph-check-circle" : "ph-warning-octagon")}<div><strong>${usable ? "跨市场候选契约完整" : "当前证据与模型条件不足以生成跨市场买入结论"}</strong><br>${usable ? "概率、净效用、成本、尾部风险、市场覆盖和官方证据均已通过契约校验。" : esc(blockers.slice(0, 5).join("；") || "没有候选通过全部严格门禁。")}</div></div>
     ${renderKpis([
       { icon: "ph-globe", label: "可比较市场", value: `${readyMarkets} / 3`, tone: readyMarkets === 3 ? "positive" : "negative", meta: "A股、港股、美股须口径可比" },
       { icon: "ph-binoculars", label: "三市场召回目标", value: recallTargetsMet ? "300 / 200 / 300" : "未达标", tone: recallTargetsMet ? "positive" : "warning", meta: "A股 / 港股 / 美股；行情与深评另行门控" },
