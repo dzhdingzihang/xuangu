@@ -112,6 +112,7 @@ jobs:
         env:
           AUTOMATION_TRIGGER: ${{ github.event_name }}
           SCHEDULED_SLOT: ${{ steps.schedule_gate.outputs.slot }}
+          EVENT_SCAN_CANDIDATES_PER_MARKET: "16"
         run: |
           for attempt in 1 2 3; do
             echo "Snapshot generation attempt ${attempt}/3"

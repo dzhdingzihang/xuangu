@@ -326,7 +326,11 @@ function researchCandidateSnapshot(snapshot, market) {
 function candidatesFor(snapshot, market) {
   const decision = marketDecision(snapshot, market);
   const researchCandidate = researchCandidateSnapshot(snapshot, market);
-  const rows = [decision.primary, decision.blocked_candidate, ...(decision.watchlist || []), researchCandidate].filter(Boolean);
+  const productionPrimary = snapshot?.production_decision?.primary;
+  const productionCandidate = productionPrimary?.market === market
+    ? productionPrimary.candidate_snapshot || productionPrimary
+    : null;
+  const rows = [decision.primary, decision.blocked_candidate, ...(decision.watchlist || []), productionCandidate, researchCandidate].filter(Boolean);
   const seen = new Set();
   return rows.filter((row) => {
     const key = candidateId(row, market);
@@ -337,6 +341,9 @@ function candidatesFor(snapshot, market) {
 }
 
 function candidateDecisionRole(candidate, market) {
+  const qualified = state.snapshot?.production_decision?.primary;
+  if (qualified && qualified.market === market
+    && candidateId(qualified, market) === candidateId(candidate, market)) return "qualified";
   const decision = marketDecision(state.snapshot, market);
   const key = candidateId(candidate, market);
   if (decision.primary && candidateId(decision.primary, market) === key) return "primary";
@@ -347,7 +354,7 @@ function candidateDecisionRole(candidate, market) {
 }
 
 function decisionRoleLabel(role) {
-  return ({ primary: "Legacy首选", blocked: "门槛未过", research: "研究优先", watchlist: "观察候选" })[role] || "观察候选";
+  return ({ qualified: "规则合格", primary: "Legacy首选", blocked: "门槛未过", research: "研究优先", watchlist: "观察候选" })[role] || "观察候选";
 }
 
 function allCandidates() {
@@ -357,6 +364,64 @@ function allCandidates() {
     legacyRank: Number.isFinite(Number(candidate.legacy_rank)) ? Number(candidate.legacy_rank) : candidate.legacy_complete === false ? null : index + 1,
     decisionRole: candidateDecisionRole(candidate, market),
   })));
+}
+
+function productionDecisionTruth(snapshot = state.snapshot) {
+  const serverDecision = snapshot?.production_decision;
+  const serverAction = String(serverDecision?.action || "");
+  const serverPrimary = serverDecision?.primary;
+  const primaryMarket = String(serverPrimary?.market || "");
+  const primaryCode = String(serverPrimary?.code || serverPrimary?.symbol || "").toLowerCase();
+  const embeddedCandidate = serverPrimary?.candidate_snapshot;
+  const embeddedCode = String(embeddedCandidate?.code || embeddedCandidate?.symbol || "").toLowerCase();
+  const qualificationScore = serverPrimary?.qualification_score;
+  const finiteScore = typeof qualificationScore === "number" && Number.isFinite(qualificationScore);
+  const baseContractValid = Boolean(
+    serverDecision
+    && serverDecision.contract_version === "production-rule-10d-v1"
+    && ["QUALIFIED_PICK", "NO_QUALIFIED_PICK"].includes(serverAction)
+    && serverDecision.score_kind === "RULE_QUALIFICATION_SCORE"
+    && serverDecision.probability === null
+    && serverDecision.calibrated === false
+  );
+  const embeddedCandidateValid = !embeddedCandidate || Boolean(
+    typeof embeddedCandidate === "object"
+    && primaryCode
+    && embeddedCode === primaryCode
+  );
+  const primaryDoesNotClaimProbability = Boolean(
+    serverPrimary
+    && (serverPrimary.probability === undefined || serverPrimary.probability === null)
+    && (serverPrimary.calibrated === undefined || serverPrimary.calibrated === false)
+  );
+  const primaryValid = Boolean(
+    serverPrimary
+    && MARKET_ORDER.includes(primaryMarket)
+    && primaryCode
+    && finiteScore
+    && embeddedCandidateValid
+    && primaryDoesNotClaimProbability
+  );
+  const blockerCodes = Array.isArray(serverDecision?.blocker_codes) ? [...serverDecision.blocker_codes] : [];
+  if (!serverDecision) blockerCodes.push("PRODUCTION_DECISION_MISSING");
+  if (serverDecision && !baseContractValid) blockerCodes.push("PRODUCTION_DECISION_CONTRACT_INVALID");
+  if (serverAction === "QUALIFIED_PICK" && !primaryValid) blockerCodes.push("PRODUCTION_PRIMARY_INVALID");
+  const qualified = baseContractValid && serverAction === "QUALIFIED_PICK" && primaryValid;
+  const candidate = qualified ? (embeddedCandidate || serverPrimary) : null;
+  return {
+    action: qualified ? "QUALIFIED_PICK" : "NO_QUALIFIED_PICK",
+    serverAction,
+    actionBasis: serverDecision?.action_basis || "production_rule_gate_v1",
+    scoreKind: "RULE_QUALIFICATION_SCORE",
+    probability: null,
+    calibrated: false,
+    qualificationScore: qualified ? qualificationScore : null,
+    qualifiedCount: qualified ? 1 : 0,
+    blockerCodes: [...new Set(blockerCodes)],
+    primary: qualified ? serverPrimary : null,
+    qualified: qualified ? { market: primaryMarket, candidate, primary: serverPrimary } : null,
+    serverDecision,
+  };
 }
 
 function automaticExternalEvents() {
@@ -1146,26 +1211,28 @@ function renderLegacyMarketDecision() {
 
 function renderDecision() {
   const root = $("#decisionView");
-  const truth = globalDecisionTruth();
-  const research = truth.research;
-  const executableMode = truth.action === "REVIEW_EXECUTABLE_PICK" && Boolean(truth.executable);
-  const selected = executableMode ? truth.executable : research;
+  const production = productionDecisionTruth();
+  const calibratedTruth = globalDecisionTruth();
+  const qualifiedMode = production.action === "QUALIFIED_PICK" && Boolean(production.qualified);
+  const selected = production.qualified;
   const selectedMarket = selected?.market || "";
-  const baseCandidate = selected?.candidate || null;
-  const candidate = baseCandidate;
+  const candidate = selected?.candidate || null;
   const candidateQuote = candidate ? candidateQuoteView(candidate) : null;
   const selectedKey = candidate ? candidateId(candidate, selectedMarket) : "";
-  const selectedEvent = candidate ? (executableMode ? automaticExternalEvents() : manualEvidenceForSnapshot()).find((event) => {
+  const selectedEvent = candidate ? automaticExternalEvents().find((event) => {
     const symbol = String(candidate.code || candidate.symbol || "").toLowerCase();
     return event.market === selectedMarket && String(event.symbol || "").toLowerCase() === symbol;
   }) : null;
-  const executablePrimary = truth.executable?.primary || null;
+  const selectedLegacyRank = candidate ? candidatesFor(state.snapshot, selectedMarket).findIndex((row) => candidateId(row, selectedMarket) === selectedKey) + 1 : null;
+  const selectedRow = candidate ? { market: selectedMarket, candidate, legacyRank: selectedLegacyRank || null } : null;
+  const calibratedExecutable = calibratedTruth.action === "REVIEW_EXECUTABLE_PICK" && Boolean(calibratedTruth.executable);
+  const calibratedPrimary = calibratedTruth.executable?.primary || null;
+  const calibratedCandidate = calibratedTruth.executable?.candidate || null;
   const targetDate = state.snapshot?.forecast_end_date || state.snapshot?.target_date || "--";
   const model = tenDayModelState();
   const modelPresentation = tenDayModelPresentation(model);
-  const selectedShadow = candidate ? candidateShadowModel(candidate, selectedMarket) : null;
   const freshness = state.status?.freshness_state || "unknown";
-  const marketCards = truth.markets.map((item) => {
+  const marketCards = calibratedTruth.markets.map((item) => {
     const meta = MARKET_META[item.market];
     const primary = item.decision.primary || item.decision.blocked_candidate || null;
     const funnel = recallFunnel(item.section, item.market);
@@ -1182,40 +1249,46 @@ function renderDecision() {
     </article>`;
   }).join("");
   root.innerHTML = `
-    <div class="principle-strip"><span><b>决策目标</b> 从 A 股、港股、美股中选择未来 10 个交易日净总回报最优且可执行的股票</span><small>目标日 ${esc(targetDate)}</small></div>
+    <div class="principle-strip"><span><b>决策目标</b> 从 A 股、港股、美股中选择未来 10 个交易日净总回报最优且可执行的股票</span><small>目标日 ${esc(targetDate)} · 规则资格与校准概率分轨</small></div>
     <section class="answer-grid">
-      <article class="answer-card ${executableMode ? "is-executable" : ""}">
-        <div class="answer-kicker"><span class="status-pill ${executableMode ? "positive" : "negative"}">${executableMode ? "严格门禁已通过" : "严格门禁"}</span><span class="mono">${esc(truth.actionBasis)}</span></div>
-        <h2>${truth.action === "NO_VALID_PICK" ? "今天没有满足条件的可执行股票" : "发现待复核的可执行候选"}</h2>
-        <p>${truth.action === "NO_VALID_PICK" ? "这不等于三个市场没有好公司，而是当前数据还不能诚实回答“今天买哪一只，未来两周最可能赚得最多”。" : "所有全局门禁已通过，仍需在候选详情中核对入场价、止损和事件时点。"}</p>
-        <div class="answer-code"><span>全局输出</span><strong>${esc(truth.action)}</strong></div>
+      <article class="answer-card ${qualifiedMode ? "is-qualified" : ""}">
+        <div class="answer-kicker"><span class="status-pill ${qualifiedMode ? "positive" : "negative"}">${qualifiedMode ? "规则资格门禁已通过" : "规则资格门禁"}</span><span class="mono">${esc(production.actionBasis)}</span></div>
+        <h2>${qualifiedMode ? `今日规则资格选择：${esc(candidate.name || candidate.code || candidate.symbol)}` : "今天没有通过规则资格门禁的股票"}</h2>
+        <p>${qualifiedMode ? "该候选通过了服务端发布的生产规则门禁；规则资格分只用于规则排序，不是上涨概率。" : "页面不会用 Legacy、V2、双低或研究排序自行补选；只有服务端的 production_decision 可以生成首屏选择。"}</p>
+        <div class="answer-code"><span>生产规则输出</span><strong>${esc(production.action)}</strong></div>
         <ul class="answer-reasons">
-          <li>${icon("ph-database")}<span><b>三市场可比性</b><small>${truth.markets.filter((item) => item.state === "READY").length} / 3 个市场可评估</small></span></li>
-          <li>${icon("ph-newspaper")}<span><b>自动外部证据</b><small>${truth.autoEvidenceCount} 条进入决策门禁</small></span></li>
-          <li>${icon("ph-chart-line")}<span><b>10 日概率模型</b><small>${esc(modelPresentation.title)}${model.shadowReady ? "；不参与正式决策" : ""}</small></span></li>
-          <li>${icon("ph-scales")}<span><b>成本与尾部风险</b><small>${model.costsReady && model.tailReady ? "已纳入" : "尚未形成可验证净收益口径"}</small></span></li>
+          <li>${icon("ph-seal-check")}<span><b>服务端合同</b><small>production-rule-10d-v1 · 浏览器不升级决策</small></span></li>
+          <li>${icon("ph-ranking")}<span><b>规则资格分</b><small>${qualifiedMode ? `${fmt(production.qualificationScore, 1)} 分` : "未产生合格分"} · 非概率</small></span></li>
+          <li>${icon("ph-newspaper")}<span><b>自动外部证据</b><small>${calibratedTruth.autoEvidenceCount} 条已验证证据进入全局门禁</small></span></li>
+          <li>${icon("ph-chart-line")}<span><b>校准模型结论</b><small>${esc(calibratedTruth.action)} · 下方独立展示</small></span></li>
         </ul>
-        <button class="secondary-button" type="button" data-action="go-health">${executableMode ? "查看数据与执行状态" : "查看阻断原因"} ${icon("ph-arrow-right")}</button>
+        <button class="secondary-button" type="button" data-action="go-health">${qualifiedMode ? "查看数据与规则门禁" : "查看阻断原因"} ${icon("ph-arrow-right")}</button>
       </article>
-      <article class="research-card">
-        <header><div><span class="status-pill ${executableMode ? "positive" : "primary"}">${executableMode ? "EXECUTABLE_REVIEW" : "RESEARCH_ONLY"}</span><small>${executableMode ? "严格门禁已通过，仍需人工复核交易计划" : "当前研究优先项，不是买入建议"}</small></div>${candidate ? marketBadge(selectedMarket) : ""}</header>
-        ${candidate ? `<div class="research-symbol"><div><h3>${esc(candidate.name)}</h3><p>${esc(candidate.code || candidate.symbol)} · ${esc(MARKET_META[selectedMarket]?.label || selectedMarket)}</p></div><strong>${executableMode ? ratioPct(executablePrimary.probability, 1) : fmt(candidateScore(candidate), 0)}<small>${executableMode ? "10 日正收益概率" : "规则推荐度"}</small></strong></div>
-          ${executableMode
-            ? `<div class="research-metrics"><div><small>预期净效用</small><b>${pct(num(executablePrimary.expected_net_utility) * 100, 2)}</b></div><div><small>交易成本</small><b>${ratioPct(executablePrimary.transaction_cost, 2)}</b></div><div><small>尾部风险</small><b>${ratioPct(executablePrimary.tail_risk, 2)}</b></div></div>`
-            : `<div class="research-metrics"><div><small>Legacy</small><b>${esc(legacyRankLabel(selected))}</b></div><div><small>V2 结构</small><b>${candidate.v2?.rank ? `#${candidate.v2.rank}/${candidate.v2.rank_universe_size || "--"}` : "--"}</b></div><div><small>影子 P10</small><b>${esc(shadowP10Label(selectedShadow))}</b><span>不参与正式决策</span></div></div>`}
-          <div class="research-evidence"><span>${icon("ph-calendar-dots")}<b>${executableMode ? "已准入官方证据" : "下一可核验事件"}</b></span><p>${esc(selectedEvent?.title || "自动事件证据尚未入库")}</p><small>${selectedEvent ? `${executableMode ? "自动核验入库" : "人工核验"} · ${dateTime(selectedEvent.effective_at)} · ${executableMode ? `模型 ${executablePrimary.model_id}` : "不参与自动门禁"}` : "请在事件证据页补齐官方来源"}</small></div>
+      <article class="research-card production-pick-card">
+        <header><div><span class="status-pill ${qualifiedMode ? "positive" : "negative"}">${esc(production.action)}</span><small>${qualifiedMode ? "服务端规则资格选择，仍需核对交易计划" : "无规则合格候选，不展示研究排序替代品"}</small></div>${candidate ? marketBadge(selectedMarket) : ""}</header>
+        ${candidate ? `<div class="research-symbol"><div><h3>${esc(candidate.name || candidate.code || candidate.symbol)}</h3><p>${esc(candidate.code || candidate.symbol)} · ${esc(MARKET_META[selectedMarket]?.label || selectedMarket)}</p></div><strong>${fmt(production.qualificationScore, 1)}<small>规则资格分（非概率）</small></strong></div>
+          <div class="research-metrics"><div><small>Legacy</small><b>${esc(legacyRankLabel(selectedRow))}</b></div><div><small>V2 结构</small><b>${candidate.v2?.rank ? `#${candidate.v2.rank}/${candidate.v2.rank_universe_size || "--"}` : "--"}</b></div><div><small>概率声明</small><b>无</b><span>calibrated=false</span></div></div>
+          <div class="research-evidence"><span>${icon("ph-calendar-dots")}<b>规则门禁证据</b></span><p>${esc(selectedEvent?.title || "快照未保存可展示的官方事件")}</p><small>${selectedEvent ? `自动核验入库 · ${dateTime(selectedEvent.effective_at)} · 规则资格分不代表胜率` : "结论仍以服务端 production_decision 为准"}</small></div>
           <div class="research-evidence"><span>${icon("ph-waveform")}<b>${esc(candidateQuote.title)}</b></span><p>${price(candidateQuote.price)}</p><small>${esc(candidateQuote.label)}</small></div>
-          <button class="primary-button" type="button" data-action="open-candidate" data-key="${esc(selectedKey)}">${executableMode ? "复核执行计划" : "查看完整评分与风险"} ${icon("ph-arrow-right")}</button>` : `<div class="empty-state">${icon("ph-binoculars")}<h3>暂无研究优先项</h3><p>本轮快照未保留任何跨市场候选。</p></div>`}
+          <button class="primary-button" type="button" data-action="open-candidate" data-key="${esc(selectedKey)}">查看完整评分与风险 ${icon("ph-arrow-right")}</button>` : `<div class="empty-state">${icon("ph-shield-slash")}<h3>暂无规则合格股票</h3><p>${esc(production.blockerCodes.slice(0, 4).join("；") || "服务端明确返回 NO_QUALIFIED_PICK。")}</p></div>`}
       </article>
     </section>
+    <article class="panel calibrated-track-card">
+      <header class="panel-header"><div><h3 class="panel-title">全局校准模型结论</h3><p class="panel-subtitle">与规则资格选择分轨；只有通过校准合同的 global_decision 才能展示上涨概率</p></div><span class="status-pill ${calibratedExecutable ? "positive" : "negative"}">${calibratedExecutable ? "EXECUTABLE_REVIEW" : "NO_VALID_PICK"}</span></header>
+      <div class="calibrated-track-body">
+        <div class="calibrated-track-summary"><span>${icon(calibratedExecutable ? "ph-chart-line-up" : "ph-chart-line-down")}</span><div><small>校准轨输出</small><strong>${esc(calibratedTruth.action)}</strong><p>${calibratedExecutable ? `${esc(calibratedCandidate?.name || calibratedCandidate?.code || "待复核候选")} · 正式 P10 ${ratioPct(calibratedTruth.probability, 1)}` : `当前证据与模型条件不足以生成跨市场买入结论。${esc(modelPresentation.title)}`}</p></div></div>
+        <div class="calibrated-track-metrics"><div><small>正式 P10</small><b>${calibratedTruth.probability === null ? "未校准" : ratioPct(calibratedTruth.probability, 1)}</b></div><div><small>预期净效用</small><b>${calibratedPrimary ? pct(num(calibratedPrimary.expected_net_utility) * 100, 2) : "--"}</b></div><div><small>交易成本</small><b>${calibratedPrimary ? ratioPct(calibratedPrimary.transaction_cost, 2) : "--"}</b></div><div><small>尾部风险</small><b>${calibratedPrimary ? ratioPct(calibratedPrimary.tail_risk, 2) : "--"}</b></div></div>
+      </div>
+      ${calibratedExecutable ? "" : `<div class="calibrated-track-blockers"><small>校准轨阻断码</small><span>${esc(calibratedTruth.blockerCodes.slice(0, 6).join(" · ") || "NO_CANDIDATE_PASSED_STRICT_GATE")}</span></div>`}
+    </article>
     ${renderKpis([
-      { icon: "ph-check-circle", label: "可执行候选", value: fmt(truth.executableCount, 0), tone: truth.executableCount ? "positive" : "negative", meta: "必须同时通过覆盖、证据、校准与成本门禁" },
-      { icon: "ph-newspaper", label: "自动外部证据", value: fmt(truth.autoEvidenceCount, 0), tone: truth.autoEvidenceCount ? "positive" : "warning", meta: "model_signal 不计入外部证据" },
-      { icon: "ph-chart-line-up", label: "正式 P10", value: truth.probability === null ? "未校准" : ratioPct(truth.probability, 1), tone: truth.probability === null ? "warning" : "positive", meta: model.shadowReady ? "影子 P10 另列展示，不参与正式决策" : model.shadowRejected ? "影子 P10 留出检验未通过，仅供审计" : "绝不把推荐度当上涨概率" },
+      { icon: "ph-check-circle", label: "规则合格候选", value: fmt(production.qualifiedCount, 0), tone: production.qualifiedCount ? "positive" : "negative", meta: "只统计服务端 production_decision；规则资格分非概率" },
+      { icon: "ph-newspaper", label: "自动外部证据", value: fmt(calibratedTruth.autoEvidenceCount, 0), tone: calibratedTruth.autoEvidenceCount ? "positive" : "warning", meta: "model_signal 不计入外部证据" },
+      { icon: "ph-chart-line-up", label: "校准模型 P10", value: calibratedTruth.probability === null ? "未校准" : ratioPct(calibratedTruth.probability, 1), tone: calibratedTruth.probability === null ? "warning" : "positive", meta: model.shadowReady ? "影子 P10 另列展示，不参与正式决策" : model.shadowRejected ? "影子 P10 留出检验未通过，仅供审计" : "绝不把规则资格分当上涨概率" },
       { icon: "ph-clock", label: "快照状态", value: freshness.toUpperCase(), tone: freshness === "fresh" ? "positive" : "negative", meta: `生成 ${dateTime(state.snapshot?.generated_at)}` },
     ])}
     <section class="market-decision-grid">${marketCards}</section>
-    <div class="decision-footnote">${icon("ph-info")}<span><b>旧因子全部保留：</b>Legacy 继续产生市场级动作，V2 与双低继续作为独立影子视角；新增的全局闸门只决定这些信号能否升级为跨市场可执行答案。</span></div>`;
+    <div class="decision-footnote">${icon("ph-info")}<span><b>双轨边界：</b>production_decision 是首屏规则资格选择，global_decision 是独立的校准模型结论。Legacy、V2、双低和影子模型仍保留研究价值，但浏览器绝不把它们自行升级为 QUALIFIED_PICK。</span></div>`;
 }
 
 function filteredCandidates() {

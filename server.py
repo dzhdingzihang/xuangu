@@ -32,6 +32,7 @@ import requests
 
 import history_evaluation
 import model_observation_ledger
+import production_rule_model
 
 try:
     import ten_day_model
@@ -72,7 +73,7 @@ HK_US_KLINE_CACHE = CACHE / "runtime-cache" / "hk_us_daily.json"
 MARKET_RECALL_EXPANSION_PATH = CACHE / "universes" / "market_recall_expansion_v2.json"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-08-23.3-evidence-loop"
+MODEL_VERSION = "smart-selector-2026-08-25.1-production-rule"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
@@ -138,7 +139,7 @@ A_SHARE_BOARD_ROUTE_TARGETS = {
 }
 A_SHARE_MIN_BROAD_POOL_COUNT = 240
 A_SHARE_MIN_QUOTE_COVERAGE = 0.98
-A_SHARE_DEEP_SCORE_LIMIT = 96
+A_SHARE_DEEP_SCORE_LIMIT = 300
 A_SHARE_MIN_TECHNICAL_SCORE_COVERAGE = 0.98
 A_SHARE_MIN_DEEP_SCORE_COVERAGE = 0.98
 YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
@@ -3498,6 +3499,23 @@ def _candidate_event_scan_complete(pipeline: dict, market_key: str, symbol: str)
     return str(symbol).lower() in {str(value).lower() for value in symbols}
 
 
+def _event_market_scan_complete(snapshot: dict, pipeline: dict, market_key: str) -> bool:
+    """Check one market independently while the calibrated track stays global."""
+
+    scanned_at = _parse_iso_moment(pipeline.get("scanned_at"))
+    generated_at = _parse_iso_moment(snapshot.get("generated_at"))
+    if scanned_at is None or generated_at is None or scanned_at > generated_at:
+        return False
+    if pipeline.get("contract_version") == "official-event-pipeline-v1":
+        return bool(
+            event_pipeline is not None
+            and event_pipeline.pipeline_market_complete(snapshot, market_key)
+        )
+    status = str(pipeline.get("status") or "").upper()
+    markets = {str(value) for value in (pipeline.get("markets") or pipeline.get("markets_scanned") or [])}
+    return status in {"SCANNED", "READY", "READY_EMPTY", "COMPLETE", "PARTIAL"} and market_key in markets
+
+
 def _finite_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
@@ -4082,6 +4100,7 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 "realtime_coverage": realtime_coverage,
             },
         }
+        market_pipeline_scanned = _event_market_scan_complete(snapshot, pipeline, market_key)
 
         candidates = _section_candidate_pool(section)
         for candidate in candidates:
@@ -4107,7 +4126,7 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
             ]
             positive_event = bool(positive_events)
             candidate_event_scanned = bool(
-                pipeline_scanned and _candidate_event_scan_complete(pipeline, market_key, code)
+                market_pipeline_scanned and _candidate_event_scan_complete(pipeline, market_key, code)
             )
             material_negative = any(
                 _material_negative_event(item, snapshot, market_key=market_key, symbol=code) for item in events
@@ -4142,7 +4161,7 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 candidate_blockers.append("REQUIRED_INPUTS_INCOMPLETE")
             if candidate.get("legacy_complete") is False or candidate.get("score_tier") == "technical_only":
                 candidate_blockers.append("LEGACY_DEEP_SCORE_MISSING")
-            if not pipeline_scanned:
+            if not market_pipeline_scanned:
                 candidate_blockers.append("EVENT_PIPELINE_NOT_SCANNED")
             elif not candidate_event_scanned:
                 candidate_blockers.append("EVENT_CANDIDATE_NOT_SCANNED")
@@ -4158,7 +4177,7 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 candidate_blockers.append("NON_POSITIVE_EXPECTED_NET_UTILITY")
             priority = _rule_priority_contract(
                 candidate,
-                pipeline_scanned=pipeline_scanned,
+                pipeline_scanned=market_pipeline_scanned,
                 positive_event=positive_event,
                 market_state=state_name,
             )
@@ -4399,15 +4418,32 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
         enrich_market_candidates(candidates, "a_share", global_market)
     snapshot["events"] = build_event_feed(snapshot)
     snapshot["global_decision"] = build_global_ten_day_decision(snapshot)
+    snapshot["production_decision"] = production_rule_model.build_production_decision(snapshot)
     for section in markets.values():
         if isinstance(section, dict):
             section.pop("_candidate_pool", None)
+    qualification_usable = snapshot["production_decision"]["action"] == "QUALIFIED_PICK"
+    calibrated_decision_usable = snapshot["global_decision"]["action"] == "REVIEW_EXECUTABLE_PICK"
     snapshot["data_health"] = {
-        "decision_usable": snapshot["global_decision"]["action"] != "NO_VALID_PICK",
+        "decision_usable": qualification_usable or calibrated_decision_usable,
+        "decision_mode": (
+            "CALIBRATED_MODEL"
+            if calibrated_decision_usable
+            else "QUALIFIED_RULE"
+            if qualification_usable
+            else "ABSTAIN"
+        ),
+        "qualification_usable": qualification_usable,
+        "calibrated_decision_usable": calibrated_decision_usable,
         "market_states": snapshot["global_decision"]["market_states"],
         "automatic_external_evidence_count": snapshot["global_decision"]["automatic_external_evidence_count"],
         "probability_status": snapshot["global_decision"]["probability_status"],
-        "blocker_codes": snapshot["global_decision"]["blocker_codes"],
+        "blocker_codes": (
+            snapshot["production_decision"]["blocker_codes"]
+            if not qualification_usable
+            else []
+        ),
+        "calibrated_blocker_codes": snapshot["global_decision"]["blocker_codes"],
     }
     return snapshot
 
@@ -7572,7 +7608,7 @@ def score_candidates(signal_date: str, hot_rows: list[dict], market: dict) -> di
                 "dragon_net_wan": item.get("dragon_net_wan"),
                 "dragon_reason": (dragon_map.get(code) or {}).get("reason", ""),
                 "reasons": [
-                    "已完成全召回池技术预筛；未进入本轮 96 只 Legacy 深度评分。"
+                    "已完成全召回池技术预筛；本轮因 K 线或交易性门禁未进入 Legacy 深度评分。"
                 ],
                 "risk_flags": technical_risks[:6],
                 "kline": compact_kline(item.get("kline") or []),

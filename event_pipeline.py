@@ -7,6 +7,7 @@ import concurrent.futures
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import urllib.parse
@@ -305,29 +306,153 @@ def parse_sec_submissions(
     return result
 
 
+def _finite_float(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def _bounded_score(value: Any, *, scale: float = 1.0) -> float:
+    return max(0.0, min(100.0, _finite_float(value) * scale))
+
+
+def _normalized_symbol(row: Mapping[str, Any], market: str) -> str:
+    symbol = str(row.get("code") or row.get("symbol") or "").upper()
+    if market == "hk" and symbol and not symbol.endswith(".HK"):
+        symbol = f"{symbol.lstrip('0').zfill(4)}.HK"
+    return symbol
+
+
+def _v2_percentile(candidate: Mapping[str, Any]) -> float:
+    v2 = candidate.get("v2") or {}
+    if not isinstance(v2, Mapping):
+        return 0.0
+    if v2.get("rank_percentile") is not None:
+        return _bounded_score(v2.get("rank_percentile"), scale=100.0)
+    if v2.get("rank_score") is not None:
+        return _bounded_score(v2.get("rank_score"))
+    rank = _finite_float(v2.get("rank"))
+    size = _finite_float(v2.get("rank_universe_size"))
+    if rank > 0 and size > 1:
+        return _bounded_score((size - rank) / (size - 1), scale=100.0)
+    return 100.0 if rank == 1 and size == 1 else 0.0
+
+
+def _risk_reward_score(candidate: Mapping[str, Any]) -> float:
+    estimate = (
+        candidate.get("estimated_10d_range")
+        or candidate.get("estimated_2w_range")
+        or candidate.get("estimated_2d_range")
+        or {}
+    )
+    if not isinstance(estimate, Mapping):
+        return 0.0
+    upside = max(0.0, _finite_float(estimate.get("high_pct")))
+    downside = abs(min(0.0, _finite_float(estimate.get("low_pct"))))
+    if upside <= 0:
+        return 0.0
+    ratio = upside / downside if downside > 0 else 3.0
+    # A 1.2x upside/downside ratio is useful but not perfect.  Cap unusually
+    # optimistic ranges so this pre-scan cannot be dominated by one estimate.
+    return _bounded_score(ratio, scale=40.0)
+
+
+def _event_scan_priority(candidate: Mapping[str, Any], market_action: str) -> tuple[float, float, float, float, float]:
+    """Rank event-scan candidates without consulting any Shadow probability."""
+
+    legacy = candidate.get("legacy") or {}
+    legacy_score = _bounded_score(
+        legacy.get("recommendation_degree")
+        if isinstance(legacy, Mapping) and legacy.get("recommendation_degree") is not None
+        else candidate.get("recommendation_degree", candidate.get("confidence"))
+    )
+    v2_score = _v2_percentile(candidate)
+    quality = candidate.get("data_quality") or {}
+    quality_score = _bounded_score(quality.get("score") if isinstance(quality, Mapping) else None)
+    reward_risk = _risk_reward_score(candidate)
+    market_action_score = 100.0 if str(market_action).upper() == "BUY_CANDIDATE" else 0.0
+    priority = (
+        legacy_score * 0.30
+        + v2_score * 0.30
+        + quality_score * 0.20
+        + reward_risk * 0.15
+        + market_action_score * 0.05
+    )
+    risk_items = candidate.get("risk_items") or []
+    hard_risks = sum(
+        1
+        for item in risk_items
+        if isinstance(item, Mapping) and str(item.get("severity") or "").lower() == "hard"
+    )
+    blocked = str(candidate.get("execution_state") or "").upper() in {"BLOCK", "BLOCKED"} or any(
+        isinstance(gate, Mapping) and str(gate.get("status") or "").upper() == "BLOCK"
+        for gate in (candidate.get("decision_gates") or [])
+    )
+    priority -= hard_risks * 15.0 + (30.0 if blocked else 0.0)
+    # The remaining fields make ties deterministic and keep a genuine Legacy
+    # recommendation ahead of an equally scored technical-only row.
+    legacy_complete = not (
+        candidate.get("legacy_complete") is False
+        or candidate.get("score_tier") == "technical_only"
+        or (isinstance(legacy, Mapping) and legacy.get("complete") is False)
+    )
+    return (priority, float(legacy_complete), legacy_score, v2_score, quality_score)
+
+
 def _candidate_symbols(snapshot: Mapping[str, Any], market: str, limit: int) -> list[str]:
     section = ((snapshot.get("markets") or {}).get(market) or {})
     decision = section.get("decision") or {}
-    rows = [
-        *(section.get("_candidate_pool") or []),
+    decision_rows = [
         decision.get("primary"),
         decision.get("blocked_candidate"),
         *(decision.get("watchlist") or []),
     ]
-    result: list[str] = []
-    seen = set()
-    for row in rows:
+    production = snapshot.get("production_decision") or {}
+    production_primary = production.get("primary") if isinstance(production, Mapping) else None
+    if isinstance(production_primary, Mapping) and str(production_primary.get("market") or "") == market:
+        decision_rows.insert(0, production_primary)
+    rows = [*(section.get("_candidate_pool") or []), *decision_rows]
+    candidates: dict[str, tuple[tuple[float, float, float, float, float], int, Mapping[str, Any]]] = {}
+    mandatory: set[str] = set()
+    market_action = str(decision.get("action") or "")
+    decision_row_ids = {id(row) for row in decision_rows if isinstance(row, Mapping)}
+    for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             continue
-        symbol = str(row.get("code") or row.get("symbol") or "").upper()
-        if market == "hk" and symbol and not symbol.endswith(".HK"):
-            symbol = f"{symbol.lstrip('0').zfill(4)}.HK"
-        if symbol and symbol not in seen:
-            seen.add(symbol)
-            result.append(symbol)
-        if len(result) >= limit:
+        symbol = _normalized_symbol(row, market)
+        if not symbol:
+            continue
+        priority = _event_scan_priority(row, market_action)
+        previous = candidates.get(symbol)
+        if previous is None or priority > previous[0]:
+            candidates[symbol] = (priority, index, row)
+        if id(row) in decision_row_ids:
+            mandatory.add(symbol)
+
+    bounded_limit = max(1, min(30, int(limit)))
+    # The normal decision contract publishes at most primary + blocked + eight
+    # watchlist rows.  Reserve all of them even if their ensemble score is low;
+    # a malformed oversized decision can never push collection above 30.
+    selection_limit = min(30, max(bounded_limit, len(mandatory)))
+    ordered = sorted(
+        candidates,
+        key=lambda symbol: (
+            *candidates[symbol][0],
+            -candidates[symbol][1],
+            symbol,
+        ),
+        reverse=True,
+    )
+    selected = set(list(mandatory)[:selection_limit])
+    for symbol in ordered:
+        if len(selected) >= selection_limit:
             break
-    return result
+        selected.add(symbol)
+    return [symbol for symbol in ordered if symbol in selected][:selection_limit]
 
 
 def _collect_a_share(symbols: list[str], run_id: str, now: dt.datetime, fetch: Callable[..., Any]) -> list[dict]:
@@ -431,7 +556,7 @@ def collect_for_snapshot(
         raise EventPipelineError("run_id is required")
     now = (now or dt.datetime.now(CN_TZ)).astimezone(CN_TZ)
     fetch = fetcher or _default_fetcher
-    limit = max(1, min(30, int(os.environ.get("EVENT_SCAN_CANDIDATES_PER_MARKET", "8"))))
+    limit = max(1, min(30, int(os.environ.get("EVENT_SCAN_CANDIDATES_PER_MARKET", "16"))))
     symbols = {market: _candidate_symbols(snapshot, market, limit) for market in SOURCE_REGISTRY}
     collectors = {"a_share": _collect_a_share, "hk": _collect_hk, "us": _collect_us}
     items: list[dict] = []
@@ -505,6 +630,37 @@ def pipeline_complete(value: Mapping[str, Any]) -> bool:
     )
 
 
+def pipeline_market_complete(value: Mapping[str, Any], market: str) -> bool:
+    """Return whether one market's official source completed independently.
+
+    The strict cross-market decision still uses :func:`pipeline_complete`.
+    This narrower check prevents an SEC outage from erasing an otherwise
+    auditable HKEX event (and vice versa) in the market-isolated rule track.
+    """
+
+    pipeline = ((value.get("events") or {}).get("pipeline") or value.get("pipeline") or value)
+    if not isinstance(pipeline, Mapping) or market not in SOURCE_REGISTRY:
+        return False
+    manifest = pipeline.get("source_manifest")
+    scanned = pipeline.get("scanned_symbols")
+    source_id = SOURCE_REGISTRY[market]["source_id"]
+    return bool(
+        pipeline.get("contract_version") == "official-event-pipeline-v1"
+        and isinstance(pipeline.get("run_id"), str)
+        and pipeline.get("run_id")
+        and market in set(pipeline.get("markets") or [])
+        and isinstance(scanned, Mapping)
+        and isinstance(scanned.get(market), list)
+        and isinstance(manifest, list)
+        and any(
+            isinstance(row, Mapping)
+            and row.get("source_id") == source_id
+            and row.get("status") == "SUCCESS"
+            for row in manifest
+        )
+    )
+
+
 def event_is_auditable(
     item: Mapping[str, Any],
     snapshot: Mapping[str, Any],
@@ -515,7 +671,7 @@ def event_is_auditable(
     event_market = str(item.get("market") or "")
     event_symbol = str(item.get("symbol") or "")
     registry = SOURCE_REGISTRY.get(event_market)
-    if not registry or not pipeline_complete(snapshot):
+    if not registry or not pipeline_market_complete(snapshot, event_market):
         return False
     host = (urllib.parse.urlparse(str(item.get("url") or "")).hostname or "").lower()
     if not any(host == allowed or host.endswith(f".{allowed}") for allowed in registry["hosts"]):
@@ -553,4 +709,5 @@ __all__ = [
     "parse_hkex_titles",
     "parse_sec_submissions",
     "pipeline_complete",
+    "pipeline_market_complete",
 ]

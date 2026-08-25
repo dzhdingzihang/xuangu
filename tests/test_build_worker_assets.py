@@ -10,6 +10,64 @@ from scripts import build_worker_assets
 
 
 class BuildWorkerAssetsTests(unittest.TestCase):
+    def test_history_summary_preserves_rule_qualified_candidate_without_probability(self) -> None:
+        pick = {
+            "snapshot_key": "qualified.json",
+            "target_date": "2026-08-25",
+            "signal_date": "2026-08-25",
+            "generated_at": "2026-08-25T22:47:00+08:00",
+            "global_decision": {
+                "contract_version": "global-10d-v1",
+                "decision_scope": "global_10d",
+                "action_basis": "strict_cross_market_gate_v1",
+                "action": "NO_VALID_PICK",
+                "primary": None,
+                "blocker_codes": ["TEN_DAY_PROBABILITY_UNCALIBRATED"],
+            },
+            "production_decision": {
+                "contract_version": "production-rule-10d-v1",
+                "decision_scope": "global_10d_bounded_recall",
+                "action_basis": "strict_rule_qualification_v1",
+                "action": "QUALIFIED_PICK",
+                "rule_model_id": "ten-day-audited-rule-ensemble-v1",
+                "score_kind": "RULE_QUALIFICATION_SCORE",
+                "probability_status": "NOT_APPLICABLE",
+                "probability": None,
+                "calibrated": False,
+                "expected_net_utility": None,
+                "qualified_candidate_count": 1,
+                "rejected_candidate_count": 796,
+                "evaluated_candidate_count": 797,
+                "blocker_codes": [],
+                "primary": {
+                    "qualification_id": "qual_0123456789abcdef01234567",
+                    "status": "QUALIFIED",
+                    "market": "hk",
+                    "code": "0300.HK",
+                    "name": "美的集团",
+                    "rule_model_id": "ten-day-audited-rule-ensemble-v1",
+                    "score_kind": "RULE_QUALIFICATION_SCORE",
+                    "qualification_score": 82.4,
+                    "probability": None,
+                    "calibrated": False,
+                    "expected_net_utility": None,
+                    "blocker_codes": [],
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "qualified.json"
+            path.write_text(json.dumps(pick, ensure_ascii=False), encoding="utf-8")
+            summary = build_worker_assets.summarize_pick(path)
+
+        self.assertEqual(summary["production_action"], "QUALIFIED_PICK")
+        self.assertEqual(summary["qualification_history_kind"], "qualified_rule_10d_v1")
+        self.assertEqual(summary["qualification_id"], "qual_0123456789abcdef01234567")
+        primary = summary["production_decision"]["primary"]
+        self.assertEqual(primary["code"], "0300.HK")
+        self.assertIsNone(primary["probability"])
+        self.assertFalse(primary["calibrated"])
+
     def test_full_worker_snapshots_are_bounded_to_representative_decision_days(self) -> None:
         summaries = []
         for day in range(1, 36):

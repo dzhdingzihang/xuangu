@@ -464,6 +464,73 @@ def summarize_global_decision(pick: dict) -> dict | None:
     return summary
 
 
+def summarize_production_decision(pick: dict) -> dict | None:
+    decision = pick.get("production_decision")
+    if not isinstance(decision, dict):
+        return None
+    summary = {
+        key: decision.get(key)
+        for key in (
+            "contract_version",
+            "decision_scope",
+            "horizon_trade_days",
+            "action",
+            "action_basis",
+            "rule_model_id",
+            "score_kind",
+            "score_disclaimer",
+            "probability_status",
+            "probability",
+            "calibrated",
+            "expected_net_utility",
+            "qualified_candidate_count",
+            "rejected_candidate_count",
+            "evaluated_candidate_count",
+            "blocker_codes",
+        )
+        if key in decision
+    }
+    primary = decision.get("primary")
+    if isinstance(primary, dict):
+        summary["primary"] = {
+            key: primary.get(key)
+            for key in (
+                "qualification_id",
+                "status",
+                "market",
+                "code",
+                "name",
+                "rule_model_id",
+                "score_kind",
+                "qualification_score",
+                "score_components",
+                "probability_status",
+                "probability",
+                "calibrated",
+                "expected_net_utility",
+                "legacy_signal",
+                "legacy_recommendation_degree",
+                "v2_rank",
+                "v2_rank_universe_size",
+                "data_quality_score",
+                "event_candidate_scanned",
+                "verified_positive_event_ids",
+                "entry_price",
+                "entry_trade_date",
+                "forecast_end_trade_date",
+                "calendar_id",
+                "calendar_version",
+                "estimated_10d_range",
+                "risk_reward",
+                "blocker_codes",
+            )
+            if key in primary
+        }
+    else:
+        summary["primary"] = None
+    return summary
+
+
 def history_kind(global_decision: dict | None) -> str:
     if (
         isinstance(global_decision, dict)
@@ -525,6 +592,7 @@ def summarize_pick(
     )
     legacy_summary = summarize_decision(pick.get("decision") or {})
     raw_global_decision = summarize_global_decision(pick)
+    production_decision = summarize_production_decision(pick)
     kind = history_kind(raw_global_decision)
     is_global_contract = kind == "global_10d_v1"
     global_decision = raw_global_decision if is_global_contract else None
@@ -560,6 +628,16 @@ def summarize_pick(
         "has_primary": has_primary,
         "a_share_legacy": legacy_summary,
         "global_decision": global_decision,
+        "production_decision": production_decision,
+        "production_action": (
+            production_decision.get("action") if production_decision else "NO_QUALIFIED_PICK"
+        ),
+        "qualification_history_kind": (
+            "qualified_rule_10d_v1"
+            if production_decision
+            and production_decision.get("contract_version") == "production-rule-10d-v1"
+            else None
+        ),
     }
     # Do not admit snapshot-embedded outcomes into formal performance.  Only a
     # track-aware join from data/outcomes/executable is authoritative.
@@ -585,6 +663,10 @@ def summarize_pick(
         for key in ("code", "name", "probability", "expected_net_utility", "transaction_cost", "tail_risk", "model_id"):
             if key in primary:
                 summary[key] = primary.get(key)
+    production_primary = production_decision.get("primary") if production_decision else None
+    if isinstance(production_primary, dict):
+        summary["qualification_id"] = production_primary.get("qualification_id")
+        summary["qualification_score"] = production_primary.get("qualification_score")
     markets = pick.get("markets") or {}
     if markets:
         summary["markets"] = {}

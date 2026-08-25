@@ -32,6 +32,7 @@ DECISION_IDENTITY_FIELDS = (
     "forecast_end_date",
 )
 ALLOWED_GLOBAL_ACTIONS = {"NO_VALID_PICK", "REVIEW_EXECUTABLE_PICK"}
+ALLOWED_PRODUCTION_ACTIONS = {"NO_QUALIFIED_PICK", "QUALIFIED_PICK"}
 DEFAULT_BASE_URL = "https://xuangu.alixjd.com"
 SHANGHAI_TIME_ZONE = ZoneInfo("Asia/Shanghai")
 SCHEDULED_REFRESH_CHECKPOINTS = (
@@ -296,6 +297,30 @@ def deployment_mismatches(local: dict, status: dict, latest: dict) -> list[str]:
                 f"latest.global_decision.{field}: expected {local_global.get(field)!r}, "
                 f"got {remote_global.get(field)!r}"
             )
+    local_production = local.get("production_decision")
+    if isinstance(local_production, dict):
+        remote_production = latest.get("production_decision") or {}
+        expected_production_action = local_production.get("action")
+        if expected_production_action not in ALLOWED_PRODUCTION_ACTIONS:
+            errors.append(f"local.production_decision.action is invalid: {expected_production_action!r}")
+        if remote_production.get("action") != expected_production_action:
+            errors.append(
+                "latest.production_decision.action: "
+                f"expected {expected_production_action!r}, got {remote_production.get('action')!r}"
+            )
+        for field in ("contract_version", "decision_scope", "action_basis", "rule_model_id", "score_kind"):
+            if remote_production.get(field) != local_production.get(field):
+                errors.append(
+                    f"latest.production_decision.{field}: expected {local_production.get(field)!r}, "
+                    f"got {remote_production.get(field)!r}"
+                )
+        local_qualification = (local_production.get("primary") or {}).get("qualification_id")
+        remote_qualification = (remote_production.get("primary") or {}).get("qualification_id")
+        if remote_qualification != local_qualification:
+            errors.append(
+                f"latest.production_decision.primary.qualification_id: expected {local_qualification!r}, "
+                f"got {remote_qualification!r}"
+            )
     return errors
 
 
@@ -327,6 +352,13 @@ def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
         ],
         "snapshot_as_of": local.get("generated_at"),
     }
+    if isinstance(local.get("production_decision"), dict):
+        required_values.update({
+            "production_action": local["production_decision"].get("action"),
+            "qualification_id": ((local["production_decision"].get("primary") or {}).get("qualification_id")),
+            "calibrated_action": ((local.get("global_decision") or {}).get("action")),
+            "prediction_id": (((local.get("global_decision") or {}).get("primary") or {}).get("prediction_id")),
+        })
     for field, expected in required_values.items():
         actual = status.get(field)
         if actual != expected:
@@ -390,6 +422,11 @@ def _live_candidates(snapshot: dict, market: str) -> list[tuple[str, dict]]:
             candidate = global_decision.get(field)
             if isinstance(candidate, dict) and candidate.get("market") == market:
                 rows.append(candidate)
+    production_decision = snapshot.get("production_decision")
+    if isinstance(production_decision, dict):
+        candidate = production_decision.get("primary")
+        if isinstance(candidate, dict) and candidate.get("market") == market:
+            rows.append(candidate.get("candidate_snapshot") or candidate)
 
     result: list[tuple[str, dict]] = []
     seen: set[str] = set()
@@ -440,6 +477,14 @@ def history_contract_errors(local: dict, history_payload: dict) -> list[str]:
         errors.append(
             f"history[{key}].global_decision.action: expected {expected_action!r}, got {actual_action!r}"
         )
+    if isinstance(local.get("production_decision"), dict):
+        expected_production_action = local["production_decision"].get("action")
+        actual_production_action = ((row.get("production_decision") or {}).get("action"))
+        if actual_production_action != expected_production_action:
+            errors.append(
+                f"history[{key}].production_decision.action: expected {expected_production_action!r}, "
+                f"got {actual_production_action!r}"
+            )
     return errors
 
 

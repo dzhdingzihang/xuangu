@@ -62,10 +62,10 @@ def healthy_snapshot(generated_at: str = "2026-08-21T08:25:00+08:00") -> dict:
             "technical_scored_size": 300,
             "technical_kline_complete_size": 300,
             "technical_kline_coverage": 1.0,
-            "deep_score_limit": 96,
+            "deep_score_limit": 300,
             "deep_eligible_size": 300,
-            "deep_attempted_size": 96,
-            "deep_scored_size": 96,
+            "deep_attempted_size": 300,
+            "deep_scored_size": 300,
             "deep_kline_coverage": 1.0,
         }
     )
@@ -365,11 +365,11 @@ class ScheduleGateTests(unittest.TestCase):
     def test_a_share_deep_kline_boundary_forces_recovery(self) -> None:
         healthy = healthy_snapshot()
         healthy["markets"]["a_share"]["stats"].update(
-            {"deep_scored_size": 95, "scored_size": 95, "deep_kline_coverage": 0.9896}
+            {"deep_scored_size": 294, "scored_size": 294, "deep_kline_coverage": 0.98}
         )
         degraded = healthy_snapshot()
         degraded["markets"]["a_share"]["stats"].update(
-            {"deep_scored_size": 94, "scored_size": 94, "deep_kline_coverage": 0.9792}
+            {"deep_scored_size": 293, "scored_size": 293, "deep_kline_coverage": 0.9767}
         )
 
         self.assertNotIn(

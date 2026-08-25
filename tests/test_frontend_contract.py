@@ -294,6 +294,25 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("EXECUTABLE_REVIEW", self.js)
         self.assertNotIn("candidateScore(candidate) / 100", self.js)
 
+    def test_production_rule_pick_is_primary_and_never_rendered_as_probability(self) -> None:
+        self.assertRegex(self.js, r"function productionDecisionTruth\(")
+        self.assertIn('serverDecision.contract_version === "production-rule-10d-v1"', self.js)
+        self.assertIn('["QUALIFIED_PICK", "NO_QUALIFIED_PICK"].includes(serverAction)', self.js)
+        self.assertIn('serverDecision.score_kind === "RULE_QUALIFICATION_SCORE"', self.js)
+        self.assertIn("serverDecision.probability === null", self.js)
+        self.assertIn("serverDecision.calibrated === false", self.js)
+        self.assertIn("serverPrimary?.qualification_score", self.js)
+        self.assertIn('action: qualified ? "QUALIFIED_PICK" : "NO_QUALIFIED_PICK"', self.js)
+        self.assertIn("const selected = production.qualified;", self.js)
+        self.assertIn("浏览器绝不把它们自行升级为 QUALIFIED_PICK", self.js)
+        self.assertIn("规则资格分（非概率）", self.js)
+        self.assertIn("全局校准模型结论", self.js)
+        self.assertIn("只有通过校准合同的 global_decision 才能展示上涨概率", self.js)
+        self.assertIn("calibrated-track-card", self.css)
+        self.assertNotRegex(self.js, r"ratioPct\([^\n)]*qualification_score")
+        self.assertNotRegex(self.js, r"qualification_score\s*/\s*100")
+        self.assertNotRegex(self.js, r"pct\([^\n)]*qualification_score")
+
     def test_manual_evidence_never_becomes_automatic_evidence(self) -> None:
         self.assertIn("MANUAL_RESEARCH_EVIDENCE", self.js)
         self.assertIn("manual_verified_pending_ingestion", self.js)

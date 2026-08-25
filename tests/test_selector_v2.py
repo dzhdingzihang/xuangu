@@ -1260,8 +1260,8 @@ class SelectorV2Tests(unittest.TestCase):
             technical_attempted_count=300,
             technical_completed_count=294,
             deep_eligible_count=294,
-            deep_attempted_count=96,
-            deep_completed_count=95,
+            deep_attempted_count=294,
+            deep_completed_count=289,
             merged_count=300,
             recall_coverage=recall,
         )
@@ -1271,8 +1271,8 @@ class SelectorV2Tests(unittest.TestCase):
             technical_attempted_count=300,
             technical_completed_count=293,
             deep_eligible_count=293,
-            deep_attempted_count=96,
-            deep_completed_count=95,
+            deep_attempted_count=293,
+            deep_completed_count=288,
             merged_count=300,
             recall_coverage=recall,
         )
@@ -1288,8 +1288,8 @@ class SelectorV2Tests(unittest.TestCase):
             technical_attempted_count=300,
             technical_completed_count=294,
             deep_eligible_count=294,
-            deep_attempted_count=96,
-            deep_completed_count=94,
+            deep_attempted_count=294,
+            deep_completed_count=288,
             merged_count=300,
             recall_coverage=recall,
         )

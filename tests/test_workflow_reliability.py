@@ -162,6 +162,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
         )
         self.assertIn("AUTOMATION_TRIGGER: ${{ github.event_name }}", workflow)
         self.assertIn("SCHEDULED_SLOT: ${{ steps.schedule_gate.outputs.slot }}", workflow)
+        self.assertIn('EVENT_SCAN_CANDIDATES_PER_MARKET: "16"', workflow)
         self.assertIn('GENERATION_ATTEMPT="${attempt}" python server.py --once --force', workflow)
         self.assertIn('python server.py --once --force --quiet', workflow)
 

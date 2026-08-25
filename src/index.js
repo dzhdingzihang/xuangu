@@ -246,7 +246,14 @@ function snapshotCandidateRows(snapshot, market) {
   const decision = section?.decision || {};
   const watchlist = Array.isArray(decision.watchlist) ? decision.watchlist : [];
   const rows = [decision.primary, decision.blocked_candidate, ...watchlist];
-  for (const globalCandidate of [snapshot?.global_decision?.primary, snapshot?.global_decision?.research_priority]) {
+  const productionPrimary = snapshot?.production_decision?.primary;
+  if (productionPrimary && productionPrimary.market === market) {
+    rows.push(productionPrimary.candidate_snapshot || productionPrimary);
+  }
+  for (const globalCandidate of [
+    snapshot?.global_decision?.primary,
+    snapshot?.global_decision?.research_priority,
+  ]) {
     if (globalCandidate && globalCandidate.market === market) rows.push(globalCandidate);
   }
   return rows.filter((row) => row && typeof row === "object" && !Array.isArray(row));
@@ -372,9 +379,24 @@ function isGlobalTenDayDecision(decision) {
   );
 }
 
+function isProductionRuleDecision(decision) {
+  return Boolean(
+    decision
+    && typeof decision === "object"
+    && decision.contract_version === "production-rule-10d-v1"
+    && decision.decision_scope === "global_10d_bounded_recall"
+    && decision.action_basis === "strict_rule_qualification_v1"
+    && ["QUALIFIED_PICK", "NO_QUALIFIED_PICK"].includes(decision.action)
+    && decision.score_kind === "RULE_QUALIFICATION_SCORE"
+    && decision.probability === null
+    && decision.calibrated === false,
+  );
+}
+
 function summarizePick(pick) {
   const legacySummary = summarizeDecision(pick.decision || {});
   const globalDecision = isGlobalTenDayDecision(pick.global_decision) ? pick.global_decision : null;
+  const productionDecision = isProductionRuleDecision(pick.production_decision) ? pick.production_decision : null;
   const isGlobal = Boolean(globalDecision);
   const action = isGlobal ? globalDecision.action || "NO_VALID_PICK" : "LEGACY_ONLY";
   const summary = {
@@ -407,6 +429,27 @@ function summarizePick(pick) {
       blocker_codes: globalDecision.blocker_codes || [],
       automatic_external_evidence_count: globalDecision.automatic_external_evidence_count || 0,
     } : null,
+    production_action: productionDecision?.action || "NO_QUALIFIED_PICK",
+    qualification_history_kind: productionDecision ? "qualified_rule_10d_v1" : null,
+    production_decision: productionDecision ? {
+      contract_version: productionDecision.contract_version,
+      decision_scope: productionDecision.decision_scope,
+      horizon_trade_days: productionDecision.horizon_trade_days,
+      action: productionDecision.action,
+      action_basis: productionDecision.action_basis,
+      rule_model_id: productionDecision.rule_model_id,
+      score_kind: productionDecision.score_kind,
+      score_disclaimer: productionDecision.score_disclaimer,
+      probability_status: productionDecision.probability_status,
+      probability: null,
+      calibrated: false,
+      expected_net_utility: null,
+      primary: productionDecision.primary || null,
+      qualified_candidate_count: productionDecision.qualified_candidate_count || 0,
+      rejected_candidate_count: productionDecision.rejected_candidate_count || 0,
+      evaluated_candidate_count: productionDecision.evaluated_candidate_count || 0,
+      blocker_codes: productionDecision.blocker_codes || [],
+    } : null,
     a_share_legacy: legacySummary,
   };
   const primary = globalDecision && globalDecision.primary;
@@ -418,6 +461,11 @@ function summarizePick(pick) {
     summary.transaction_cost = primary.transaction_cost ?? null;
     summary.tail_risk = primary.tail_risk ?? null;
     summary.model_id = primary.model_id || null;
+  }
+  const qualificationPrimary = productionDecision?.primary;
+  if (qualificationPrimary && typeof qualificationPrimary === "object") {
+    summary.qualification_id = qualificationPrimary.qualification_id || null;
+    summary.qualification_score = qualificationPrimary.qualification_score ?? null;
   }
   if (pick.shadow_outcome && typeof pick.shadow_outcome === "object") {
     summary.shadow_outcome = pick.shadow_outcome;
@@ -556,6 +604,8 @@ function historyMetadata(rows, days, view, returnedCount, evaluation = null) {
     global_contract_day_count: contractDays.length,
     legacy_day_count: legacyDays.length,
     no_valid_pick_day_count: contractDays.filter((row) => row.global_decision?.action === "NO_VALID_PICK").length,
+    qualified_rule_day_count: days.filter((row) => row.production_decision?.action === "QUALIFIED_PICK").length,
+    no_qualified_rule_day_count: days.filter((row) => row.production_decision?.action === "NO_QUALIFIED_PICK").length,
     executable_prediction_count: count("executable_prediction_count"),
     pending_settlement_count: count("pending_settlement_count"),
     settled_sample_count: count("settled_sample_count"),
@@ -775,6 +825,10 @@ async function handleApi(request, env) {
       snapshot_as_of: latest ? latest.generated_at || null : null,
       next_refresh: nextScheduledRefresh(current),
       snapshot_key: latest ? latest.snapshot_key || null : null,
+      production_action: latest?.production_decision?.action || "NO_QUALIFIED_PICK",
+      qualification_id: latest?.production_decision?.primary?.qualification_id || null,
+      calibrated_action: latest?.global_decision?.action || "NO_VALID_PICK",
+      prediction_id: latest?.global_decision?.primary?.prediction_id || null,
       ...freshness,
     });
   }

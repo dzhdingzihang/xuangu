@@ -37,8 +37,8 @@ def snapshot_fixture() -> dict:
             "raw_pool_size": targets[market_key],
             "universe_size": targets[market_key],
             "valid_quote_size": targets[market_key],
-            "deep_scored_size": 1,
-            "scored_size": 1,
+            "deep_scored_size": targets[market_key],
+            "scored_size": targets[market_key],
             "source_counts": {"fixture": targets[market_key]},
         }
         if market_key == "a_share":
@@ -49,10 +49,10 @@ def snapshot_fixture() -> dict:
                     "technical_scored_size": targets[market_key],
                     "technical_kline_complete_size": targets[market_key],
                     "technical_kline_coverage": 1.0,
-                    "deep_score_limit": 96,
+                    "deep_score_limit": 300,
                     "deep_eligible_size": targets[market_key],
-                    "deep_attempted_size": 96,
-                    "deep_kline_coverage": 0.0104,
+                    "deep_attempted_size": 300,
+                    "deep_kline_coverage": 1.0,
                     "board_targets": dict(server.A_SHARE_BOARD_TARGETS),
                     "board_counts": dict(server.A_SHARE_BOARD_TARGETS),
                     "board_shortfalls": {},
@@ -448,6 +448,32 @@ class SnapshotContractTests(unittest.TestCase):
             self.assertEqual(new["primary"]["score"], old["primary"]["score"])
             self.assertEqual(new["primary"]["recommendation_degree"], old["primary"]["recommendation_degree"])
 
+    def test_enrichment_publishes_independent_production_rule_contract(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+
+        self.assertEqual(enriched["production_decision"]["contract_version"], "production-rule-10d-v1")
+        self.assertEqual(enriched["production_decision"]["action"], "NO_QUALIFIED_PICK")
+        self.assertEqual(enriched["production_decision"]["score_kind"], "RULE_QUALIFICATION_SCORE")
+        self.assertIsNone(enriched["production_decision"]["probability"])
+        self.assertFalse(enriched["production_decision"]["calibrated"])
+        self.assertEqual(enriched["global_decision"]["action"], "NO_VALID_PICK")
+        self.assertFalse(enriched["data_health"]["qualification_usable"])
+        self.assertFalse(enriched["data_health"]["calibrated_decision_usable"])
+        self.assertEqual(validate_snapshot(enriched), [])
+
+        enriched["production_decision"]["probability"] = 0.88
+        self.assertIn("production_decision probability must be null", validate_snapshot(enriched))
+
+    def test_new_model_requires_production_contract_but_previous_snapshot_remains_deployable(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        enriched.pop("production_decision")
+
+        enriched["model_version"] = "smart-selector-2026-08-25.1-production-rule"
+        self.assertIn("production_decision is required", validate_snapshot(enriched))
+
+        enriched["model_version"] = "smart-selector-2026-08-23.3-evidence-loop"
+        self.assertNotIn("production_decision is required", validate_snapshot(enriched))
+
     def test_global_ten_day_gate_is_strict_without_calibration_or_event_pipeline_scan(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())
         decision = enriched["global_decision"]
@@ -498,7 +524,7 @@ class SnapshotContractTests(unittest.TestCase):
                     "recall_selected_size": target,
                     "recall_shortfall": 0,
                     "valid_quote_size": target,
-                    "deep_scored_size": 1,
+                    "deep_scored_size": target,
                 }
             )
         enriched["markets"]["a_share"]["stats"].update(
@@ -584,9 +610,9 @@ class SnapshotContractTests(unittest.TestCase):
             }
         )
 
-        # The production contract fixes the limit at 96, so validate the
+        # The production contract fixes the limit at 300, so validate the
         # eligible basis with the production limit and a two-name deep pool.
-        stats["deep_score_limit"] = 96
+        stats["deep_score_limit"] = 300
         self.assertEqual(validate_snapshot(enriched), [])
 
         stats["deep_attempted_size"] = 3

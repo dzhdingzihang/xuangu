@@ -69,6 +69,11 @@ class WorkerApiContractTests(unittest.TestCase):
               weights_version: "weights-test-2",
               universe_version: "universe-test-2",
               generated_at: "2026-08-19T22:06:29+08:00",
+              production_decision: {{
+                action: "QUALIFIED_PICK",
+                primary: {{ qualification_id: "qual_0123456789abcdef01234567" }},
+              }},
+              global_decision: {{ action: "NO_VALID_PICK", primary: null }},
             }};
             const env = {{
               ASSETS: {{
@@ -105,6 +110,10 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.deepEqual(status.schedule_primary_checkpoints, ["08:17", "10:17", "12:17", "15:17", "16:17", "20:17", "22:47"]);
             assert.deepEqual(status.schedule_fallback_checkpoints, ["08:47", "10:47", "12:47", "15:47", "16:47", "20:47", "23:17"]);
             assert.equal(status.snapshot_as_of, latest.generated_at);
+            assert.equal(status.production_action, "QUALIFIED_PICK");
+            assert.equal(status.qualification_id, "qual_0123456789abcdef01234567");
+            assert.equal(status.calibrated_action, "NO_VALID_PICK");
+            assert.equal(status.prediction_id, null);
             assert.equal(status.next_refresh, module.nextScheduledRefresh(new Date(status.time)));
             assert.equal(statusResponse.headers.get("x-content-type-options"), "nosniff");
             assert.match(statusResponse.headers.get("strict-transport-security"), /max-age=/);

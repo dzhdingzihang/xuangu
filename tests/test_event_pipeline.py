@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import unittest
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 import event_pipeline
@@ -19,6 +20,98 @@ def snapshot() -> dict:
 
 
 class EventPipelineTests(unittest.TestCase):
+    def test_event_scan_prefers_rule_ensemble_and_preserves_market_decision_rows(self) -> None:
+        pool = []
+        for index in range(1, 21):
+            pool.append(
+                {
+                    "code": f"{index:04d}.HK",
+                    "recommendation_degree": 35,
+                    "v2": {"rank_percentile": 0.10},
+                    "data_quality": {"score": 70},
+                    "estimated_10d_range": {"low_pct": -8, "high_pct": 4},
+                    "decision_gates": [{"status": "PASS"}],
+                }
+            )
+        best = {
+            "code": "0300.HK",
+            "recommendation_degree": 82,
+            "v2": {"rank_percentile": 0.98},
+            "data_quality": {"score": 100},
+            "estimated_10d_range": {"low_pct": -4, "high_pct": 10},
+            "decision_gates": [{"status": "PASS"}],
+            # A huge Shadow probability must not be needed by the pre-sort.
+            "shadow_model": {"probability": 0.01},
+        }
+        pool.append(best)
+        required = [pool[18], pool[17], *pool[8:16]]
+        snap = snapshot()
+        snap["markets"]["hk"] = {
+            "_candidate_pool": pool,
+            "decision": {
+                "action": "BUY_CANDIDATE",
+                "primary": required[0],
+                "blocked_candidate": required[1],
+                "watchlist": required[2:],
+            },
+        }
+
+        symbols = event_pipeline._candidate_symbols(snap, "hk", 16)
+
+        self.assertEqual(symbols[0], "0300.HK")
+        self.assertEqual(len(symbols), 16)
+        self.assertTrue({row["code"] for row in required}.issubset(symbols))
+
+    def test_event_scan_priority_does_not_use_shadow_probability(self) -> None:
+        baseline = {
+            "recommendation_degree": 70,
+            "v2": {"rank_percentile": 0.8},
+            "data_quality": {"score": 100},
+            "estimated_10d_range": {"low_pct": -4, "high_pct": 8},
+        }
+        low_shadow = {**baseline, "shadow_model": {"probability": 0.01}}
+        high_shadow = {**baseline, "shadow_model": {"probability": 0.99}}
+        self.assertEqual(
+            event_pipeline._event_scan_priority(low_shadow, "BUY_CANDIDATE"),
+            event_pipeline._event_scan_priority(high_shadow, "BUY_CANDIDATE"),
+        )
+
+    def test_published_production_primary_is_always_in_the_event_scan(self) -> None:
+        snap = snapshot()
+        snap["production_decision"] = {
+            "action": "QUALIFIED_PICK",
+            "primary": {"market": "hk", "code": "0300.HK"},
+        }
+        snap["markets"]["hk"]["decision"] = {
+            "primary": snap["markets"]["hk"]["_candidate_pool"][0]
+        }
+
+        symbols = event_pipeline._candidate_symbols(snap, "hk", 1)
+
+        self.assertIn("0300.HK", symbols)
+        self.assertIn("0700.HK", symbols)
+
+    def test_collection_defaults_to_sixteen_candidates_per_market(self) -> None:
+        snap = snapshot()
+        with (
+            mock.patch.dict("os.environ", {}, clear=True),
+            mock.patch.object(event_pipeline, "_candidate_symbols", return_value=[]) as choose,
+            mock.patch.object(event_pipeline, "_collect_a_share", return_value=[]),
+            mock.patch.object(event_pipeline, "_collect_hk", return_value=[]),
+            mock.patch.object(event_pipeline, "_collect_us", return_value=[]),
+        ):
+            result = event_pipeline.collect_for_snapshot(snap, "run-1", now=NOW)
+
+        self.assertEqual(result["pipeline"]["status"], "READY_EMPTY")
+        self.assertEqual(
+            choose.call_args_list,
+            [
+                mock.call(snap, "a_share", 16),
+                mock.call(snap, "hk", 16),
+                mock.call(snap, "us", 16),
+            ],
+        )
+
     def test_cninfo_parser_keeps_official_direction_and_release_time(self) -> None:
         payload = {
             "announcements": [
@@ -131,6 +224,26 @@ class EventPipelineTests(unittest.TestCase):
         self.assertEqual(result["pipeline"]["status"], "PARTIAL")
         self.assertFalse(event_pipeline.pipeline_complete(result))
         self.assertEqual(result["pipeline"]["markets"], [])
+
+    def test_market_pipeline_health_is_isolated_from_other_source_failures(self) -> None:
+        value = {
+            "pipeline": {
+                "contract_version": "official-event-pipeline-v1",
+                "run_id": "run-1",
+                "status": "PARTIAL",
+                "markets": ["hk"],
+                "scanned_symbols": {"a_share": ["300502"], "hk": ["0700.HK"], "us": ["NVDA"]},
+                "source_manifest": [
+                    {"source_id": event_pipeline.SOURCE_REGISTRY["a_share"]["source_id"], "status": "ERROR"},
+                    {"source_id": event_pipeline.SOURCE_REGISTRY["hk"]["source_id"], "status": "SUCCESS"},
+                    {"source_id": event_pipeline.SOURCE_REGISTRY["us"]["source_id"], "status": "ERROR"},
+                ],
+            }
+        }
+        self.assertFalse(event_pipeline.pipeline_complete(value))
+        self.assertTrue(event_pipeline.pipeline_market_complete(value, "hk"))
+        self.assertFalse(event_pipeline.pipeline_market_complete(value, "a_share"))
+        self.assertFalse(event_pipeline.pipeline_market_complete(value, "us"))
 
 
 if __name__ == "__main__":
