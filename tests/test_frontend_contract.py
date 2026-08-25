@@ -156,6 +156,8 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('<canvas id="decisionChart"', self.js)
         self.assertIn('<canvas id="historyChart"', self.js)
         self.assertNotIn("<svg", self.html + self.js)
+        self.assertIn("规则合格候选事件链", self.js)
+        self.assertIn("规则候选证据", self.js)
 
     def test_copy_does_not_claim_uncalibrated_performance(self) -> None:
         self.assertIn("推荐度不是收益概率", self.js)
@@ -315,6 +317,9 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("规则合格 ${fmt(production.qualifiedCount, 0)} · 校准可执行", self.js)
         self.assertIn('row.decisionRole === "qualified" ? "规则合格"', self.js)
         self.assertIn("全局校准模型结论", self.js)
+        self.assertIn("生产规则资格模型 · V1", self.js)
+        self.assertIn("规则资格轨已通过", self.js)
+        self.assertIn("规则轨 ${esc(production.action)} · 校准轨", self.js)
         self.assertIn("只有通过校准合同的 global_decision 才能展示上涨概率", self.js)
         self.assertIn("calibrated-track-card", self.css)
         self.assertNotRegex(self.js, r"ratioPct\([^\n)]*qualification_score")
