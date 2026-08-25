@@ -729,9 +729,14 @@ class SelectorV2Tests(unittest.TestCase):
         with (
             mock.patch.object(server, "yahoo_realtime_quotes", return_value=live),
             mock.patch.object(server, "yahoo_kline_map", return_value={"AAA": current_kline}),
+            mock.patch.object(server, "cached_market_kline", return_value=[]),
             mock.patch.object(server.time, "sleep"),
         ):
-            scored = server.score_serenity_candidates("us", universe)
+            scored = server.score_serenity_candidates(
+                "us",
+                universe,
+                as_of=dt.datetime.fromisoformat("2026-08-21T22:00:05+08:00"),
+            )
 
         self.assertEqual(scored["quote_health"]["status"], "partial")
         self.assertEqual(scored["quote_health"]["requested_count"], 2)
