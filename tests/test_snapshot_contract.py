@@ -474,6 +474,9 @@ class SnapshotContractTests(unittest.TestCase):
         enriched["model_version"] = "smart-selector-2026-08-23.3-evidence-loop"
         self.assertNotIn("production_decision is required", validate_snapshot(enriched))
 
+        enriched["markets"]["a_share"]["stats"]["deep_score_limit"] = 96
+        self.assertNotIn("markets.a_share.stats.deep_score_limit must be 96/300", validate_snapshot(enriched))
+
     def test_global_ten_day_gate_is_strict_without_calibration_or_event_pipeline_scan(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())
         decision = enriched["global_decision"]

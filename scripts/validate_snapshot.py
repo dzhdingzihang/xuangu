@@ -1077,8 +1077,14 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                 deep_attempted_size = stats.get("deep_attempted_size")
                 deep_kline_coverage = stats.get("deep_kline_coverage")
                 deep_limit_bound = deep_score_limit if isinstance(deep_score_limit, int) and not isinstance(deep_score_limit, bool) else 0
-                if deep_score_limit != A_SHARE_DEEP_SCORE_LIMIT:
-                    errors.append(f"markets.a_share.stats.deep_score_limit must be {A_SHARE_DEEP_SCORE_LIMIT}")
+                compatible_deep_limits = (
+                    {A_SHARE_DEEP_SCORE_LIMIT}
+                    if snapshot.get("model_version") == PRODUCTION_RULE_MODEL_VERSION
+                    else {96, A_SHARE_DEEP_SCORE_LIMIT}
+                )
+                if deep_score_limit not in compatible_deep_limits:
+                    expected_limits = "/".join(str(value) for value in sorted(compatible_deep_limits))
+                    errors.append(f"markets.a_share.stats.deep_score_limit must be {expected_limits}")
                 technical_scored_size = stats.get("technical_scored_size")
                 technical_kline_complete_size = stats.get("technical_kline_complete_size")
                 deep_eligible_size = stats.get("deep_eligible_size")
