@@ -193,7 +193,11 @@ def adopt_newer_remote_snapshot(
 ) -> dict:
     """Prevent a code push from redeploying a snapshot older than production."""
     local = read_snapshot(local_path)
-    remote = fetcher(endpoint_url(base_url, "/api/latest"))
+    # Fetch the immutable static JSON representation, not /api/latest.  The
+    # Worker API parses and re-serializes the payload in JavaScript, which
+    # normalizes integral floats such as 0.0 to 0 and invalidates canonical
+    # hashes produced from the original Python JSON document.
+    remote = fetcher(endpoint_url(base_url, "/data/picks/latest.json"))
     for field in IDENTITY_FIELDS + DECISION_IDENTITY_FIELDS:
         if remote.get(field) in (None, ""):
             raise ValueError(f"remote.{field} is missing; refusing stale-push reconciliation")

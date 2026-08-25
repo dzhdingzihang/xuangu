@@ -410,6 +410,12 @@ class DeploymentVerifierTests(unittest.TestCase):
     def test_push_guard_adopts_newer_remote_snapshot_and_immutable_file(self) -> None:
         remote = snapshot_fixture(generated_at="2026-08-21T15:08:00+08:00")
         remote["snapshot_key"] = "2026-08-22_2026-08-21_150800.json"
+        requested_urls: list[str] = []
+
+        def fetcher(url: str) -> dict:
+            requested_urls.append(url)
+            return remote
+
         with tempfile.TemporaryDirectory() as temporary:
             latest_path = pathlib.Path(temporary) / "data" / "picks" / "latest.json"
             latest_path.parent.mkdir(parents=True)
@@ -417,9 +423,13 @@ class DeploymentVerifierTests(unittest.TestCase):
             result = self.module.adopt_newer_remote_snapshot(
                 latest_path,
                 base_url="https://selector.example.test",
-                fetcher=lambda _url: remote,
+                fetcher=fetcher,
             )
             self.assertTrue(result["adopted"])
+            self.assertEqual(
+                requested_urls,
+                ["https://selector.example.test/data/picks/latest.json"],
+            )
             self.assertEqual(json.loads(latest_path.read_text()), remote)
             immutable = latest_path.parent / remote["snapshot_key"]
             self.assertEqual(json.loads(immutable.read_text()), remote)
