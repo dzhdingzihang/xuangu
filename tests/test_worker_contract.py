@@ -147,6 +147,122 @@ class WorkerApiContractTests(unittest.TestCase):
             """
         )
 
+    def test_all_v2_rule_qualified_candidates_are_live_allowlisted_and_summarized(self) -> None:
+        run_node(
+            f"""
+            import assert from "node:assert/strict";
+            const worker = (await import({json.dumps(WORKER_URI)} + "?qualified-pool-contract")).default;
+            const candidate = (market, code, score, volumeUnit = "share") => ({{
+              qualification_id: `qual_${{market}}_${{code}}`,
+              status: "QUALIFIED",
+              market,
+              code,
+              name: `Qualified ${{code}}`,
+              rule_model_id: "ten-day-audited-rule-ensemble-v2",
+              score_kind: "RULE_QUALIFICATION_SCORE",
+              qualification_score: score,
+              probability: null,
+              calibrated: false,
+              candidate_snapshot: {{
+                code,
+                name: `Qualified ${{code}}`,
+                kline: [],
+                realtime: {{
+                  price: 100 + score / 10,
+                  change_pct: 1.2,
+                  previous_close: 100,
+                  volume: 120000,
+                  volume_unit: volumeUnit,
+                  session: "closed",
+                  session_label: "休市",
+                  source: "Scheduled quote",
+                  source_as_of: "2026-08-25T16:00:00+08:00",
+                  fetched_at: "2026-08-25T22:47:00+08:00",
+                }},
+              }},
+            }});
+            const aapl = candidate("us", "AAPL", 88);
+            const msft = candidate("us", "MSFT", 84);
+            const tencent = candidate("hk", "0700.HK", 81);
+            const latest = {{
+              generated_at: "2026-08-25T22:47:00+08:00",
+              snapshot_key: "2026-08-25_2026-08-25_224700.json",
+              markets: {{
+                us: {{ decision: {{ watchlist: [] }} }},
+                hk: {{ decision: {{ watchlist: [] }} }},
+              }},
+              production_decision: {{
+                contract_version: "production-rule-10d-v1",
+                decision_scope: "global_10d_bounded_recall",
+                action_basis: "candidate_level_rule_qualification_v2",
+                action: "QUALIFIED_PICK",
+                rule_model_id: "ten-day-audited-rule-ensemble-v2",
+                score_kind: "RULE_QUALIFICATION_SCORE",
+                probability: null,
+                calibrated: false,
+                qualified_candidate_count: 3,
+                primary: aapl,
+                qualified_candidates: [aapl, msft, tencent],
+              }},
+            }};
+            const responseFor = (payload) => new Response(JSON.stringify(payload), {{
+              status: 200,
+              headers: {{ "content-type": "application/json" }},
+            }});
+            const envFor = (payload) => ({{ ASSETS: {{ fetch: async (input) => {{
+              const url = new URL(typeof input === "string" ? input : input.url);
+              if (url.pathname === "/data/picks/latest.json") return responseFor(payload);
+              return new Response("missing", {{ status: 404 }});
+            }} }} }});
+
+            const secondaryResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=MSFT"),
+              envFor(latest),
+            );
+            assert.equal(secondaryResponse.status, 200);
+            assert.equal((await secondaryResponse.json()).code, "MSFT");
+
+            const crossMarketResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=hk&code=0700.HK"),
+              envFor(latest),
+            );
+            assert.equal(crossMarketResponse.status, 200);
+            assert.equal((await crossMarketResponse.json()).market, "hk");
+
+            const unrelatedResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=TSLA"),
+              envFor(latest),
+            );
+            assert.equal(unrelatedResponse.status, 404);
+            assert.equal((await unrelatedResponse.json()).error, "LIVE_CODE_NOT_IN_CURRENT_SNAPSHOT");
+
+            const summaryResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/latest-summary"),
+              envFor(latest),
+            );
+            assert.equal(summaryResponse.status, 200);
+            const summary = (await summaryResponse.json()).latest.production_decision;
+            assert.deepEqual(summary.qualified_candidates.map((row) => row.code), ["AAPL", "MSFT", "0700.HK"]);
+            assert.equal(summary.qualified_candidates_truncated, false);
+            assert.equal(Object.hasOwn(summary.primary, "candidate_snapshot"), false);
+            assert.equal(summary.qualified_candidates.every((row) => !Object.hasOwn(row, "candidate_snapshot")), true);
+
+            const mismatched = {{
+              ...latest,
+              production_decision: {{
+                ...latest.production_decision,
+                action_basis: "strict_rule_qualification_v1",
+              }},
+            }};
+            const rejectedResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=MSFT"),
+              envFor(mismatched),
+            );
+            assert.equal(rejectedResponse.status, 404);
+            assert.equal((await rejectedResponse.json()).error, "LIVE_CODE_NOT_IN_CURRENT_SNAPSHOT");
+            """
+        )
+
     def test_live_quotes_are_served_only_from_the_published_snapshot(self) -> None:
         run_node(
             f"""

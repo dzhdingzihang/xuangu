@@ -22,6 +22,37 @@ OUTCOMES = ROOT / "data" / "outcomes"
 REQUIRED_STATIC_FILES = ("index.html", "styles.css", "app.js")
 MANIFEST_VERSION = "selector-manifest-v2"
 MAX_PUBLIC_FULL_SNAPSHOT_DAYS = 30
+MAX_QUALIFIED_SUMMARY_CANDIDATES = 20
+PRODUCTION_CANDIDATE_SUMMARY_FIELDS = (
+    "qualification_id",
+    "status",
+    "market",
+    "code",
+    "name",
+    "rule_model_id",
+    "score_kind",
+    "qualification_score",
+    "score_components",
+    "probability_status",
+    "probability",
+    "calibrated",
+    "expected_net_utility",
+    "legacy_signal",
+    "legacy_recommendation_degree",
+    "v2_rank",
+    "v2_rank_universe_size",
+    "data_quality_score",
+    "event_candidate_scanned",
+    "verified_positive_event_ids",
+    "entry_price",
+    "entry_trade_date",
+    "forecast_end_trade_date",
+    "calendar_id",
+    "calendar_version",
+    "estimated_10d_range",
+    "risk_reward",
+    "blocker_codes",
+)
 DUAL_LOW_SUMMARY_FIELDS = (
     "status",
     "mode",
@@ -464,6 +495,39 @@ def summarize_global_decision(pick: dict) -> dict | None:
     return summary
 
 
+def summarize_production_candidate(candidate: dict | None) -> dict | None:
+    if not isinstance(candidate, dict):
+        return None
+    return {
+        key: candidate.get(key)
+        for key in PRODUCTION_CANDIDATE_SUMMARY_FIELDS
+        if key in candidate
+    }
+
+
+def summarize_qualified_candidates(decision: dict) -> list[dict]:
+    if decision.get("action") != "QUALIFIED_PICK":
+        return []
+    raw_rows = [
+        decision.get("primary"),
+        *((decision.get("qualified_candidates") or []) if isinstance(decision.get("qualified_candidates"), list) else []),
+    ]
+    result: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for row in raw_rows:
+        summary = summarize_production_candidate(row)
+        if not summary or summary.get("status") != "QUALIFIED":
+            continue
+        identity = (str(summary.get("market") or ""), str(summary.get("code") or "").lower())
+        if not all(identity) or identity in seen:
+            continue
+        seen.add(identity)
+        result.append(summary)
+        if len(result) >= MAX_QUALIFIED_SUMMARY_CANDIDATES:
+            break
+    return result
+
+
 def summarize_production_decision(pick: dict) -> dict | None:
     decision = pick.get("production_decision")
     if not isinstance(decision, dict):
@@ -490,44 +554,11 @@ def summarize_production_decision(pick: dict) -> dict | None:
         )
         if key in decision
     }
-    primary = decision.get("primary")
-    if isinstance(primary, dict):
-        summary["primary"] = {
-            key: primary.get(key)
-            for key in (
-                "qualification_id",
-                "status",
-                "market",
-                "code",
-                "name",
-                "rule_model_id",
-                "score_kind",
-                "qualification_score",
-                "score_components",
-                "probability_status",
-                "probability",
-                "calibrated",
-                "expected_net_utility",
-                "legacy_signal",
-                "legacy_recommendation_degree",
-                "v2_rank",
-                "v2_rank_universe_size",
-                "data_quality_score",
-                "event_candidate_scanned",
-                "verified_positive_event_ids",
-                "entry_price",
-                "entry_trade_date",
-                "forecast_end_trade_date",
-                "calendar_id",
-                "calendar_version",
-                "estimated_10d_range",
-                "risk_reward",
-                "blocker_codes",
-            )
-            if key in primary
-        }
-    else:
-        summary["primary"] = None
+    primary = summarize_production_candidate(decision.get("primary"))
+    summary["primary"] = primary
+    qualified = summarize_qualified_candidates(decision)
+    summary["qualified_candidates"] = qualified
+    summary["qualified_candidates_truncated"] = int(decision.get("qualified_candidate_count") or 0) > len(qualified)
     return summary
 
 

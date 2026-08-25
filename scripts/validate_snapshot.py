@@ -29,8 +29,12 @@ VALID_MODEL_STATUSES = {"available", "unavailable"}
 VALID_CANDIDATE_STATUSES = {"ranked", "rejected", "unavailable", "not_applicable"}
 VALID_EXECUTABLE_SCORE_KINDS = {"TEN_DAY_EXPECTED_NET_UTILITY"}
 PRODUCTION_CONTRACT_VERSION = "production-rule-10d-v1"
-PRODUCTION_RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v1"
+PRODUCTION_RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v2"
 PRODUCTION_SCORE_KIND = "RULE_QUALIFICATION_SCORE"
+SUPPORTED_PRODUCTION_RULE_CONTRACTS = {
+    ("strict_rule_qualification_v1", "ten-day-audited-rule-ensemble-v1"),
+    ("candidate_level_rule_qualification_v2", PRODUCTION_RULE_MODEL_ID),
+}
 STATE_SEVERITY = {"READY": 0, "DEGRADED": 1, "BLOCKED": 2}
 VALID_VOLUME_UNITS = {"lot", "share"}
 MARKET_RECALL_TARGETS = {"a_share": 300, "hk": 200, "us": 300}
@@ -80,8 +84,19 @@ TEN_DAY_SHADOW_QUALITY_GATE = {
 EVIDENCE_LOOP_MODEL_VERSIONS = {
     "smart-selector-2026-08-23.3-evidence-loop",
     "smart-selector-2026-08-25.1-production-rule",
+    "smart-selector-2026-08-26.1-candidate-rule",
 }
-PRODUCTION_RULE_MODEL_VERSION = "smart-selector-2026-08-25.1-production-rule"
+PRODUCTION_RULE_MODEL_VERSION = "smart-selector-2026-08-26.1-candidate-rule"
+PRIMARY_SCHEDULE_SLOTS = {(8, 17), (10, 17), (12, 17), (15, 17), (16, 17), (20, 17), (22, 47)}
+FALLBACK_SCHEDULE_MAP = {
+    (8, 47): (8, 17),
+    (10, 47): (10, 17),
+    (12, 47): (12, 17),
+    (15, 47): (15, 17),
+    (16, 47): (16, 17),
+    (20, 47): (20, 17),
+    (23, 17): (22, 47),
+}
 TEN_DAY_RANK_MODEL_ID = "ten-day-excess-rank-shadow-v2"
 TEN_DAY_RANK_LABEL_VERSION = "r10-net-excess-return-v2"
 TEN_DAY_RANK_BENCHMARKS = {"a_share": "510300", "hk": "2800.HK", "us": "SPY"}
@@ -99,6 +114,49 @@ def strict_boolean(value) -> bool:
     return type(value) is bool
 
 
+def _aware_automation_moment(value) -> dt.datetime | None:
+    try:
+        parsed = dt.datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def _append_schedule_automation_errors(snapshot: dict, errors: list[str]) -> None:
+    if snapshot.get("model_version") != PRODUCTION_RULE_MODEL_VERSION:
+        return
+    automation = snapshot.get("automation")
+    automation = automation if isinstance(automation, dict) else {}
+    if str(automation.get("trigger") or "") != "schedule":
+        return
+
+    checkpoint = _aware_automation_moment(automation.get("scheduled_slot"))
+    invocation = _aware_automation_moment(automation.get("scheduled_invocation_slot"))
+    if checkpoint is None:
+        errors.append("scheduled automation.scheduled_slot must be an aware ISO datetime")
+    if invocation is None:
+        errors.append("scheduled automation.scheduled_invocation_slot must be an aware ISO datetime")
+    if checkpoint is None or invocation is None:
+        return
+
+    local_invocation = invocation.astimezone(ZoneInfo("Asia/Shanghai"))
+    invocation_clock = (local_invocation.hour, local_invocation.minute)
+    expected_clock = FALLBACK_SCHEDULE_MAP.get(invocation_clock, invocation_clock)
+    if invocation_clock not in PRIMARY_SCHEDULE_SLOTS and invocation_clock not in FALLBACK_SCHEDULE_MAP:
+        errors.append("automation.scheduled_invocation_slot is not a configured invocation")
+        return
+    expected_checkpoint = local_invocation.replace(
+        hour=expected_clock[0],
+        minute=expected_clock[1],
+        second=0,
+        microsecond=0,
+    )
+    if checkpoint.astimezone(dt.timezone.utc) != expected_checkpoint.astimezone(dt.timezone.utc):
+        errors.append("automation.scheduled_slot does not match its invocation checkpoint")
+
+
 def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> None:
     decision = snapshot.get("production_decision")
     if not isinstance(decision, dict):
@@ -113,10 +171,14 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
         errors.append("production_decision.contract_version is invalid")
     if decision.get("decision_scope") != "global_10d_bounded_recall":
         errors.append("production_decision.decision_scope is invalid")
-    if decision.get("action_basis") != "strict_rule_qualification_v1":
-        errors.append("production_decision.action_basis is invalid")
-    if decision.get("rule_model_id") != PRODUCTION_RULE_MODEL_ID:
-        errors.append("production_decision.rule_model_id is invalid")
+    rule_contract = (decision.get("action_basis"), decision.get("rule_model_id"))
+    if rule_contract not in SUPPORTED_PRODUCTION_RULE_CONTRACTS:
+        errors.append("production_decision rule contract is invalid")
+    if snapshot.get("model_version") == PRODUCTION_RULE_MODEL_VERSION and rule_contract != (
+        "candidate_level_rule_qualification_v2",
+        PRODUCTION_RULE_MODEL_ID,
+    ):
+        errors.append("production_decision rule contract does not match model_version")
     if decision.get("score_kind") != PRODUCTION_SCORE_KIND:
         errors.append("production_decision.score_kind is invalid")
     if decision.get("probability_status") != "NOT_APPLICABLE":
@@ -145,7 +207,7 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
         if not isinstance(row, dict):
             errors.append(f"{prefix} must be an object")
             continue
-        if row.get("rule_model_id") != PRODUCTION_RULE_MODEL_ID:
+        if row.get("rule_model_id") != decision.get("rule_model_id"):
             errors.append(f"{prefix}.rule_model_id is invalid")
         if row.get("score_kind") != PRODUCTION_SCORE_KIND:
             errors.append(f"{prefix}.score_kind is invalid")
@@ -1820,6 +1882,7 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                     errors.append(f"global_decision.market_states.{market_key}.reason_codes are incomplete")
                 if action == "REVIEW_EXECUTABLE_PICK" and published_state != "READY":
                     errors.append(f"REVIEW_EXECUTABLE_PICK requires market_states.{market_key}=READY")
+    _append_schedule_automation_errors(snapshot, errors)
     _append_production_decision_errors(snapshot, errors)
     _append_evidence_loop_errors(snapshot, errors)
     errors.extend(validate_live_candidate_publication(snapshot))

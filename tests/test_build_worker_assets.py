@@ -67,6 +67,49 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         self.assertEqual(primary["code"], "0300.HK")
         self.assertIsNone(primary["probability"])
         self.assertFalse(primary["calibrated"])
+        qualified = summary["production_decision"]["qualified_candidates"]
+        self.assertEqual([row["code"] for row in qualified], ["0300.HK"])
+        self.assertFalse(summary["production_decision"]["qualified_candidates_truncated"])
+
+    def test_history_summary_bounds_and_preserves_the_full_qualified_identity_list(self) -> None:
+        rows = [
+            {
+                "qualification_id": f"qual_{index:024d}",
+                "status": "QUALIFIED",
+                "market": "us",
+                "code": f"Q{index:02d}",
+                "name": f"Qualified {index}",
+                "qualification_score": 90 - index / 10,
+                "score_kind": "RULE_QUALIFICATION_SCORE",
+                "probability": None,
+                "calibrated": False,
+                "candidate_snapshot": {"code": f"Q{index:02d}", "kline": [{"close": index}]},
+            }
+            for index in range(25)
+        ]
+        decision = {
+            "contract_version": "production-rule-10d-v1",
+            "decision_scope": "global_10d_bounded_recall",
+            "action_basis": "strict_rule_qualification_v1",
+            "action": "QUALIFIED_PICK",
+            "score_kind": "RULE_QUALIFICATION_SCORE",
+            "probability": None,
+            "calibrated": False,
+            "qualified_candidate_count": len(rows),
+            "primary": rows[0],
+            "qualified_candidates": rows,
+        }
+
+        summary = build_worker_assets.summarize_production_decision({"production_decision": decision})
+
+        self.assertEqual(
+            len(summary["qualified_candidates"]),
+            build_worker_assets.MAX_QUALIFIED_SUMMARY_CANDIDATES,
+        )
+        self.assertEqual(summary["qualified_candidates"][0]["code"], "Q00")
+        self.assertEqual(summary["qualified_candidates"][-1]["code"], "Q19")
+        self.assertTrue(summary["qualified_candidates_truncated"])
+        self.assertTrue(all("candidate_snapshot" not in row for row in summary["qualified_candidates"]))
 
     def test_full_worker_snapshots_are_bounded_to_representative_decision_days(self) -> None:
         summaries = []

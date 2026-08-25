@@ -73,7 +73,7 @@ HK_US_KLINE_CACHE = CACHE / "runtime-cache" / "hk_us_daily.json"
 MARKET_RECALL_EXPANSION_PATH = CACHE / "universes" / "market_recall_expansion_v2.json"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-08-25.1-production-rule"
+MODEL_VERSION = "smart-selector-2026-08-26.1-candidate-rule"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
@@ -2285,6 +2285,7 @@ def automation_metadata() -> dict:
     return {
         "trigger": os.environ.get("AUTOMATION_TRIGGER") or os.environ.get("GITHUB_EVENT_NAME") or "local",
         "scheduled_slot": os.environ.get("SCHEDULED_SLOT") or os.environ.get("SCHEDULE_GATE_SLOT") or None,
+        "scheduled_invocation_slot": os.environ.get("SCHEDULED_INVOCATION_SLOT") or None,
         "generation_attempt": generation_attempt,
         "run_id": run_id,
     }

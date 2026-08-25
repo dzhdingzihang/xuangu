@@ -35,6 +35,7 @@ const SCHEDULED_REFRESH_CHECKPOINTS = [...WEEKDAY_CHECKPOINTS, ...FALLBACK_CHECK
     leftHour * 60 + leftMinute - (rightHour * 60 + rightMinute));
 const LIVE_MARKETS = new Set(["a_share", "hk", "us"]);
 const LIVE_CACHE_TTL_MS = 10_000;
+const MAX_QUALIFIED_SUMMARY_CANDIDATES = 20;
 
 function withSecurityHeaders(response) {
   const headers = new Headers(response.headers);
@@ -240,16 +241,46 @@ function validIsoDate(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text;
 }
 
+function productionQualifiedCandidateRows(snapshot, market = null) {
+  const decision = snapshot?.production_decision;
+  if (!isProductionRuleDecision(decision) || decision.action !== "QUALIFIED_PICK") return [];
+  const rawRows = [decision.primary, ...(Array.isArray(decision.qualified_candidates) ? decision.qualified_candidates : [])];
+  const rows = [];
+  const seen = new Set();
+  for (const row of rawRows) {
+    if (!row || typeof row !== "object" || Array.isArray(row) || row.status !== "QUALIFIED") continue;
+    const rowMarket = String(row.market || "");
+    if (!LIVE_MARKETS.has(rowMarket)) continue;
+    const code = normalizeLiveCode(rowMarket, row.code || row.symbol);
+    if (!code) continue;
+    const key = `${rowMarket}:${code}`;
+    if (seen.has(key)) continue;
+    const candidate = row.candidate_snapshot || row;
+    if (normalizeLiveCode(rowMarket, candidate.code || candidate.symbol) !== code) continue;
+    if (
+      !Number.isFinite(row.qualification_score)
+      || row.rule_model_id !== decision.rule_model_id
+      || row.score_kind !== decision.score_kind
+      || !(row.probability === undefined || row.probability === null)
+      || !(row.calibrated === undefined || row.calibrated === false)
+    ) continue;
+    seen.add(key);
+    rows.push({ market: rowMarket, candidate });
+  }
+  const publishedCount = Number(decision.qualified_candidate_count);
+  if (!Number.isInteger(publishedCount) || publishedCount <= 0 || publishedCount !== rows.length) return [];
+  return rows
+    .filter((row) => !market || row.market === market)
+    .map((row) => row.candidate);
+}
+
 function snapshotCandidateRows(snapshot, market) {
   const section = snapshot?.markets?.[market]
     || (market === "a_share" ? { decision: snapshot?.decision || {} } : {});
   const decision = section?.decision || {};
   const watchlist = Array.isArray(decision.watchlist) ? decision.watchlist : [];
   const rows = [decision.primary, decision.blocked_candidate, ...watchlist];
-  const productionPrimary = snapshot?.production_decision?.primary;
-  if (productionPrimary && productionPrimary.market === market) {
-    rows.push(productionPrimary.candidate_snapshot || productionPrimary);
-  }
+  rows.push(...productionQualifiedCandidateRows(snapshot, market));
   for (const globalCandidate of [
     snapshot?.global_decision?.primary,
     snapshot?.global_decision?.research_priority,
@@ -380,12 +411,21 @@ function isGlobalTenDayDecision(decision) {
 }
 
 function isProductionRuleDecision(decision) {
+  const ruleModelPairValid = Boolean(
+    decision
+    && (
+      (decision.action_basis === "strict_rule_qualification_v1"
+        && decision.rule_model_id === "ten-day-audited-rule-ensemble-v1")
+      || (decision.action_basis === "candidate_level_rule_qualification_v2"
+        && decision.rule_model_id === "ten-day-audited-rule-ensemble-v2")
+    )
+  );
   return Boolean(
     decision
     && typeof decision === "object"
     && decision.contract_version === "production-rule-10d-v1"
     && decision.decision_scope === "global_10d_bounded_recall"
-    && decision.action_basis === "strict_rule_qualification_v1"
+    && ruleModelPairValid
     && ["QUALIFIED_PICK", "NO_QUALIFIED_PICK"].includes(decision.action)
     && decision.score_kind === "RULE_QUALIFICATION_SCORE"
     && decision.probability === null
@@ -393,10 +433,42 @@ function isProductionRuleDecision(decision) {
   );
 }
 
+function summarizeProductionCandidate(candidate) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  const fields = [
+    "qualification_id", "status", "market", "code", "name", "rule_model_id",
+    "score_kind", "qualification_score", "score_components", "probability_status",
+    "probability", "calibrated", "expected_net_utility", "legacy_signal",
+    "legacy_recommendation_degree", "v2_rank", "v2_rank_universe_size",
+    "data_quality_score", "event_candidate_scanned", "verified_positive_event_ids",
+    "entry_price", "entry_trade_date", "forecast_end_trade_date", "calendar_id",
+    "calendar_version", "estimated_10d_range", "risk_reward", "blocker_codes",
+  ];
+  return Object.fromEntries(fields.filter((field) => Object.hasOwn(candidate, field)).map((field) => [field, candidate[field]]));
+}
+
+function summarizeProductionQualifiedCandidates(decision) {
+  if (!isProductionRuleDecision(decision) || decision.action !== "QUALIFIED_PICK") return [];
+  const rawRows = [decision.primary, ...(Array.isArray(decision.qualified_candidates) ? decision.qualified_candidates : [])];
+  const result = [];
+  const seen = new Set();
+  for (const row of rawRows) {
+    const summary = summarizeProductionCandidate(row);
+    if (!summary || summary.status !== "QUALIFIED") continue;
+    const key = `${summary.market || ""}:${String(summary.code || "").toLowerCase()}`;
+    if (!summary.market || !summary.code || seen.has(key)) continue;
+    seen.add(key);
+    result.push(summary);
+    if (result.length >= MAX_QUALIFIED_SUMMARY_CANDIDATES) break;
+  }
+  return result;
+}
+
 function summarizePick(pick) {
   const legacySummary = summarizeDecision(pick.decision || {});
   const globalDecision = isGlobalTenDayDecision(pick.global_decision) ? pick.global_decision : null;
   const productionDecision = isProductionRuleDecision(pick.production_decision) ? pick.production_decision : null;
+  const qualifiedCandidates = productionDecision ? summarizeProductionQualifiedCandidates(productionDecision) : [];
   const isGlobal = Boolean(globalDecision);
   const action = isGlobal ? globalDecision.action || "NO_VALID_PICK" : "LEGACY_ONLY";
   const summary = {
@@ -444,7 +516,9 @@ function summarizePick(pick) {
       probability: null,
       calibrated: false,
       expected_net_utility: null,
-      primary: productionDecision.primary || null,
+      primary: summarizeProductionCandidate(productionDecision.primary),
+      qualified_candidates: qualifiedCandidates,
+      qualified_candidates_truncated: Number(productionDecision.qualified_candidate_count || 0) > qualifiedCandidates.length,
       qualified_candidate_count: productionDecision.qualified_candidate_count || 0,
       rejected_candidate_count: productionDecision.rejected_candidate_count || 0,
       evaluated_candidate_count: productionDecision.evaluated_candidate_count || 0,

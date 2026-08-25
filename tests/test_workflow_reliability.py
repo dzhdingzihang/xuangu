@@ -140,15 +140,17 @@ class WorkflowReliabilityTests(unittest.TestCase):
 
     def test_workflow_has_source_aware_fallbacks_and_stale_push_guard(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertEqual(workflow.count("- cron:"), 4)
-        self.assertIn('cron: "17 0,2,4,7,8,12 * * 1-5"', workflow)
+        self.assertEqual(workflow.count("- cron:"), 14)
+        for hour in ("0", "2", "4", "7", "8", "12"):
+            self.assertIn(f'cron: "17 {hour} * * 1-5"', workflow)
+            self.assertIn(f'cron: "47 {hour} * * 1-5"', workflow)
         self.assertIn('cron: "47 14 * * 1-5"', workflow)
-        self.assertIn('cron: "47 0,2,4,7,8,12 * * 1-5"', workflow)
         self.assertIn('cron: "17 15 * * 1-5"', workflow)
         self.assertNotIn('cron: "58 0,1,2,4,5,6,15 * * 1-5"', workflow)
         self.assertNotIn('cron: "28 1,2,3,5,6,7,16 * * 1-5"', workflow)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn("SCHEDULE_GATE_STATUS_URL: https://xuangu.alixjd.com/api/latest", workflow)
+        self.assertIn("SCHEDULE_GATE_CRON: ${{ github.event.schedule }}", workflow)
         self.assertIn("--adopt-newer-live", workflow)
         self.assertIn("for attempt in 1 2 3", workflow)
         self.assertIn("python scripts/settle_outcomes.py", workflow)
@@ -162,6 +164,13 @@ class WorkflowReliabilityTests(unittest.TestCase):
         )
         self.assertIn("AUTOMATION_TRIGGER: ${{ github.event_name }}", workflow)
         self.assertIn("SCHEDULED_SLOT: ${{ steps.schedule_gate.outputs.slot }}", workflow)
+        self.assertIn(
+            "SCHEDULED_INVOCATION_SLOT: ${{ steps.schedule_gate.outputs.invocation_slot }}",
+            workflow,
+        )
+        self.assertIn("python scripts/deployment_order_guard.py data/picks/latest.json", workflow)
+        self.assertIn("steps.publish_guard.outputs.should_publish == 'true'", workflow)
+        self.assertIn("should_publish: ${{ steps.publish_guard.outputs.should_publish }}", workflow)
         self.assertIn('EVENT_SCAN_CANDIDATES_PER_MARKET: "16"', workflow)
         self.assertIn('GENERATION_ATTEMPT="${attempt}" python server.py --once --force', workflow)
         self.assertIn('python server.py --once --force --quiet', workflow)
@@ -203,10 +212,11 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertIn("Archive push attempt ${attempt}/3", workflow)
         self.assertIn("Archive failed after 3 bounded attempts", workflow)
         self.assertIn("[skip ci]", workflow)
-        self.assertIn("daily_2247_or_executable_v1", workflow)
-        self.assertIn('daily_checkpoint = trigger == "schedule" and "T22:47:" in scheduled_slot', workflow)
-        self.assertIn('global_decision.get("action") == "REVIEW_EXECUTABLE_PICK"', workflow)
+        self.assertIn("from scripts.snapshot_archive_policy import ARCHIVE_POLICY, archive_reasons", workflow)
+        self.assertIn("reasons = archive_reasons(snapshot)", workflow)
+        self.assertIn('"archive_reasons": reasons', workflow)
         self.assertIn("if: steps.snapshot_bundle.outcome == 'success'", workflow)
+        self.assertIn("needs.deploy.outputs.should_publish != 'false'", workflow)
         self.assertNotIn("continue-on-error", workflow)
         self.assertNotIn("git-auto-commit-action", workflow)
 

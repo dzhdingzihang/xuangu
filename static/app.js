@@ -323,29 +323,107 @@ function researchCandidateSnapshot(snapshot, market) {
   return priorityCode && priorityCode === candidateCode ? candidate : null;
 }
 
+function productionContractValid(decision) {
+  const ruleModelPairValid = Boolean(
+    decision
+    && (
+      (decision.action_basis === "strict_rule_qualification_v1"
+        && decision.rule_model_id === "ten-day-audited-rule-ensemble-v1")
+      || (decision.action_basis === "candidate_level_rule_qualification_v2"
+        && decision.rule_model_id === "ten-day-audited-rule-ensemble-v2")
+    )
+  );
+  return Boolean(
+    decision
+    && typeof decision === "object"
+    && decision.contract_version === "production-rule-10d-v1"
+    && decision.decision_scope === "global_10d_bounded_recall"
+    && ruleModelPairValid
+    && ["QUALIFIED_PICK", "NO_QUALIFIED_PICK"].includes(String(decision.action || ""))
+    && decision.score_kind === "RULE_QUALIFICATION_SCORE"
+    && decision.probability === null
+    && decision.calibrated === false
+  );
+}
+
+function productionQualifiedRows(snapshot = state.snapshot, market = null) {
+  const decision = snapshot?.production_decision;
+  if (!productionContractValid(decision) || decision.action !== "QUALIFIED_PICK") return [];
+  const rawRows = [decision.primary, ...(Array.isArray(decision.qualified_candidates) ? decision.qualified_candidates : [])];
+  const rows = [];
+  const seen = new Set();
+  for (const primary of rawRows) {
+    if (!primary || typeof primary !== "object" || primary.status !== "QUALIFIED") continue;
+    const rowMarket = String(primary.market || "");
+    const rowCode = String(primary.code || primary.symbol || "").toLowerCase();
+    const embedded = primary.candidate_snapshot;
+    const embeddedCode = String(embedded?.code || embedded?.symbol || "").toLowerCase();
+    const score = primary.qualification_score;
+    const valid = MARKET_ORDER.includes(rowMarket)
+      && rowCode
+      && typeof score === "number"
+      && Number.isFinite(score)
+      && primary.rule_model_id === decision.rule_model_id
+      && primary.score_kind === decision.score_kind
+      && (primary.probability === undefined || primary.probability === null)
+      && (primary.calibrated === undefined || primary.calibrated === false)
+      && (!embedded || (typeof embedded === "object" && embeddedCode === rowCode));
+    if (!valid) continue;
+    const key = `${rowMarket}:${rowCode}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const sourceCandidate = embedded || primary;
+    rows.push({
+      market: rowMarket,
+      code: rowCode,
+      primary,
+      candidate: {
+        ...sourceCandidate,
+        production_qualification: {
+          qualification_id: primary.qualification_id || null,
+          qualification_score: score,
+          rule_model_id: primary.rule_model_id || decision.rule_model_id || null,
+          score_kind: primary.score_kind || decision.score_kind,
+        },
+      },
+    });
+  }
+  const publishedCount = Number(decision.qualified_candidate_count);
+  if (!Number.isInteger(publishedCount) || publishedCount <= 0 || publishedCount !== rows.length) return [];
+  return market ? rows.filter((row) => row.market === market) : rows;
+}
+
 function candidatesFor(snapshot, market) {
   const decision = marketDecision(snapshot, market);
   const researchCandidate = researchCandidateSnapshot(snapshot, market);
-  const productionPrimary = snapshot?.production_decision?.primary;
-  const productionCandidate = productionPrimary?.market === market
-    ? productionPrimary.candidate_snapshot || productionPrimary
-    : null;
-  const rows = [decision.primary, decision.blocked_candidate, ...(decision.watchlist || []), productionCandidate, researchCandidate].filter(Boolean);
-  const seen = new Set();
-  return rows.filter((row) => {
+  const qualifiedRows = productionQualifiedRows(snapshot, market);
+  const rows = [
+    ...qualifiedRows.map((row) => row.candidate),
+    decision.primary,
+    decision.blocked_candidate,
+    ...(decision.watchlist || []),
+    researchCandidate,
+  ].filter(Boolean);
+  const result = [];
+  const byKey = new Map();
+  for (const row of rows) {
     const key = candidateId(row, market);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+    if (!byKey.has(key)) {
+      byKey.set(key, result.length);
+      result.push(row);
+      continue;
+    }
+    const index = byKey.get(key);
+    const existing = result[index];
+    if (existing?.production_qualification) result[index] = { ...row, ...existing };
+  }
+  return result;
 }
 
 function candidateDecisionRole(candidate, market) {
-  const qualified = state.snapshot?.production_decision?.primary;
-  if (qualified && qualified.market === market
-    && candidateId(qualified, market) === candidateId(candidate, market)) return "qualified";
-  const decision = marketDecision(state.snapshot, market);
   const key = candidateId(candidate, market);
+  if (productionQualifiedRows(state.snapshot, market).some((row) => candidateId(row.candidate, market) === key)) return "qualified";
+  const decision = marketDecision(state.snapshot, market);
   if (decision.primary && candidateId(decision.primary, market) === key) return "primary";
   if (decision.blocked_candidate && candidateId(decision.blocked_candidate, market) === key) return "blocked";
   const researchCandidate = researchCandidateSnapshot(state.snapshot, market);
@@ -372,23 +450,11 @@ function productionDecisionTruth(snapshot = state.snapshot) {
   const serverPrimary = serverDecision?.primary;
   const primaryMarket = String(serverPrimary?.market || "");
   const primaryCode = String(serverPrimary?.code || serverPrimary?.symbol || "").toLowerCase();
-  const embeddedCandidate = serverPrimary?.candidate_snapshot;
-  const embeddedCode = String(embeddedCandidate?.code || embeddedCandidate?.symbol || "").toLowerCase();
+  const qualifiedRows = productionQualifiedRows(snapshot);
+  const qualifiedPrimary = qualifiedRows.find((row) => row.market === primaryMarket && row.code === primaryCode) || null;
   const qualificationScore = serverPrimary?.qualification_score;
   const finiteScore = typeof qualificationScore === "number" && Number.isFinite(qualificationScore);
-  const baseContractValid = Boolean(
-    serverDecision
-    && serverDecision.contract_version === "production-rule-10d-v1"
-    && ["QUALIFIED_PICK", "NO_QUALIFIED_PICK"].includes(serverAction)
-    && serverDecision.score_kind === "RULE_QUALIFICATION_SCORE"
-    && serverDecision.probability === null
-    && serverDecision.calibrated === false
-  );
-  const embeddedCandidateValid = !embeddedCandidate || Boolean(
-    typeof embeddedCandidate === "object"
-    && primaryCode
-    && embeddedCode === primaryCode
-  );
+  const baseContractValid = productionContractValid(serverDecision);
   const primaryDoesNotClaimProbability = Boolean(
     serverPrimary
     && (serverPrimary.probability === undefined || serverPrimary.probability === null)
@@ -399,15 +465,22 @@ function productionDecisionTruth(snapshot = state.snapshot) {
     && MARKET_ORDER.includes(primaryMarket)
     && primaryCode
     && finiteScore
-    && embeddedCandidateValid
+    && qualifiedPrimary
     && primaryDoesNotClaimProbability
+  );
+  const publishedCount = Number(serverDecision?.qualified_candidate_count);
+  const countValid = serverAction !== "QUALIFIED_PICK" || (
+    Number.isInteger(publishedCount)
+    && publishedCount > 0
+    && publishedCount === qualifiedRows.length
   );
   const blockerCodes = Array.isArray(serverDecision?.blocker_codes) ? [...serverDecision.blocker_codes] : [];
   if (!serverDecision) blockerCodes.push("PRODUCTION_DECISION_MISSING");
   if (serverDecision && !baseContractValid) blockerCodes.push("PRODUCTION_DECISION_CONTRACT_INVALID");
   if (serverAction === "QUALIFIED_PICK" && !primaryValid) blockerCodes.push("PRODUCTION_PRIMARY_INVALID");
-  const qualified = baseContractValid && serverAction === "QUALIFIED_PICK" && primaryValid;
-  const candidate = qualified ? (embeddedCandidate || serverPrimary) : null;
+  if (serverAction === "QUALIFIED_PICK" && !countValid) blockerCodes.push("PRODUCTION_QUALIFIED_COUNT_MISMATCH");
+  const qualified = baseContractValid && serverAction === "QUALIFIED_PICK" && primaryValid && countValid;
+  const candidate = qualified ? qualifiedPrimary.candidate : null;
   return {
     action: qualified ? "QUALIFIED_PICK" : "NO_QUALIFIED_PICK",
     serverAction,
@@ -416,7 +489,8 @@ function productionDecisionTruth(snapshot = state.snapshot) {
     probability: null,
     calibrated: false,
     qualificationScore: qualified ? qualificationScore : null,
-    qualifiedCount: qualified ? 1 : 0,
+    qualifiedCount: qualified ? qualifiedRows.length : 0,
+    qualifiedRows: qualified ? qualifiedRows : [],
     blockerCodes: [...new Set(blockerCodes)],
     primary: qualified ? serverPrimary : null,
     qualified: qualified ? { market: primaryMarket, candidate, primary: serverPrimary } : null,
@@ -1303,6 +1377,9 @@ function filteredCandidates() {
   });
   if (market !== "all") return rows;
   return rows.sort((left, right) => {
+    const rolePriority = { qualified: 0, primary: 1, research: 2, watchlist: 3, blocked: 4 };
+    const roleDelta = (rolePriority[left.decisionRole] ?? 5) - (rolePriority[right.decisionRole] ?? 5);
+    if (roleDelta) return roleDelta;
     const evidenceLevel = (row) => {
       const symbol = String(row.candidate?.code || row.candidate?.symbol || "").toLowerCase();
       if (automaticExternalEvents().some((event) => event.market === row.market && String(event.symbol || "").toLowerCase() === symbol)) return 1;
@@ -1319,6 +1396,24 @@ function filteredCandidates() {
     if (rankDelta) return rankDelta;
     return num(candidateScore(right.candidate), -Infinity) - num(candidateScore(left.candidate), -Infinity);
   });
+}
+
+function syncPreferredCandidate({ revealQualified = false } = {}) {
+  const production = productionDecisionTruth();
+  if (production.qualified) {
+    const key = candidateId(production.qualified.candidate, production.qualified.market);
+    const row = allCandidates().find((item) => candidateId(item.candidate, item.market) === key);
+    if (row) {
+      state.candidateKey = key;
+      if (revealQualified) state.candidateFilters = { market: "all", risk: "all", route: "all", query: "" };
+      return row;
+    }
+  }
+  const current = state.candidateKey ? rowForKey(state.candidateKey) : null;
+  if (current) return current;
+  const fallback = researchPriorityCandidate() || allCandidates()[0] || null;
+  state.candidateKey = fallback ? candidateId(fallback.candidate, fallback.market) : "";
+  return fallback;
 }
 
 function selectedCandidateRow(rows) {
@@ -1784,7 +1879,7 @@ function historyDetail(item) {
   const shadowStatus = shadowOutcomeStatus(item);
   const shadowEvidence = shadowStatus ? `<div class="callout info">${icon("ph-flask")}<div><strong>${shadowStatus === "PENDING" ? "Shadow·PENDING" : "Shadow·SETTLED"}</strong><br>这是 research_priority 的影子研究台账，仅用于验证研究排序；不计入可执行绩效、胜率或收益。${item.shadow_outcome?.prediction_id ? ` Prediction ID：${esc(item.shadow_outcome.prediction_id)}。` : ""}</div></div>` : "";
   const officialEvidence = globalPrimary ? `<div class="detail-section"><div class="section-heading"><h3>正式十日预测</h3>${historyFormalStatusTag(item)}</div><div class="detail-score-grid"><div><small>全局首选</small><strong>${esc(globalPrimary.name || "--")}</strong><span>${esc(globalPrimary.market || "--")} · ${esc(globalPrimary.code || globalPrimary.symbol || "--")}</span></div><div><small>P(R10 &gt; 0)</small><strong>${globalPrimary.probability == null ? "--" : `${fmt(num(globalPrimary.probability) * 100, 1)}%`}</strong><span>已校准模型概率</span></div><div><small>Prediction ID</small><strong class="mono">${esc(globalPrimary.prediction_id || "--")}</strong><span>${esc(globalPrimary.model_id || "--")}</span></div><div><small>Label</small><strong>${esc(globalPrimary.label_version || "--")}</strong><span>结算必须完全匹配</span></div></div></div>` : "";
-  const productionEvidence = productionPrimary ? `<div class="detail-section"><div class="section-heading"><h3>生产规则资格记录</h3>${historyProductionStatusTag(item)}</div><div class="detail-score-grid"><div><small>规则候选</small><strong>${esc(productionPrimary.name || "--")}</strong><span>${esc(productionPrimary.market || "--")} · ${esc(productionPrimary.code || productionPrimary.symbol || "--")}</span></div><div><small>规则资格分</small><strong>${fmt(productionPrimary.qualification_score, 1)} 分</strong><span>非上涨概率</span></div><div><small>Qualification ID</small><strong class="mono">${esc(productionPrimary.qualification_id || item.qualification_id || "--")}</strong><span>${esc(productionPrimary.rule_model_id || "ten-day-audited-rule-ensemble-v1")}</span></div><div><small>10 日风险收益</small><strong>${fmt(productionPrimary.risk_reward?.ratio, 2)}</strong><span>${fmt(productionPrimary.estimated_10d_range?.low_pct, 1)}% ~ +${fmt(productionPrimary.estimated_10d_range?.high_pct, 1)}%</span></div></div><p class="fine-print">该记录用于后续独立复盘；当前没有把规则资格分包装成概率，也不进入校准模型的 Brier、ECE、胜率或收益分母。</p></div>` : "";
+  const productionEvidence = productionPrimary ? `<div class="detail-section"><div class="section-heading"><h3>生产规则资格记录</h3>${historyProductionStatusTag(item)}</div><div class="detail-score-grid"><div><small>规则候选</small><strong>${esc(productionPrimary.name || "--")}</strong><span>${esc(productionPrimary.market || "--")} · ${esc(productionPrimary.code || productionPrimary.symbol || "--")}</span></div><div><small>规则资格分</small><strong>${fmt(productionPrimary.qualification_score, 1)} 分</strong><span>非上涨概率</span></div><div><small>Qualification ID</small><strong class="mono">${esc(productionPrimary.qualification_id || item.qualification_id || "--")}</strong><span>${esc(productionPrimary.rule_model_id || "ten-day-audited-rule-ensemble-v2")}</span></div><div><small>10 日风险收益</small><strong>${fmt(productionPrimary.risk_reward?.ratio, 2)}</strong><span>${fmt(productionPrimary.estimated_10d_range?.low_pct, 1)}% ~ +${fmt(productionPrimary.estimated_10d_range?.high_pct, 1)}%</span></div></div><p class="fine-print">该记录用于后续独立复盘；当前没有把规则资格分包装成概率，也不进入校准模型的 Brier、ECE、胜率或收益分母。</p></div>` : "";
   return `<article class="detail-panel history-detail"><header class="detail-header"><div><div class="eyebrow">${historyKindLabel(item)} 档案 · ${esc(itemKey || "--")}</div><h2 class="detail-title">${esc(headerScope)} · ${esc(headerName)}</h2><p class="detail-subtitle">信号日 ${esc(item.signal_date || "--")} · ${historyTargetLabel(item)} ${esc(item.target_date || "--")} · 生成 ${esc(dateTime(item.generated_at))}</p></div><div class="history-row-statuses">${historyFormalStatusTag(item)}${shadowOutcomeTag(item)}</div></header>
     ${productionEvidence}
     ${officialEvidence}
@@ -2048,7 +2143,7 @@ function renderModel() {
   const usRecallCopy = dynamicRecallCopy("us", usRecall, 300);
   root.innerHTML = `
     <section class="objective-formula"><div><small>核心优化目标</small><strong>排序目标 ＝ 预期 10 日股票净收益 − 同期可投资宽基净收益</strong><p>校准概率与超额收益 V2 继续积累样本；独立生产规则轨只在 Legacy、V2 排名、数据质量、官方事件和风险收益全部过门后发布规则合格候选。</p></div><span>HORIZON · 10 TRADING DAYS</span></section>
-    <section class="panel shadow-model-card production-rule-model-card"><header class="panel-header"><div><h3 class="panel-title">生产规则资格模型 · V1</h3><p class="panel-subtitle">与校准概率轨独立；服务端发布，浏览器不补选、不改阈值</p></div><span class="status-pill ${production.qualified ? "positive" : "warning"}">${esc(production.action)}</span></header><div class="shadow-model-metrics"><div><small>当前规则候选</small><strong>${esc(productionPrimary?.name || "无")}</strong><span>${esc(productionPrimary ? `${productionPrimary.market} · ${productionPrimary.code}` : production.blockerCodes.join(" · ") || "未通过")}</span></div><div><small>规则资格分</small><strong>${production.qualificationScore === null ? "—" : `${fmt(production.qualificationScore, 1)} 分`}</strong><span>RULE_QUALIFICATION_SCORE · 非概率</span></div><div><small>Legacy 门槛</small><strong>A/H/US</strong><span>64 / 63 / 64，且必须 BUY_CANDIDATE</span></div><div><small>V2 结构</small><strong>Top 20%</strong><span>市场内排名，不跨币种硬比</span></div><div><small>官方事件</small><strong>≥ 1 条</strong><span>逐股扫描且 event_id 可审计</span></div><div><small>风险收益</small><strong>≥ 1.20</strong><span>上行 A/H ≥5%，US ≥6%；下行受限</span></div><div><small>概率声明</small><strong>无</strong><span>probability=null · calibrated=false</span></div><div><small>历史身份</small><strong class="mono">${esc(productionPrimary?.qualification_id || "—")}</strong><span>随不可变快照保存</span></div></div><footer>${icon("ph-shield-check")}<span>规则轨只忽略“概率模型尚未就绪/缺预测”两类阻断；重大负面、非正净效用、数据缺口、事件缺失和风险收益不足仍会阻断。</span></footer></section>
+    <section class="panel shadow-model-card production-rule-model-card"><header class="panel-header"><div><h3 class="panel-title">生产规则资格模型 · V2</h3><p class="panel-subtitle">与校准概率轨独立；服务端发布，浏览器不补选、不改阈值</p></div><span class="status-pill ${production.qualified ? "positive" : "warning"}">${esc(production.action)}</span></header><div class="shadow-model-metrics"><div><small>当前规则候选</small><strong>${esc(productionPrimary?.name || "无")}</strong><span>${esc(productionPrimary ? `${productionPrimary.market} · ${productionPrimary.code}` : production.blockerCodes.join(" · ") || "未通过")}</span></div><div><small>规则资格分</small><strong>${production.qualificationScore === null ? "—" : `${fmt(production.qualificationScore, 1)} 分`}</strong><span>RULE_QUALIFICATION_SCORE · 非概率</span></div><div><small>Legacy 逐股门槛</small><strong>A/H/US</strong><span>推荐度 64 / 63 / 64；市场动作仅溯源</span></div><div><small>V2 结构</small><strong>Top 20%</strong><span>市场内排名，不跨币种硬比</span></div><div><small>官方事件</small><strong>≥ 1 条</strong><span>逐股扫描且 event_id 可审计</span></div><div><small>风险收益</small><strong>≥ 1.20</strong><span>上行 A/H ≥5%，US ≥6%；下行受限</span></div><div><small>概率声明</small><strong>无</strong><span>probability=null · calibrated=false</span></div><div><small>历史身份</small><strong class="mono">${esc(productionPrimary?.qualification_id || "—")}</strong><span>随不可变快照保存</span></div></div><footer>${icon("ph-shield-check")}<span>规则轨只忽略“概率模型尚未就绪/缺预测”两类阻断；重大负面、非正净效用、数据缺口、事件缺失和风险收益不足仍会阻断。</span></footer></section>
     ${renderTenDayModelCard(tenDay)}
     ${renderRankModelCard(rankModel)}
   <section class="panel model-pipeline-panel"><header class="panel-header"><div><h3 class="panel-title">7 阶段决策流水线</h3><p class="panel-subtitle">任一关键门禁失败，自动回退为 NO_VALID_PICK</p></div>${badge(snapshot.selector_mode || "legacy_active", "purple")}</header><ol class="pipeline-list pipeline-seven"><li><span>01</span><div><b>三市场有界动态召回</b><p>A / 港 / 美候选覆盖与召回来源。</p></div></li><li><span>02</span><div><b>交易与数据门禁</b><p>流动性、停牌、完整性和新鲜度。</p></div></li><li><span>03</span><div><b>因子和事件特征</b><p>Legacy、V2、双低与外部证据分开。</p></div></li><li><span>04</span><div><b>分市场 10 日模型</b><p>${esc(tenDayPipelineCopy)}</p></div></li><li><span>05</span><div><b>概率校准</b><p>${tenDayLive ? "P(R10>0) 已校准并记录模型版本。" : tenDay.shadowReady ? "已发布留出 Brier / ECE / AUC，但当前影子运行不授权正式动作。" : tenDay.shadowRejected ? "留出 Brier Skill、AUC、ECE 或 Top 10% 超额未同时达标，概率不进入排序。" : "P(R10>0) 留出校准数据积累中。"}</p></div></li><li><span>06</span><div><b>跨市场效用排名</b><p>收益、风险、成本与不确定性统一比较。</p></div></li><li class="is-gate"><span>07</span><div><b>可执行性复核</b><p>价格、仓位、事件时点与尾部风险。</p></div></li></ol></section>
@@ -2228,6 +2323,7 @@ async function refreshAll() {
     state.snapshot = snapshot;
     state.historySnapshot = null;
     state.historySnapshotKey = "";
+    syncPreferredCandidate({ revealQualified: true });
     renderRail(); updateTopbar(); renderActiveTab();
     showToast("最新已发布快照已刷新。Cloudflare 页面不会在线重算选股。", "success");
   } catch (error) {
@@ -2274,10 +2370,7 @@ async function pollStatus() {
       state.historyError = "";
       state.historySnapshot = null;
       state.historySnapshotKey = "";
-      if (!state.candidateKey || !allCandidates().some((row) => candidateId(row.candidate, row.market) === state.candidateKey)) {
-        const first = researchPriorityCandidate() || allCandidates()[0];
-        state.candidateKey = first ? candidateId(first.candidate, first.market) : "";
-      }
+      syncPreferredCandidate({ revealQualified: true });
       renderRail();
       updateTopbar();
       renderActiveTab();
@@ -2405,8 +2498,7 @@ async function initialize() {
     state.historyError = historyResult.status === "fulfilled" ? "" : (historyResult.reason?.message || "历史清单读取失败");
     if (latestResult.status !== "fulfilled") throw latestResult.reason;
     state.snapshot = latestResult.value;
-    const first = researchPriorityCandidate() || allCandidates()[0];
-    if (first) state.candidateKey = candidateId(first.candidate, first.market);
+    syncPreferredCandidate({ revealQualified: true });
     renderRail();
     switchTab(location.hash.slice(1) || "decision", false);
     window.setTimeout(pollStatus, 1500);

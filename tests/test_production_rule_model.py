@@ -100,9 +100,15 @@ class ProductionRuleModelTests(unittest.TestCase):
         self.assertNotIn("TEN_DAY_MODEL_NOT_READY", evaluated["blocker_codes"])
         self.assertNotIn("TEN_DAY_PREDICTION_MISSING", evaluated["blocker_codes"])
 
+    def test_market_level_legacy_action_is_diagnostic_not_a_candidate_gate(self):
+        evaluated = build_production_decision(snapshot(candidate(legacy_signal="NO_TRADE")))["evaluated_candidates"][0]
+
+        self.assertEqual(evaluated["status"], "QUALIFIED")
+        self.assertEqual(evaluated["legacy_signal"], "NO_TRADE")
+        self.assertNotIn("LEGACY_BUY_SIGNAL_REQUIRED", evaluated["blocker_codes"])
+
     def test_market_specific_thresholds_and_required_rule_gates_fail_closed(self):
         cases = {
-            "legacy_buy": (candidate(legacy_signal="NO_TRADE"), "LEGACY_BUY_SIGNAL_REQUIRED"),
             "hk_recommendation": (candidate(legacy_recommendation_degree=62.99), "LEGACY_RECOMMENDATION_BELOW_THRESHOLD"),
             "v2_top_twenty": (candidate(v2_rank=40), "V2_TOP_PERCENTILE_REQUIRED"),
             "event_scan": (candidate(event_candidate_scanned=False), "EVENT_CANDIDATE_NOT_SCANNED"),

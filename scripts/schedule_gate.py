@@ -21,6 +21,27 @@ SLOTS = [
     (20, 17),
     (22, 47),
 ]
+# ``github.event.schedule`` identifies the cron invocation that GitHub meant
+# to run even when the runner starts much later.  Keep that invocation moment
+# separate from the primary data checkpoint: a 23:17 health fallback still
+# repairs the 22:47 sample, but it is logically newer than a delayed 22:47
+# primary invocation and must not be overwritten by it.
+CRON_INVOCATION_SLOTS = {
+    "17 0 * * 1-5": [(8, 17)],
+    "17 2 * * 1-5": [(10, 17)],
+    "17 4 * * 1-5": [(12, 17)],
+    "17 7 * * 1-5": [(15, 17)],
+    "17 8 * * 1-5": [(16, 17)],
+    "17 12 * * 1-5": [(20, 17)],
+    "47 14 * * 1-5": [(22, 47)],
+    "47 0 * * 1-5": [(8, 47)],
+    "47 2 * * 1-5": [(10, 47)],
+    "47 4 * * 1-5": [(12, 47)],
+    "47 7 * * 1-5": [(15, 47)],
+    "47 8 * * 1-5": [(16, 47)],
+    "47 12 * * 1-5": [(20, 47)],
+    "17 15 * * 1-5": [(23, 17)],
+}
 EARLY_GRACE_SECONDS = 5 * 60
 # GitHub scheduled workflows are not precise timers. They can be delayed by
 # tens of minutes, and occasionally longer when GitHub Actions is busy. Treat a
@@ -95,6 +116,33 @@ def select_checkpoint(now: dt.datetime) -> dt.datetime | None:
     ]
     eligible = [slot for slot in candidates if slot <= now]
     return max(eligible) if eligible else None
+
+
+def select_cron_invocation(now: dt.datetime, cron: str | None) -> dt.datetime | None:
+    """Resolve the intended cron occurrence independently of runner delay."""
+    slots = CRON_INVOCATION_SLOTS.get(str(cron or "").strip())
+    if not slots:
+        return None
+    now = as_cn_time(now)
+    candidates = [
+        dt.datetime.combine(day, dt.time(hour, minute), tzinfo=CN_TZ)
+        for day in (now.date(), (now - dt.timedelta(days=1)).date())
+        if day.weekday() < 5
+        for hour, minute in slots
+    ]
+    eligible = [slot for slot in candidates if slot <= now]
+    return max(eligible) if eligible else None
+
+
+def checkpoint_for_invocation(invocation: dt.datetime) -> dt.datetime:
+    """Map a fallback invocation to the primary checkpoint it recovers."""
+    local = as_cn_time(invocation)
+    hour_minute = (local.hour, local.minute)
+    if hour_minute == (23, 17):
+        return local.replace(hour=22, minute=47, second=0, microsecond=0)
+    if local.minute == 47 and hour_minute != (22, 47):
+        return local.replace(minute=17, second=0, microsecond=0)
+    return local.replace(second=0, microsecond=0)
 
 
 def checkpoint_is_within_window(now: dt.datetime, slot: dt.datetime | None) -> bool:
@@ -450,10 +498,12 @@ def main() -> int:
         if override_now
         else dt.datetime.now(CN_TZ)
     )
+    cron = os.environ.get("SCHEDULE_GATE_CRON") or None
+    invocation_clocks = CRON_INVOCATION_SLOTS.get(str(cron or "").strip()) or SLOTS
     today_slots = (
         [
             now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            for hour, minute in SLOTS
+            for hour, minute in invocation_clocks
         ]
         if now.weekday() < 5
         else []
@@ -475,7 +525,9 @@ def main() -> int:
                 time.sleep(wait_seconds)
                 now = dt.datetime.now(CN_TZ)
 
-    nearest = select_checkpoint(now)
+    cron_invocation = select_cron_invocation(now, cron)
+    nearest = checkpoint_for_invocation(cron_invocation) if cron_invocation else select_checkpoint(now)
+    invocation = cron_invocation or nearest
     if nearest is None:
         write_output(
             should_run="false",
@@ -483,8 +535,8 @@ def main() -> int:
         )
         return 0
 
-    delta = (now - nearest).total_seconds()
-    if checkpoint_is_within_window(now, nearest):
+    delta = (now - invocation).total_seconds() if invocation else float("inf")
+    if checkpoint_is_within_window(now, invocation):
         status_url = os.environ.get("SCHEDULE_GATE_STATUS_URL") or None
         published_source = published_checkpoint_source(
             nearest,
@@ -495,6 +547,7 @@ def main() -> int:
                 should_run="false",
                 reason="slot_already_published",
                 slot=nearest.isoformat(timespec="minutes"),
+                invocation_slot=invocation.isoformat(timespec="minutes"),
                 published_source=published_source,
             )
             return 0
@@ -503,6 +556,7 @@ def main() -> int:
             should_run="true",
             reason=f"slot_ok:{nearest:%Y-%m-%d_%H:%M}:delta_seconds={int(delta)}",
             slot=nearest.isoformat(timespec="minutes"),
+            invocation_slot=invocation.isoformat(timespec="minutes"),
         )
         return 0
 
@@ -510,7 +564,8 @@ def main() -> int:
         should_run="false",
         reason=(
             f"outside_allowed_slots:now={now:%Y-%m-%d_%H:%M:%S}:"
-            f"nearest={nearest:%Y-%m-%d_%H:%M}:delta_seconds={int(delta)}"
+            f"nearest={nearest:%Y-%m-%d_%H:%M}:"
+            f"invocation={invocation:%Y-%m-%d_%H:%M}:delta_seconds={int(delta)}"
         ),
     )
     return 0

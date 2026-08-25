@@ -141,6 +141,35 @@ class ScheduleGateTests(unittest.TestCase):
         self.assertEqual(slot.isoformat(), "2026-08-21T20:17:00+08:00")
         self.assertTrue(self.module.checkpoint_is_within_window(now, slot))
 
+    def test_delayed_primary_and_fallback_keep_distinct_logical_invocations(self) -> None:
+        now = dt.datetime.fromisoformat("2026-08-26T00:00:00+08:00")
+        primary = self.module.select_cron_invocation(now, "47 14 * * 1-5")
+        fallback = self.module.select_cron_invocation(now, "17 15 * * 1-5")
+
+        self.assertEqual(primary.isoformat(), "2026-08-25T22:47:00+08:00")
+        self.assertEqual(fallback.isoformat(), "2026-08-25T23:17:00+08:00")
+        self.assertEqual(
+            self.module.checkpoint_for_invocation(fallback).isoformat(),
+            "2026-08-25T22:47:00+08:00",
+        )
+
+    def test_unique_cron_keeps_a_two_hour_delayed_morning_run_at_0817(self) -> None:
+        now = dt.datetime.fromisoformat("2026-08-21T10:30:00+08:00")
+
+        invocation = self.module.select_cron_invocation(now, "17 0 * * 1-5")
+
+        self.assertEqual(invocation.isoformat(), "2026-08-21T08:17:00+08:00")
+
+    def test_early_unique_fallback_waits_to_its_0847_invocation(self) -> None:
+        output = self._run_main(
+            "2026-08-21T08:46:00+08:00",
+            published_source=None,
+            cron="47 0 * * 1-5",
+        )
+
+        self.assertIn("slot=2026-08-21T08:17+08:00", output)
+        self.assertIn("invocation_slot=2026-08-21T08:47+08:00", output)
+
     def test_weekend_without_recent_checkpoint_is_rejected(self) -> None:
         now = dt.datetime.fromisoformat("2026-08-22T12:00:00+08:00")
         slot = self.module.select_checkpoint(now)
@@ -462,10 +491,26 @@ class ScheduleGateTests(unittest.TestCase):
         self.assertIn("slot=2026-08-21T20:17+08:00", output)
 
     def test_2317_fallback_targets_the_2247_us_open_checkpoint(self) -> None:
-        output = self._run_main("2026-08-21T23:17:00+08:00", published_source=None)
+        output = self._run_main(
+            "2026-08-21T23:17:00+08:00",
+            published_source=None,
+            cron="17 15 * * 1-5",
+        )
 
         self.assertIn("should_run=true", output)
         self.assertIn("slot=2026-08-21T22:47+08:00", output)
+        self.assertIn("invocation_slot=2026-08-21T23:17+08:00", output)
+
+    def test_delayed_2247_primary_does_not_masquerade_as_2317_fallback(self) -> None:
+        output = self._run_main(
+            "2026-08-26T00:00:00+08:00",
+            published_source=None,
+            cron="47 14 * * 1-5",
+        )
+
+        self.assertIn("slot=2026-08-25T22:47+08:00", output)
+        self.assertIn("invocation_slot=2026-08-25T22:47+08:00", output)
+        self.assertIn("delta_seconds=4380", output)
 
     def test_every_health_fallback_maps_to_its_matching_primary(self) -> None:
         pairs = (
@@ -493,15 +538,24 @@ class ScheduleGateTests(unittest.TestCase):
                 self.assertIn("should_run=true", output)
                 self.assertIn(f"slot=2026-08-21T{primary}+08:00", output)
 
-    def _run_main(self, now: str, *, published_source: str | None) -> str:
+    def _run_main(
+        self,
+        now: str,
+        *,
+        published_source: str | None,
+        cron: str | None = None,
+    ) -> str:
         output = io.StringIO()
+        environment = {
+            "SCHEDULE_GATE_NOW": now,
+            "SCHEDULE_GATE_STATUS_URL": "https://example.test/api/latest",
+        }
+        if cron:
+            environment["SCHEDULE_GATE_CRON"] = cron
         with (
             mock.patch.dict(
                 os.environ,
-                {
-                    "SCHEDULE_GATE_NOW": now,
-                    "SCHEDULE_GATE_STATUS_URL": "https://example.test/api/latest",
-                },
+                environment,
                 clear=False,
             ),
             mock.patch.object(

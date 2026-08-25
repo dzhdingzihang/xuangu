@@ -4,14 +4,27 @@ on:
   push:
     branches: [main]
   schedule:
-    # Beijing 08:17/10:17/12:17/15:17/16:17/20:17 primary checkpoints (UTC+8).
-    - cron: "17 0,2,4,7,8,12 * * 1-5"
+    # Keep each cron expression unique. github.event.schedule can then recover
+    # the intended logical invocation even when GitHub starts an older run
+    # after a later checkpoint.
+    # Beijing primary checkpoints (UTC+8).
+    - cron: "17 0 * * 1-5"
+    - cron: "17 2 * * 1-5"
+    - cron: "17 4 * * 1-5"
+    - cron: "17 7 * * 1-5"
+    - cron: "17 8 * * 1-5"
+    - cron: "17 12 * * 1-5"
     # Beijing 22:47 primary checkpoint, after the US regular session opens in
     # both daylight-saving and standard time.
     - cron: "47 14 * * 1-5"
     # Thirty-minute fallback invocations for the six :17 primary checkpoints.
     # schedule_gate skips a fallback when the matching snapshot is healthy.
-    - cron: "47 0,2,4,7,8,12 * * 1-5"
+    - cron: "47 0 * * 1-5"
+    - cron: "47 2 * * 1-5"
+    - cron: "47 4 * * 1-5"
+    - cron: "47 7 * * 1-5"
+    - cron: "47 8 * * 1-5"
+    - cron: "47 12 * * 1-5"
     # Beijing 23:17 fallback for the 22:47 US-open checkpoint.
     - cron: "17 15 * * 1-5"
   workflow_dispatch:
@@ -30,6 +43,7 @@ jobs:
       contents: read
     outputs:
       should_archive: ${{ steps.snapshot_bundle.outputs.should_archive }}
+      should_publish: ${{ steps.publish_guard.outputs.should_publish }}
       snapshot_key: ${{ steps.snapshot_bundle.outputs.snapshot_key }}
       snapshot_sha256: ${{ steps.snapshot_bundle.outputs.snapshot_sha256 }}
     steps:
@@ -50,6 +64,7 @@ jobs:
           # Only deployed production state may suppress a recovery run. A
           # checked-out latest.json is not proof that deployment succeeded.
           SCHEDULE_GATE_STATUS_URL: https://xuangu.alixjd.com/api/latest
+          SCHEDULE_GATE_CRON: ${{ github.event.schedule }}
 
       - uses: actions/setup-node@v4
         if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
@@ -112,6 +127,7 @@ jobs:
         env:
           AUTOMATION_TRIGGER: ${{ github.event_name }}
           SCHEDULED_SLOT: ${{ steps.schedule_gate.outputs.slot }}
+          SCHEDULED_INVOCATION_SLOT: ${{ steps.schedule_gate.outputs.invocation_slot }}
           EVENT_SCAN_CANDIDATES_PER_MARKET: "16"
         run: |
           for attempt in 1 2 3; do
@@ -149,6 +165,13 @@ jobs:
         if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         run: python scripts/validate_snapshot.py data/picks/latest.json
 
+      - name: Enforce monotonic logical schedule order before deploy
+        id: publish_guard
+        if: github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true'
+        run: >-
+          python scripts/deployment_order_guard.py data/picks/latest.json
+          --base-url https://xuangu.alixjd.com
+
       - name: Save validated A-share daily K-line cache
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
         uses: actions/cache/save@v4
@@ -181,6 +204,7 @@ jobs:
           import os
           import pathlib
           import shutil
+          from scripts.snapshot_archive_policy import ARCHIVE_POLICY, archive_reasons
           from scripts.verify_deployment import snapshot_sha256
 
           latest_path = pathlib.Path("data/picks/latest.json")
@@ -216,19 +240,8 @@ jobs:
               ledger_files.append(ledger.as_posix())
 
           digest = snapshot_sha256(snapshot)
-          automation = snapshot.get("automation") if isinstance(snapshot.get("automation"), dict) else {}
-          trigger = str(automation.get("trigger") or "")
-          scheduled_slot = str(automation.get("scheduled_slot") or "")
-          daily_checkpoint = trigger == "schedule" and "T22:47:" in scheduled_slot
-          global_decision = snapshot.get("global_decision")
-          global_decision = global_decision if isinstance(global_decision, dict) else {}
-          primary = global_decision.get("primary")
-          executable_prediction = (
-              global_decision.get("action") == "REVIEW_EXECUTABLE_PICK"
-              and isinstance(primary, dict)
-              and primary.get("status") == "EXECUTABLE"
-          )
-          should_archive = daily_checkpoint or executable_prediction
+          reasons = archive_reasons(snapshot)
+          should_archive = bool(reasons)
           (recovery / "recovery-manifest.json").write_text(
               json.dumps(
                   {
@@ -237,7 +250,8 @@ jobs:
                       "snapshot_sha256": digest,
                       "ledger_present": bool(ledger_files),
                       "ledger_files": ledger_files,
-                      "archive_policy": "daily_2247_or_executable_v1",
+                      "archive_policy": ARCHIVE_POLICY,
+                      "archive_reasons": reasons,
                       "should_archive": should_archive,
                   },
                   ensure_ascii=False,
@@ -261,16 +275,16 @@ jobs:
           retention-days: 30
 
       - name: Install Node dependencies
-        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        if: (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true') && (github.event_name != 'schedule' || steps.publish_guard.outputs.should_publish == 'true')
         run: npm ci
 
       - name: Build Worker assets
-        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        if: (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true') && (github.event_name != 'schedule' || steps.publish_guard.outputs.should_publish == 'true')
         run: npm run build
 
       - name: Capture exact production rollback target
         id: rollback_target
-        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        if: (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true') && (github.event_name != 'schedule' || steps.publish_guard.outputs.should_publish == 'true')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
@@ -325,7 +339,7 @@ jobs:
 
       - name: Deploy Worker
         id: deploy_worker
-        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        if: (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true') && (github.event_name != 'schedule' || steps.publish_guard.outputs.should_publish == 'true')
         run: >-
           npx wrangler deploy
           --message "github:${{ github.sha }} run:${{ github.run_id }}"
@@ -334,7 +348,7 @@ jobs:
 
       - name: Verify complete deployed contract
         id: verify_deployment
-        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        if: (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true') && (github.event_name != 'schedule' || steps.publish_guard.outputs.should_publish == 'true')
         run: >-
           python scripts/verify_deployment.py public/data/picks/latest.json
           --base-url https://xuangu.alixjd.com
@@ -407,7 +421,7 @@ jobs:
 
   archive:
     needs: deploy
-    if: needs.deploy.result == 'success' && needs.deploy.outputs.should_archive == 'true'
+    if: needs.deploy.result == 'success' && needs.deploy.outputs.should_archive == 'true' && needs.deploy.outputs.should_publish != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

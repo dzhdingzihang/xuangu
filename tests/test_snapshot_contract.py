@@ -376,6 +376,7 @@ class SnapshotContractTests(unittest.TestCase):
             {
                 "AUTOMATION_TRIGGER": "schedule",
                 "SCHEDULED_SLOT": "2026-08-21T20:17:00+08:00",
+                "SCHEDULED_INVOCATION_SLOT": "2026-08-21T20:47:00+08:00",
                 "GENERATION_ATTEMPT": "2",
                 "GITHUB_RUN_ID": "123456",
             },
@@ -387,9 +388,41 @@ class SnapshotContractTests(unittest.TestCase):
             {
                 "trigger": "schedule",
                 "scheduled_slot": "2026-08-21T20:17:00+08:00",
+                "scheduled_invocation_slot": "2026-08-21T20:47:00+08:00",
                 "generation_attempt": 2,
                 "run_id": "123456:2",
             },
+        )
+
+    def test_new_scheduled_model_requires_ordered_checkpoint_and_invocation(self) -> None:
+        valid = dynamic_hk_us_snapshot_fixture()
+        valid["model_version"] = server.MODEL_VERSION
+        valid["automation"].update(
+            {
+                "trigger": "schedule",
+                "scheduled_slot": "2026-08-21T22:47+08:00",
+                "scheduled_invocation_slot": "2026-08-21T23:17+08:00",
+            }
+        )
+        valid_errors = validate_snapshot(valid)
+        self.assertFalse(any("scheduled automation" in error for error in valid_errors))
+        self.assertNotIn(
+            "automation.scheduled_slot does not match its invocation checkpoint",
+            valid_errors,
+        )
+
+        missing = copy.deepcopy(valid)
+        missing["automation"]["scheduled_invocation_slot"] = None
+        self.assertIn(
+            "scheduled automation.scheduled_invocation_slot must be an aware ISO datetime",
+            validate_snapshot(missing),
+        )
+
+        mismatched = copy.deepcopy(valid)
+        mismatched["automation"]["scheduled_slot"] = "2026-08-21T20:17+08:00"
+        self.assertIn(
+            "automation.scheduled_slot does not match its invocation checkpoint",
+            validate_snapshot(mismatched),
         )
 
     def test_three_markets_keep_old_fields_and_add_v2_contract(self) -> None:
@@ -452,6 +485,8 @@ class SnapshotContractTests(unittest.TestCase):
         enriched = server.enrich_snapshot_v2(snapshot_fixture())
 
         self.assertEqual(enriched["production_decision"]["contract_version"], "production-rule-10d-v1")
+        self.assertEqual(enriched["production_decision"]["action_basis"], "candidate_level_rule_qualification_v2")
+        self.assertEqual(enriched["production_decision"]["rule_model_id"], "ten-day-audited-rule-ensemble-v2")
         self.assertEqual(enriched["production_decision"]["action"], "NO_QUALIFIED_PICK")
         self.assertEqual(enriched["production_decision"]["score_kind"], "RULE_QUALIFICATION_SCORE")
         self.assertIsNone(enriched["production_decision"]["probability"])
@@ -468,7 +503,7 @@ class SnapshotContractTests(unittest.TestCase):
         enriched = server.enrich_snapshot_v2(snapshot_fixture())
         enriched.pop("production_decision")
 
-        enriched["model_version"] = "smart-selector-2026-08-25.1-production-rule"
+        enriched["model_version"] = "smart-selector-2026-08-26.1-candidate-rule"
         self.assertIn("production_decision is required", validate_snapshot(enriched))
 
         enriched["model_version"] = "smart-selector-2026-08-23.3-evidence-loop"

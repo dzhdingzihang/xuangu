@@ -17,8 +17,8 @@ from typing import Any, Mapping, Sequence
 
 CONTRACT_VERSION = "production-rule-10d-v1"
 DECISION_SCOPE = "global_10d_bounded_recall"
-ACTION_BASIS = "strict_rule_qualification_v1"
-RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v1"
+ACTION_BASIS = "candidate_level_rule_qualification_v2"
+RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v2"
 SCORE_KIND = "RULE_QUALIFICATION_SCORE"
 HORIZON_TRADE_DAYS = 10
 ACTION_PICK = "QUALIFIED_PICK"
@@ -159,9 +159,12 @@ def _evaluate_candidate(snapshot: Mapping[str, Any], row: Mapping[str, Any]) -> 
     if source_candidate is None:
         blockers.append("CANDIDATE_SNAPSHOT_MISSING")
 
+    # ``legacy_signal`` is a market-level decision: one failed Legacy primary
+    # can set it to NO_TRADE for every candidate in that market. Requiring it
+    # here made the independent production track reject otherwise valid
+    # candidate-level evidence. Keep it for provenance; the per-stock Legacy
+    # recommendation threshold below remains a hard gate.
     legacy_signal = _text(row.get("legacy_signal"))
-    if legacy_signal != "BUY_CANDIDATE":
-        blockers.append("LEGACY_BUY_SIGNAL_REQUIRED")
     recommendation = row.get("legacy_recommendation_degree")
     if not _finite_number(recommendation):
         recommendation_value = 0.0
@@ -323,7 +326,8 @@ def build_production_decision(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "blocker_codes": blockers,
         "policy": {
             "market_thresholds": copy.deepcopy(MARKET_POLICY),
-            "legacy_signal_required": "BUY_CANDIDATE",
+            "legacy_market_action": "DIAGNOSTIC_ONLY",
+            "candidate_level_legacy_threshold_required": True,
             "maximum_v2_rank_fraction": MAX_V2_RANK_FRACTION,
             "verified_positive_event_required": True,
             "minimum_risk_reward_ratio": MIN_RISK_REWARD_RATIO,

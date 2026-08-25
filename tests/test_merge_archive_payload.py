@@ -17,6 +17,22 @@ def snapshot(key: str, generated_at: str) -> dict:
     return {"snapshot_key": key, "generated_at": generated_at}
 
 
+def scheduled_snapshot(
+    key: str,
+    generated_at: str,
+    *,
+    invocation: str,
+) -> dict:
+    return {
+        **snapshot(key, generated_at),
+        "automation": {
+            "trigger": "schedule",
+            "scheduled_slot": "2026-08-23T22:47:00+08:00",
+            "scheduled_invocation_slot": invocation,
+        },
+    }
+
+
 class MergeArchivePayloadTests(unittest.TestCase):
     def test_older_retry_cannot_replace_newer_latest(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -45,6 +61,31 @@ class MergeArchivePayloadTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "immutable snapshot conflict"):
                 merge_payload(payload, archive)
+
+    def test_delayed_primary_is_archived_but_cannot_replace_newer_logical_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            payload, archive = root / "payload", root / "archive"
+            delayed_primary = scheduled_snapshot(
+                "delayed-primary.json",
+                "2026-08-24T00:01:00+08:00",
+                invocation="2026-08-23T22:47:00+08:00",
+            )
+            fallback = scheduled_snapshot(
+                "fallback.json",
+                "2026-08-23T23:27:00+08:00",
+                invocation="2026-08-23T23:17:00+08:00",
+            )
+            write(payload / "data/picks/latest.json", delayed_primary)
+            write(payload / "data/picks/delayed-primary.json", delayed_primary)
+            write(archive / "data/picks/latest.json", fallback)
+            write(archive / "data/picks/fallback.json", fallback)
+
+            result = merge_payload(payload, archive)
+
+            self.assertEqual(json.loads((archive / "data/picks/latest.json").read_text()), fallback)
+            self.assertTrue((archive / "data/picks/delayed-primary.json").is_file())
+            self.assertEqual(result["preserved_newer"], 1)
 
     def test_settled_outcome_is_not_downgraded_to_pending(self) -> None:
         with tempfile.TemporaryDirectory() as root:

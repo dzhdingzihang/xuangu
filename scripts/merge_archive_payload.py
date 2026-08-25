@@ -33,6 +33,33 @@ def _copy_new(source: pathlib.Path, target: pathlib.Path) -> None:
     shutil.copy2(source, target)
 
 
+def _scheduled_invocation(snapshot: dict[str, Any]) -> dt.datetime | None:
+    automation = snapshot.get("automation")
+    if not isinstance(automation, dict) or str(automation.get("trigger") or "") != "schedule":
+        return None
+    value = automation.get("scheduled_invocation_slot") or automation.get("scheduled_slot")
+    if value in (None, ""):
+        return None
+    return aware_moment(value, "automation.scheduled_invocation_slot")
+
+
+def _incoming_latest_is_older(incoming: dict[str, Any], existing: dict[str, Any]) -> bool:
+    """Prefer logical cron order before wall-clock generation order.
+
+    GitHub may start a 22:47 invocation after its 23:17 recovery.  Comparing
+    only ``generated_at`` would let that older logical run replace the newer
+    recovery in the archive even when deployment correctly rejected it.
+    """
+    incoming_invocation = _scheduled_invocation(incoming)
+    existing_invocation = _scheduled_invocation(existing)
+    if incoming_invocation is not None and existing_invocation is not None:
+        if incoming_invocation != existing_invocation:
+            return incoming_invocation < existing_invocation
+    incoming_time = aware_moment(incoming.get("generated_at"), "incoming generated_at")
+    existing_time = aware_moment(existing.get("generated_at"), "existing generated_at")
+    return incoming_time < existing_time
+
+
 def _merge_observation(source: pathlib.Path, target: pathlib.Path) -> str:
     incoming = read_json(source)
     existing = read_json(target)
@@ -103,9 +130,9 @@ def merge_payload(payload_root: pathlib.Path, archive_tree: pathlib.Path) -> dic
         existing = read_json(existing_latest)
         incoming_time = aware_moment(incoming.get("generated_at"), "incoming generated_at")
         existing_time = aware_moment(existing.get("generated_at"), "existing generated_at")
-        if existing_time > incoming_time:
+        if _incoming_latest_is_older(incoming, existing):
             preserve_latest = True
-        elif existing_time == incoming_time and incoming != existing:
+        elif incoming_time == existing_time and incoming != existing:
             raise ValueError("same-moment latest snapshots differ")
 
     for source in sorted(path for path in payload_data.rglob("*") if path.is_file()):
