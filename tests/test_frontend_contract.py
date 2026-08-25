@@ -172,7 +172,7 @@ class FrontendContractTests(unittest.TestCase):
             "影子 P10",
             "不参与正式决策",
             "当前成分股历史回填",
-            "正式可执行候选",
+            "校准可执行",
         ):
             self.assertIn(phrase, self.js)
         for metric in (
@@ -306,6 +306,9 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("const selected = production.qualified;", self.js)
         self.assertIn("浏览器绝不把它们自行升级为 QUALIFIED_PICK", self.js)
         self.assertIn("规则资格分（非概率）", self.js)
+        self.assertIn("生产规则模型已有合格候选", self.js)
+        self.assertIn("规则合格 ${fmt(production.qualifiedCount, 0)} · 校准可执行", self.js)
+        self.assertIn('row.decisionRole === "qualified" ? "规则合格"', self.js)
         self.assertIn("全局校准模型结论", self.js)
         self.assertIn("只有通过校准合同的 global_decision 才能展示上涨概率", self.js)
         self.assertIn("calibrated-track-card", self.css)

@@ -1353,8 +1353,9 @@ function candidateDetail(row) {
   const quoteView = candidateQuoteView(candidate);
   const marketGate = coverage.state === "READY" ? "" : `<div class="callout ${coverage.state === "BLOCKED" ? "negative" : "warning"}">${icon(coverage.state === "BLOCKED" ? "ph-warning-octagon" : "ph-warning-circle")}<div><strong>市场级门禁：${coverage.state}</strong><br>${esc(coverage.reasons.join("；") || "市场覆盖尚未达到跨市场可执行标准")}。单股门控通过也不能绕过市场级阻断。</div></div>`;
   const snapshotStatus = `<div class="callout info">${icon("ph-waveform")}<div><strong>${esc(quoteView.title)}：${esc(quoteView.label)}</strong><br>快照生成 ${esc(dateTime(state.status?.snapshot_as_of || state.snapshot?.generated_at))}；下次计划检查点（含健康补跑） ${esc(dateTime(state.status?.next_refresh))}。评分与排序不在浏览器重算。</div></div>`;
+  const qualification = row.decisionRole === "qualified" ? productionDecisionTruth().primary : null;
   return `<article class="detail-panel candidate-detail">
-    <header class="detail-header"><div><div class="eyebrow">${marketBadge(market)} ${esc(MARKET_META[market].label)} · ${esc(candidate.code || candidate.symbol)}</div><h2 class="detail-title">${esc(candidate.name)}</h2><p class="detail-subtitle">${esc(candidate.role || candidate.reason_tags || "综合候选")}</p></div><div class="detail-actions">${badge(candidate.legacy_complete === false ? "Legacy 未深评" : `Legacy ${legacyRankLabel(row)}`, candidate.legacy_complete === false ? "warning" : "primary")}${candidate.v2?.rank ? badge(`V2 #${candidate.v2.rank}/${candidate.v2.rank_universe_size}`, "purple") : ""}${dualLow?.status === "ranked" ? badge(`双低 #${dualLow.rank}/${dualLow.rank_universe_size}`, "positive") : dualLow ? badge(dualLowLabel(dualLow), dualLowTone(dualLow)) : ""}</div></header>
+    <header class="detail-header"><div><div class="eyebrow">${marketBadge(market)} ${esc(MARKET_META[market].label)} · ${esc(candidate.code || candidate.symbol)}</div><h2 class="detail-title">${esc(candidate.name)}</h2><p class="detail-subtitle">${esc(candidate.role || candidate.reason_tags || "综合候选")}</p></div><div class="detail-actions">${qualification ? badge(`规则合格 ${fmt(qualification.qualification_score, 1)} 分`, "positive") : ""}${badge(candidate.legacy_complete === false ? "Legacy 未深评" : `Legacy ${legacyRankLabel(row)}`, candidate.legacy_complete === false ? "warning" : "primary")}${candidate.v2?.rank ? badge(`V2 #${candidate.v2.rank}/${candidate.v2.rank_universe_size}`, "purple") : ""}${dualLow?.status === "ranked" ? badge(`双低 #${dualLow.rank}/${dualLow.rank_universe_size}`, "positive") : dualLow ? badge(dualLowLabel(dualLow), dualLowTone(dualLow)) : ""}</div></header>
     ${marketGate}
     ${snapshotStatus}
     <div class="shadow-p10-detail ${shadowP10 === null ? "is-unavailable" : ""}"><div><small>影子 P10</small><strong>${esc(shadowP10Label(shadowModel))}</strong></div><p>${shadowP10 === null ? "该候选尚无可用的影子概率。" : shadowModel?.rank_eligible === true ? "影子模型已通过本市场研究排序门槛，估计未来 10 个交易日净收益为正的概率。" : "该概率只保留用于审计；留出质量、时点或市场门槛未通过，不参与研究排序。"}<b>不参与正式决策</b></p><span>${esc(shadowModel?.market_validation_status || shadowModel?.model_id || "影子模型未发布")}</span></div>
@@ -1380,7 +1381,7 @@ function candidateMobileCard(row) {
     ? `${fmt(dualLow.final_score, 0)} · #${dualLow.rank}/${dualLow.rank_universe_size}`
     : dualLowLabel(dualLow);
   return `<button class="candidate-mobile-card ${key === state.candidateKey ? "is-selected" : ""}" type="button" data-action="select-candidate" data-key="${esc(key)}" aria-pressed="${key === state.candidateKey}">
-    <header><span>${marketBadge(row.market)}<b>${esc(c.name)}</b><small>${esc(c.code || c.symbol)}</small></span>${badge(decisionRoleLabel(row.decisionRole), row.decisionRole === "primary" ? "positive" : row.decisionRole === "blocked" ? "negative" : "")}</header>
+    <header><span>${marketBadge(row.market)}<b>${esc(c.name)}</b><small>${esc(c.code || c.symbol)}</small></span>${badge(decisionRoleLabel(row.decisionRole), ["qualified", "primary"].includes(row.decisionRole) ? "positive" : row.decisionRole === "blocked" ? "negative" : "")}</header>
     <div class="candidate-mobile-price"><strong title="${esc(quoteView.title)}">${price(quoteView.price)}</strong><span class="${toneFor(quoteView.changePct)}">${pct(quoteView.changePct)}</span></div>
     <dl><div><dt>Legacy</dt><dd>${c.legacy_complete === false ? "未深评" : `${fmt(candidateScore(c), 0)} · ${legacyRankLabel(row)}`}</dd></div><div><dt>V2 结构</dt><dd>${c.v2?.rank ? `${fmt(c.v2.rule_score, 0)} · #${c.v2.rank}/${c.v2.rank_universe_size}` : "--"}</dd></div><div><dt>双低价值</dt><dd>${esc(dualText)}</dd></div><div><dt>影子 P10</dt><dd>${esc(shadowP10Label(shadowModel))} · 非正式</dd></div><div><dt>执行状态</dt><dd class="${risk === "clear" ? "positive" : risk === "blocked" ? "negative" : "warning"}">${({ clear: "PASS", warning: "WARN", blocked: "BLOCK" })[risk]}</dd></div></dl>
   </button>`;
@@ -1389,6 +1390,7 @@ function candidateMobileCard(row) {
 function renderCandidates() {
   const root = $("#candidatesView");
   const truth = globalDecisionTruth();
+  const production = productionDecisionTruth();
   const rows = filteredCandidates();
   const selected = selectedCandidateRow(rows);
   const all = allCandidates();
@@ -1396,6 +1398,10 @@ function renderCandidates() {
   const withLineage = all.filter((row) => routeNames(row.candidate).length).length;
   const tenDayState = tenDayModelState();
   const tenDayPresentation = tenDayModelPresentation(tenDayState);
+  const candidateTrackTitle = production.qualifiedCount ? "生产规则模型已有合格候选" : tenDayPresentation.title;
+  const candidateTrackDetail = production.qualifiedCount
+    ? `规则轨已发布 ${fmt(production.qualifiedCount, 0)} 只合格候选；${tenDayPresentation.detail}`
+    : tenDayPresentation.detail;
   const marketKpi = (coverage) => {
     const isA = coverage.market === "a_share";
     const funnel = recallFunnel(coverage.section, coverage.market);
@@ -1419,14 +1425,14 @@ function renderCandidates() {
       <div class="toolbar-left"><div><h2>跨市场研究候选池</h2><p>单市场保留快照顺序；跨市场按证据、执行状态、数据质量与 V2 研究优先级排序</p></div></div>
       <div class="toolbar-right"><label class="search-field">${icon("ph-magnifying-glass")}<input id="candidateSearch" type="search" value="${esc(state.candidateFilters.query)}" placeholder="搜索公司 / 代码 / 主题" aria-label="搜索候选"></label></div>
     </div>
-    <div class="callout ${["warning", "negative"].includes(tenDayPresentation.tone) ? tenDayPresentation.tone : ""} section-callout shadow-model-callout">${icon(tenDayPresentation.icon)}<div><strong>${esc(tenDayPresentation.title)}</strong><br>${esc(tenDayPresentation.detail)} 推荐度、V2 排名和双低得分仍是独立规则研究信号。<span class="formal-candidate-count">正式可执行候选 ${fmt(truth.executableCount, 0)}</span>${tenDayPresentation.reasonCodes.length ? `<small>原因码：${esc(tenDayPresentation.reasonCodes.join(" · "))}</small>` : ""}</div></div>
+    <div class="callout ${production.qualifiedCount ? "info" : ["warning", "negative"].includes(tenDayPresentation.tone) ? tenDayPresentation.tone : ""} section-callout shadow-model-callout">${icon(production.qualifiedCount ? "ph-check-circle" : tenDayPresentation.icon)}<div><strong>${esc(candidateTrackTitle)}</strong><br>${esc(candidateTrackDetail)} 两条轨道分开展示；规则资格分不是上涨概率。<span class="formal-candidate-count">规则合格 ${fmt(production.qualifiedCount, 0)} · 校准可执行 ${fmt(truth.executableCount, 0)}</span>${tenDayPresentation.reasonCodes.length ? `<small>校准轨原因码：${esc(tenDayPresentation.reasonCodes.join(" · "))}</small>` : ""}</div></div>
     <div class="filter-strip">
       <div class="filter-group"><span>市场</span><div class="segmented-button"><button data-action="candidate-market" data-market="all" aria-pressed="${state.candidateFilters.market === "all"}">全部</button>${MARKET_ORDER.map((market) => `<button data-action="candidate-market" data-market="${market}" aria-pressed="${state.candidateFilters.market === market}">${MARKET_META[market].label}</button>`).join("")}</div></div>
       <label>风险<select id="candidateRisk"><option value="all">全部</option><option value="clear">无明确警告</option><option value="warning">有警告</option><option value="blocked">被阻断</option></select></label>
       <label>召回<select id="candidateRoute"><option value="all">全部来源</option><option value="event">事件</option><option value="momentum">动量</option><option value="liquidity">流动性</option><option value="pullback">回踩</option><option value="activity">活跃度</option><option value="quality">规模质量</option><option value="history">历史延续</option><option value="curated">旧静态池</option></select></label>
     </div>
     ${renderKpis([
-      { icon: "ph-check-circle", label: "正式可执行候选", value: fmt(truth.executableCount, 0), tone: truth.executableCount ? "positive" : "negative", meta: "与影子预测数量独立；仅统计全局严格门禁后的结果" },
+      { icon: "ph-check-circle", label: "规则合格候选", value: fmt(production.qualifiedCount, 0), tone: production.qualifiedCount ? "positive" : "negative", meta: `生产规则门禁，非概率；校准可执行 ${fmt(truth.executableCount, 0)} 只` },
       ...truth.markets.map((coverage, index) => {
         const item = marketKpi(coverage);
         if (index === truth.markets.length - 1) item.meta = `${item.meta} · 页面 ${all.length} 只 · 来源链 ${withLineage} 只 · BLOCK ${blocked}`;
@@ -1435,7 +1441,7 @@ function renderCandidates() {
     ])}
     <div class="master-detail candidate-master-detail">
       <section class="panel candidate-table-panel"><header class="panel-header"><div><h3 class="panel-title">候选清单</h3><p class="panel-subtitle">推荐度不是收益概率；点击行查看证据</p></div></header>
-        ${rows.length ? `<div class="data-table-wrap"><table class="data-table"><thead><tr><th>市场</th><th>公司 / 代码</th><th class="number">行情 / 计划价</th><th class="number">快照涨跌</th><th class="number">推荐度</th><th class="number">Legacy</th><th class="number">V2</th><th class="number">双低</th><th class="number">影子 P10</th><th>执行状态</th><th></th></tr></thead><tbody>${rows.map((row) => {
+        ${rows.length ? `<div class="data-table-wrap"><table class="data-table"><thead><tr><th>市场</th><th>公司 / 代码</th><th class="number">行情 / 计划价</th><th class="number">快照涨跌</th><th class="number">推荐度</th><th class="number">Legacy</th><th class="number">V2</th><th class="number">双低</th><th class="number">影子 P10</th><th>候选状态</th><th></th></tr></thead><tbody>${rows.map((row) => {
           const c = row.candidate;
           const quoteView = candidateQuoteView(c);
           const key = candidateId(row.candidate, row.market);
@@ -1443,7 +1449,9 @@ function renderCandidates() {
           const dualLow = dualLowAnalysis(c);
           const dualLowCell = dualLow?.status === "ranked" ? `#${dualLow.rank} · ${fmt(dualLow.final_score, 0)}` : dualLowLabel(dualLow);
           const shadowModel = candidateShadowModel(c, row.market);
-          return `<tr class="${key === state.candidateKey ? "is-selected" : ""}" tabindex="0" data-action="select-candidate" data-key="${esc(key)}"><td>${marketBadge(row.market)}</td><td><span class="name">${esc(c.name)}</span><br><span class="symbol">${esc(c.code || c.symbol)}</span></td><td class="number" title="${esc(quoteView.title)}">${price(quoteView.price)}</td><td class="number ${toneFor(quoteView.changePct)}">${pct(quoteView.changePct)}</td><td class="number"><strong>${fmt(candidateScore(c), 0)}</strong></td><td class="number">${esc(legacyRankLabel(row, true))}</td><td class="number">${c.v2?.rank ? `#${c.v2.rank}/${c.v2.rank_universe_size || "--"}` : "--"}</td><td class="number dual-low-cell ${esc(dualLowTone(dualLow))}">${esc(dualLowCell)}</td><td class="number shadow-p10-cell" title="影子概率，不参与正式决策"><strong>${esc(shadowP10Label(shadowModel))}</strong><small>非正式</small></td><td><span class="status-pill ${risk === "clear" ? "positive" : risk === "blocked" ? "negative" : "warning"}">${({ clear: "清晰", warning: "警告", blocked: "阻断" })[risk]}</span></td><td><button class="row-action" type="button" data-action="select-candidate" data-key="${esc(key)}" aria-label="查看${esc(c.name)}详情">${icon("ph-caret-right")}</button></td></tr>`;
+          const statusTone = row.decisionRole === "qualified" ? "positive" : risk === "clear" ? "positive" : risk === "blocked" ? "negative" : "warning";
+          const statusLabel = row.decisionRole === "qualified" ? "规则合格" : ({ clear: "清晰", warning: "警告", blocked: "阻断" })[risk];
+          return `<tr class="${key === state.candidateKey ? "is-selected" : ""}" tabindex="0" data-action="select-candidate" data-key="${esc(key)}"><td>${marketBadge(row.market)}</td><td><span class="name">${esc(c.name)}</span><br><span class="symbol">${esc(c.code || c.symbol)}</span></td><td class="number" title="${esc(quoteView.title)}">${price(quoteView.price)}</td><td class="number ${toneFor(quoteView.changePct)}">${pct(quoteView.changePct)}</td><td class="number"><strong>${fmt(candidateScore(c), 0)}</strong></td><td class="number">${esc(legacyRankLabel(row, true))}</td><td class="number">${c.v2?.rank ? `#${c.v2.rank}/${c.v2.rank_universe_size || "--"}` : "--"}</td><td class="number dual-low-cell ${esc(dualLowTone(dualLow))}">${esc(dualLowCell)}</td><td class="number shadow-p10-cell" title="影子概率，不参与正式决策"><strong>${esc(shadowP10Label(shadowModel))}</strong><small>非正式</small></td><td><span class="status-pill ${statusTone}">${statusLabel}</span></td><td><button class="row-action" type="button" data-action="select-candidate" data-key="${esc(key)}" aria-label="查看${esc(c.name)}详情">${icon("ph-caret-right")}</button></td></tr>`;
         }).join("")}</tbody></table></div>` : `<div class="empty-state">${icon("ph-funnel-x")}<h3>没有匹配候选</h3><p>调整市场、风险或召回来源筛选。</p></div>`}
         ${rows.length ? `<div class="candidate-mobile-list">${rows.map(candidateMobileCard).join("")}</div>` : ""}
       </section>
