@@ -137,12 +137,17 @@ class FrontendContractTests(unittest.TestCase):
     def test_history_rows_show_formal_and_shadow_tracks_independently(self) -> None:
         self.assertRegex(self.js, r"function historyFormalStatus\(")
         self.assertRegex(self.js, r"function historyFormalStatusTag\(")
+        self.assertRegex(self.js, r"function historyProductionStatusTag\(")
         for label in ("Legacy", "主动放弃", "可执行·缺结算", "可执行·待结算", "可执行·已结算", "已结算·待校验", "结算无效"):
             self.assertIn(label, self.js)
         self.assertIn('formalStatus === "SETTLED_VALID"', self.js)
         self.assertIn("item?.outcome_validation?.valid === true", self.js)
         self.assertNotIn('if (outcomeStatus === "SETTLED") return { code: "SETTLED"', self.js)
         self.assertIn("history-row-statuses", self.js)
+        self.assertIn("规则资格历史轨", self.js)
+        self.assertIn("规则合格日", self.js)
+        self.assertIn("资格分不是概率", self.js)
+        self.assertIn("qualified_rule_day_count", self.js)
         self.assertIn("shadowOutcomeTag(item)", self.js)
 
     def test_evidence_views_and_canvas_charts_are_implemented(self) -> None:
