@@ -73,7 +73,7 @@ HK_US_KLINE_CACHE = CACHE / "runtime-cache" / "hk_us_daily.json"
 MARKET_RECALL_EXPANSION_PATH = CACHE / "universes" / "market_recall_expansion_v2.json"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-08-26.1-candidate-rule"
+MODEL_VERSION = "smart-selector-2026-08-26.2-dual-track-rule"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
@@ -4419,6 +4419,7 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
         enrich_market_candidates(candidates, "a_share", global_market)
     snapshot["events"] = build_event_feed(snapshot)
     snapshot["global_decision"] = build_global_ten_day_decision(snapshot)
+    snapshot["production_rule_inputs"] = production_rule_model.build_production_rule_inputs(snapshot)
     snapshot["production_decision"] = production_rule_model.build_production_decision(snapshot)
     for section in markets.values():
         if isinstance(section, dict):

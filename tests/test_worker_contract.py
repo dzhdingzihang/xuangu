@@ -110,14 +110,14 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.deepEqual(status.schedule_primary_checkpoints, ["08:17", "10:17", "12:17", "15:17", "16:17", "20:17", "22:47"]);
             assert.deepEqual(status.schedule_fallback_checkpoints, ["08:47", "10:47", "12:47", "15:47", "16:47", "20:47", "23:17"]);
             assert.equal(status.snapshot_as_of, latest.generated_at);
-            assert.equal(status.production_action, "QUALIFIED_PICK");
-            assert.equal(status.qualification_id, "qual_0123456789abcdef01234567");
+            assert.equal(status.production_action, "NO_QUALIFIED_PICK");
+            assert.equal(status.qualification_id, null);
             assert.equal(status.calibrated_action, "NO_VALID_PICK");
             assert.equal(status.prediction_id, null);
             assert.equal(status.next_refresh, module.nextScheduledRefresh(new Date(status.time)));
             assert.equal(statusResponse.headers.get("x-content-type-options"), "nosniff");
             assert.match(statusResponse.headers.get("strict-transport-security"), /max-age=/);
-            assert.match(statusResponse.headers.get("permissions-policy"), /camera=\(\)/);
+            assert.match(statusResponse.headers.get("permissions-policy"), /camera=\\(\\)/);
 
             const forceResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/pick?force=1"),
@@ -147,25 +147,85 @@ class WorkerApiContractTests(unittest.TestCase):
             """
         )
 
-    def test_all_v2_rule_qualified_candidates_are_live_allowlisted_and_summarized(self) -> None:
+    def test_all_v3_rule_qualified_candidates_are_live_allowlisted_and_summarized(self) -> None:
         run_node(
             f"""
             import assert from "node:assert/strict";
+            import {{ createHash }} from "node:crypto";
             const worker = (await import({json.dumps(WORKER_URI)} + "?qualified-pool-contract")).default;
-            const candidate = (market, code, score, volumeUnit = "share") => ({{
-              qualification_id: `qual_${{market}}_${{code}}`,
-              status: "QUALIFIED",
+            const qualificationId = (market, code) => `qual_${{createHash("sha256")
+              .update(`production-rule-10d-v1|ten-day-audited-rule-ensemble-v3|||${{market}}|${{code}}`)
+              .digest("hex").slice(0, 24)}}`;
+            const sourceRow = (market, code, qualificationTrack) => ({{
               market,
               code,
               name: `Qualified ${{code}}`,
-              rule_model_id: "ten-day-audited-rule-ensemble-v2",
+              blocker_codes: [
+                "TEN_DAY_MODEL_NOT_READY",
+                "TEN_DAY_PREDICTION_MISSING",
+                ...(qualificationTrack === "quality_technical" ? ["VERIFIED_POSITIVE_EVENT_MISSING"] : []),
+              ],
+              legacy_recommendation_degree: 80,
+              v2_rank: 5,
+              v2_rank_universe_size: 100,
+              priority_components: {{ data_quality: 19.6 }},
+              event_candidate_scanned: true,
+              verified_positive_event_ids: qualificationTrack === "event_catalyst" ? [`event:${{code}}`] : [],
+              estimated_10d_range: {{ low_pct: -4, high_pct: 8 }},
+            }});
+            const candidate = (source, qualificationTrack, volumeUnit = "share") => {{
+              const eventStrength = qualificationTrack === "event_catalyst" ? 85 : 0;
+              const scoreComponents = {{
+                legacy_recommendation: source.legacy_recommendation_degree * 0.30,
+                v2_rank_strength: 28.8,
+                data_quality: 14.7,
+                verified_event_evidence: eventStrength * 0.15,
+                risk_reward_scenario: 10,
+              }};
+              const score = Object.values(scoreComponents).reduce((sum, value) => sum + value, 0);
+              return {{
+              qualification_id: qualificationId(source.market, source.code),
+              status: "QUALIFIED",
+              market: source.market,
+              code: source.code,
+              name: source.name,
+              rule_model_id: "ten-day-audited-rule-ensemble-v3",
               score_kind: "RULE_QUALIFICATION_SCORE",
               qualification_score: score,
+              score_components: scoreComponents,
+              probability_status: "NOT_APPLICABLE",
               probability: null,
               calibrated: false,
+              expected_net_utility: null,
+              legacy_signal: null,
+              legacy_recommendation_degree: source.legacy_recommendation_degree,
+              v2_rank: source.v2_rank,
+              v2_rank_universe_size: source.v2_rank_universe_size,
+              v2_rank_fraction: 0.05,
+              data_quality_score: 98,
+              estimated_10d_range: {{ low_pct: -4, high_pct: 8, horizon_trade_days: 10 }},
+              risk_reward: {{ upside_pct: 8, downside_pct: 4, ratio: 2 }},
+              blocker_codes: [],
+              event_candidate_scanned: true,
+              verified_positive_event_ids: source.verified_positive_event_ids,
+              entry_price: null,
+              calendar_id: null,
+              calendar_version: null,
+              entry_trade_date: null,
+              forecast_end_trade_date: null,
+              qualification_track: qualificationTrack,
+              track_evaluations: [
+                {{
+                  track: "event_catalyst",
+                  status: qualificationTrack === "event_catalyst" ? "PASS" : "FAIL",
+                  blocker_codes: qualificationTrack === "event_catalyst" ? [] : ["VERIFIED_POSITIVE_EVENT_MISSING"],
+                }},
+                {{ track: "quality_technical", status: "PASS", blocker_codes: [] }},
+              ],
               candidate_snapshot: {{
-                code,
-                name: `Qualified ${{code}}`,
+                code: source.code,
+                name: source.name,
+                data_quality: {{ score: 98 }},
                 kline: [],
                 realtime: {{
                   price: 100 + score / 10,
@@ -180,29 +240,61 @@ class WorkerApiContractTests(unittest.TestCase):
                   fetched_at: "2026-08-25T22:47:00+08:00",
                 }},
               }},
-            }});
-            const aapl = candidate("us", "AAPL", 88);
-            const msft = candidate("us", "MSFT", 84);
-            const tencent = candidate("hk", "0700.HK", 81);
+              }};
+            }};
+            const sources = [
+              sourceRow("us", "AAPL", "event_catalyst"),
+              sourceRow("us", "MSFT", "quality_technical"),
+              sourceRow("hk", "0700.HK", "quality_technical"),
+            ];
+            sources[2].legacy_recommendation_degree = 75;
+            const [aapl, msft, tencent] = [
+              candidate(sources[0], "event_catalyst"),
+              candidate(sources[1], "quality_technical"),
+              candidate(sources[2], "quality_technical"),
+            ];
             const latest = {{
+              model_version: "smart-selector-2026-08-26.2-dual-track-rule",
               generated_at: "2026-08-25T22:47:00+08:00",
               snapshot_key: "2026-08-25_2026-08-25_224700.json",
               markets: {{
                 us: {{ decision: {{ watchlist: [] }} }},
                 hk: {{ decision: {{ watchlist: [] }} }},
               }},
+              global_decision: {{ evaluated_candidates: sources }},
+              production_rule_inputs: {{
+                contract_version: "production-rule-inputs-v1",
+                action_basis: "dual_track_candidate_qualification_v3",
+                rule_model_id: "ten-day-audited-rule-ensemble-v3",
+                evaluated_candidate_count: 3,
+                ledger_sha256: "a".repeat(64),
+                rows: [aapl, msft, tencent].map((row, index) => ({{
+                  ...sources[index],
+                  input_index: index,
+                  source_candidate_present: true,
+                  source_data_quality_score: 98,
+                  candidate_snapshot: structuredClone(row.candidate_snapshot),
+                }})),
+              }},
               production_decision: {{
                 contract_version: "production-rule-10d-v1",
                 decision_scope: "global_10d_bounded_recall",
-                action_basis: "candidate_level_rule_qualification_v2",
+                action_basis: "dual_track_candidate_qualification_v3",
                 action: "QUALIFIED_PICK",
-                rule_model_id: "ten-day-audited-rule-ensemble-v2",
+                rule_model_id: "ten-day-audited-rule-ensemble-v3",
                 score_kind: "RULE_QUALIFICATION_SCORE",
                 probability: null,
                 calibrated: false,
                 qualified_candidate_count: 3,
-                primary: aapl,
-                qualified_candidates: [aapl, msft, tencent],
+                evaluated_candidate_count: 3,
+                rejected_candidate_count: 0,
+                blocker_codes: [],
+                source_rule_inputs_contract_version: "production-rule-inputs-v1",
+                source_rule_inputs_sha256: "a".repeat(64),
+                source_rule_input_count: 3,
+                primary: structuredClone(aapl),
+                qualified_candidates: structuredClone([aapl, msft, tencent]),
+                evaluated_candidates: structuredClone([aapl, msft, tencent]),
               }},
             }};
             const responseFor = (payload) => new Response(JSON.stringify(payload), {{
@@ -244,15 +336,23 @@ class WorkerApiContractTests(unittest.TestCase):
             const summary = (await summaryResponse.json()).latest.production_decision;
             assert.deepEqual(summary.qualified_candidates.map((row) => row.code), ["AAPL", "MSFT", "0700.HK"]);
             assert.equal(summary.qualified_candidates_truncated, false);
+            assert.equal(summary.qualified_candidates[0].qualification_track, "event_catalyst");
+            assert.equal(summary.qualified_candidates[1].qualification_track, "quality_technical");
+            assert.equal(summary.qualified_candidates[1].track_evaluations[1].status, "PASS");
             assert.equal(Object.hasOwn(summary.primary, "candidate_snapshot"), false);
             assert.equal(summary.qualified_candidates.every((row) => !Object.hasOwn(row, "candidate_snapshot")), true);
 
+            const toV2 = (row) => ({{ ...row, rule_model_id: "ten-day-audited-rule-ensemble-v2" }});
+            const v2Decision = {{
+              ...latest.production_decision,
+              action_basis: "candidate_level_rule_qualification_v2",
+              rule_model_id: "ten-day-audited-rule-ensemble-v2",
+              primary: toV2(aapl),
+              qualified_candidates: [aapl, msft, tencent].map(toV2),
+            }};
             const mismatched = {{
               ...latest,
-              production_decision: {{
-                ...latest.production_decision,
-                action_basis: "strict_rule_qualification_v1",
-              }},
+              production_decision: v2Decision,
             }};
             const rejectedResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/live?market=us&code=MSFT"),
@@ -260,6 +360,143 @@ class WorkerApiContractTests(unittest.TestCase):
             );
             assert.equal(rejectedResponse.status, 404);
             assert.equal((await rejectedResponse.json()).error, "LIVE_CODE_NOT_IN_CURRENT_SNAPSHOT");
+
+            const mismatchedStatusResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/status"),
+              envFor(mismatched),
+            );
+            const mismatchedStatus = await mismatchedStatusResponse.json();
+            assert.equal(mismatchedStatus.production_action, "NO_QUALIFIED_PICK");
+            assert.equal(mismatchedStatus.qualification_id, null);
+            const mismatchedSummaryResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/latest-summary"),
+              envFor(mismatched),
+            );
+            const mismatchedSummary = (await mismatchedSummaryResponse.json()).latest;
+            assert.equal(mismatchedSummary.production_action, "NO_QUALIFIED_PICK");
+            assert.equal(mismatchedSummary.production_decision, null);
+
+            const archivedV2 = {{ ...mismatched, model_version: "smart-selector-2026-08-26.1-candidate-rule" }};
+            const archivedResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=MSFT"),
+              envFor(archivedV2),
+            );
+            assert.equal(archivedResponse.status, 200);
+
+            const oldModelWithV3 = {{
+              ...structuredClone(latest),
+              model_version: "smart-selector-2026-08-26.1-candidate-rule",
+            }};
+            const oldModelWithV3Response = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
+              envFor(oldModelWithV3),
+            );
+            assert.equal(oldModelWithV3Response.status, 404);
+            const oldModelWithV3Status = await (
+              await worker.fetch(new Request("https://xuangu.alixjd.com/api/status"), envFor(oldModelWithV3))
+            ).json();
+            assert.equal(oldModelWithV3Status.production_action, "NO_QUALIFIED_PICK");
+
+            const missingModelWithV3 = structuredClone(latest);
+            delete missingModelWithV3.model_version;
+            const missingModelWithV3Response = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
+              envFor(missingModelWithV3),
+            );
+            assert.equal(missingModelWithV3Response.status, 404);
+
+            const failedQuality = structuredClone(latest);
+            failedQuality.production_decision.qualified_candidates[1].track_evaluations[1].status = "FAIL";
+            const failedQualityResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=MSFT"),
+              envFor(failedQuality),
+            );
+            assert.equal(failedQualityResponse.status, 404);
+
+            const passWithBlocker = structuredClone(latest);
+            passWithBlocker.production_decision.qualified_candidates[1].track_evaluations[1].blocker_codes = ["IMPOSSIBLE_PASS_BLOCKER"];
+            const passWithBlockerResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=MSFT"),
+              envFor(passWithBlocker),
+            );
+            assert.equal(passWithBlockerResponse.status, 404);
+
+            const eventWithoutEvidence = structuredClone(latest);
+            eventWithoutEvidence.production_decision.primary.verified_positive_event_ids = [];
+            eventWithoutEvidence.production_decision.qualified_candidates[0].verified_positive_event_ids = [];
+            const eventWithoutEvidenceResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
+              envFor(eventWithoutEvidence),
+            );
+            assert.equal(eventWithoutEvidenceResponse.status, 404);
+
+            const evilMirror = structuredClone(latest);
+            evilMirror.production_decision.qualified_candidates[1].name = "EVIL MIRROR";
+            const evilMirrorResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=MSFT"),
+              envFor(evilMirror),
+            );
+            assert.equal(evilMirrorResponse.status, 404);
+
+            const lowScorePrimary = structuredClone(latest);
+            lowScorePrimary.production_decision.primary = structuredClone(
+              lowScorePrimary.production_decision.qualified_candidates[2],
+            );
+            const lowScorePrimaryResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
+              envFor(lowScorePrimary),
+            );
+            assert.equal(lowScorePrimaryResponse.status, 404);
+
+            const reorderedEvaluation = structuredClone(latest);
+            [
+              reorderedEvaluation.production_decision.evaluated_candidates[1],
+              reorderedEvaluation.production_decision.evaluated_candidates[2],
+            ] = [
+              reorderedEvaluation.production_decision.evaluated_candidates[2],
+              reorderedEvaluation.production_decision.evaluated_candidates[1],
+            ];
+            const reorderedEvaluationResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
+              envFor(reorderedEvaluation),
+            );
+            assert.equal(reorderedEvaluationResponse.status, 404);
+
+            const highScoreFakeRejected = structuredClone(latest);
+            highScoreFakeRejected.production_decision.evaluated_candidates[0].status = "REJECTED";
+            const highScoreFakeRejectedResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
+              envFor(highScoreFakeRejected),
+            );
+            assert.equal(highScoreFakeRejectedResponse.status, 404);
+
+            const fakeQualityPass = structuredClone(latest);
+            fakeQualityPass.production_rule_inputs.rows[1].source_data_quality_score = 90;
+            fakeQualityPass.production_rule_inputs.rows[1].candidate_snapshot.data_quality.score = 90;
+            for (const row of [
+              fakeQualityPass.production_decision.qualified_candidates[1],
+              fakeQualityPass.production_decision.evaluated_candidates[1],
+            ]) {{
+              row.data_quality_score = 90;
+              row.score_components.data_quality = 13.5;
+              row.qualification_score = 76.3;
+              row.candidate_snapshot.data_quality.score = 90;
+            }}
+            const fakeQualityPassResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=MSFT"),
+              envFor(fakeQualityPass),
+            );
+            assert.equal(fakeQualityPassResponse.status, 404);
+
+            const secondaryQuoteMissing = structuredClone(latest);
+            delete secondaryQuoteMissing.production_rule_inputs.rows[1].candidate_snapshot.realtime;
+            delete secondaryQuoteMissing.production_decision.qualified_candidates[1].candidate_snapshot.realtime;
+            delete secondaryQuoteMissing.production_decision.evaluated_candidates[1].candidate_snapshot.realtime;
+            const secondaryQuoteMissingResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
+              envFor(secondaryQuoteMissing),
+            );
+            assert.equal(secondaryQuoteMissingResponse.status, 404);
             """
         )
 

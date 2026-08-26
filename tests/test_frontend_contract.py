@@ -1,11 +1,62 @@
 from __future__ import annotations
 
+import json
 import pathlib
 import re
+import subprocess
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def run_app_node(body: str) -> None:
+    app_path = ROOT / "static" / "app.js"
+    harness = f"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+let source = fs.readFileSync({json.dumps(str(app_path))}, "utf8")
+  .replace(/\\ninitialize\\(\\);\\s*$/, "");
+const roots = new Map([
+  ["#eventsView", {{ innerHTML: "" }}],
+  ["#eventType", {{ value: "" }}],
+  ["#eventDirection", {{ value: "" }}],
+]);
+const sandbox = {{
+  assert,
+  __roots: roots,
+  console,
+  document: {{
+    querySelector: (selector) => roots.get(selector) || null,
+    querySelectorAll: () => [],
+  }},
+  window: {{
+    addEventListener: () => {{}},
+    devicePixelRatio: 1,
+    matchMedia: () => ({{ matches: false }}),
+    setInterval: () => 0,
+    setTimeout,
+  }},
+  location: {{ hash: "", origin: "https://xuangu.test" }},
+  URL,
+}};
+vm.createContext(sandbox);
+source += "\\n" + {json.dumps(body)};
+vm.runInContext(source, sandbox, {{ filename: "static/app.js" }});
+"""
+    completed = subprocess.run(
+        ["node"],
+        input=harness,
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"node frontend behavior check failed\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+        )
 
 
 class FrontendContractTests(unittest.TestCase):
@@ -156,7 +207,10 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('<canvas id="decisionChart"', self.js)
         self.assertIn('<canvas id="historyChart"', self.js)
         self.assertNotIn("<svg", self.html + self.js)
-        self.assertIn("规则合格候选事件链", self.js)
+        self.assertIn('aria-label="全部规则合格候选通道审计"', self.js)
+        self.assertIn("事件催化轨已绑定", self.js)
+        self.assertIn("event_id：", self.js)
+        self.assertIn("质量趋势通道不绑定正向事件", self.js)
         self.assertIn("规则候选证据", self.js)
 
     def test_copy_does_not_claim_uncalibrated_performance(self) -> None:
@@ -321,17 +375,17 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("规则资格分（非概率）", self.js)
         self.assertIn("生产规则模型已有合格候选", self.js)
         self.assertIn("规则合格 ${fmt(production.qualifiedCount, 0)} · 校准可执行", self.js)
-        self.assertIn('row.decisionRole === "qualified" ? "规则合格"', self.js)
+        self.assertIn("productionQualificationForCandidate", self.js)
         self.assertIn("decision.qualified_candidates", self.js)
         self.assertIn("qualifiedCount: qualified ? qualifiedRows.length : 0", self.js)
         self.assertIn("publishedCount !== rows.length", self.js)
         self.assertIn("productionQualifiedRows(state.snapshot, market).some", self.js)
         self.assertIn("const rolePriority = { qualified: 0", self.js)
         self.assertIn("syncPreferredCandidate({ revealQualified: true })", self.js)
-        self.assertIn('productionPrimary.rule_model_id || "ten-day-audited-rule-ensemble-v2"', self.js)
+        self.assertIn("productionPrimary.rule_model_id || item.production_decision?.rule_model_id", self.js)
         self.assertIn("全局校准模型结论", self.js)
-        self.assertIn("生产规则资格模型 · V2", self.js)
-        self.assertIn("推荐度 64 / 63 / 64；市场动作仅溯源", self.js)
+        self.assertIn("生产规则资格模型 · V3", self.js)
+        self.assertIn("推荐度 64 / 63 / 64", self.js)
         self.assertIn("规则资格轨已通过", self.js)
         self.assertIn("规则轨 ${esc(production.action)} · 校准轨", self.js)
         self.assertIn("只有通过校准合同的 global_decision 才能展示上涨概率", self.js)
@@ -339,6 +393,444 @@ class FrontendContractTests(unittest.TestCase):
         self.assertNotRegex(self.js, r"ratioPct\([^\n)]*qualification_score")
         self.assertNotRegex(self.js, r"qualification_score\s*/\s*100")
         self.assertNotRegex(self.js, r"pct\([^\n)]*qualification_score")
+
+    def test_v3_dual_track_qualification_is_named_without_inventing_event_evidence(self) -> None:
+        self.assertIn('decision.action_basis === "dual_track_candidate_qualification_v3"', self.js)
+        self.assertIn('decision.rule_model_id === "ten-day-audited-rule-ensemble-v3"', self.js)
+        self.assertRegex(self.js, r"function qualificationTrackLabel\(track\)")
+        self.assertIn('event_catalyst: "事件催化合格"', self.js)
+        self.assertIn('quality_technical: "质量趋势合格"', self.js)
+        self.assertIn("qualificationTrackLabel(primary.qualification_track)", self.js)
+        self.assertIn("qualificationTrackLabel(qualification.qualification_track)", self.js)
+        self.assertIn("qualificationTrackLabel(production.primary.qualification_track)", self.js)
+        self.assertIn("qualificationTrackLabel(productionPrimary.qualification_track)", self.js)
+        self.assertIn("已完成事件扫描且未发现重大负面；本通道不要求正向催化", self.js)
+        self.assertIn("质量趋势通道不绑定正向事件", self.js)
+        self.assertIn("生产规则资格模型 · V3", self.js)
+        self.assertIn("事件催化轨", self.js)
+        self.assertIn("推荐度 64 / 63 / 64", self.js)
+        self.assertIn("Top 20% · 正向事件 ≥1 · RR ≥1.20", self.js)
+        self.assertIn("质量趋势轨", self.js)
+        self.assertIn("推荐度 66 / 67 / 68", self.js)
+        self.assertIn("Top 10% · 数据质量 ≥95 · RR ≥1.50 · 资格分 ≥72", self.js)
+        self.assertIn("A/H 上行≥6% 且下行≤6%", self.js)
+        self.assertIn("US 上行≥6.5% 且下行≤7.5%", self.js)
+
+    def test_v3_malformed_qualified_rows_fail_closed_at_browser_runtime(self) -> None:
+        run_app_node(
+            r"""
+const clone = (value) => JSON.parse(JSON.stringify(value));
+const scoreParts = ({ legacy, rank, universe, dataQuality, eventIds, low, high }) => {
+  const v2Strength = (universe - rank + 1) / universe * 100;
+  const eventStrength = eventIds.length ? Math.min(100, 80 + 5 * eventIds.length) : 0;
+  const riskRewardStrength = Math.min(100, high / Math.abs(low) / 2 * 100);
+  const round2 = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
+  const components = {
+    legacy_recommendation: round2(legacy * 0.30),
+    v2_rank_strength: round2(v2Strength * 0.30),
+    data_quality: round2(dataQuality * 0.15),
+    verified_event_evidence: round2(eventStrength * 0.15),
+    risk_reward_scenario: round2(riskRewardStrength * 0.10),
+  };
+  return { components, score: round2(Object.values(components).reduce((total, value) => total + value, 0)) };
+};
+const makeRow = (track = "event_catalyst") => ({
+  ...(() => {
+    const eventIds = track === "event_catalyst" ? ["evt:audit"] : [];
+    const { components, score } = scoreParts({
+      legacy: 70, rank: 1, universe: 20, dataQuality: 100, eventIds, low: -4, high: 8,
+    });
+    return {
+      qualification_score: score,
+      score_components: components,
+      verified_positive_event_ids: eventIds,
+    };
+  })(),
+  qualification_id: "qual_0123456789abcdef01234567",
+  market: "us",
+  code: "AUDIT",
+  name: "Audit Candidate",
+  status: "QUALIFIED",
+  qualification_track: track,
+  rule_model_id: "ten-day-audited-rule-ensemble-v3",
+  score_kind: "RULE_QUALIFICATION_SCORE",
+  probability: null,
+  probability_status: "NOT_APPLICABLE",
+  calibrated: false,
+  expected_net_utility: null,
+  blocker_codes: [],
+  legacy_signal: "BUY_CANDIDATE",
+  legacy_recommendation_degree: 70,
+  v2_rank: 1,
+  v2_rank_universe_size: 20,
+  v2_rank_fraction: 0.05,
+  data_quality_score: 100,
+  event_candidate_scanned: true,
+  track_evaluations: track === "event_catalyst" ? [
+    { track: "event_catalyst", status: "PASS", blocker_codes: [] },
+    { track: "quality_technical", status: "PASS", blocker_codes: [] },
+  ] : [
+    { track: "event_catalyst", status: "FAIL", blocker_codes: ["VERIFIED_POSITIVE_EVENT_MISSING"] },
+    { track: "quality_technical", status: "PASS", blocker_codes: [] },
+  ],
+  estimated_10d_range: { low_pct: -4, high_pct: 8, horizon_trade_days: 10 },
+  risk_reward: { upside_pct: 8, downside_pct: 4, ratio: 2 },
+  candidate_snapshot: { market: "us", code: "AUDIT", name: "Audit Candidate" },
+});
+const sourceForRow = (row) => ({
+  market: row.market,
+  code: row.code,
+  name: row.name,
+  blocker_codes: row.qualification_track === "quality_technical" ? ["VERIFIED_POSITIVE_EVENT_MISSING"] : [],
+  legacy_signal: row.legacy_signal,
+  legacy_recommendation_degree: row.legacy_recommendation_degree,
+  v2_rank: row.v2_rank,
+  v2_rank_universe_size: row.v2_rank_universe_size,
+  priority_components: { data_quality: row.data_quality_score / 5 },
+  event_candidate_scanned: row.event_candidate_scanned,
+  verified_positive_event_ids: clone(row.verified_positive_event_ids),
+  estimated_10d_range: {
+    low_pct: row.estimated_10d_range.low_pct,
+    high_pct: row.estimated_10d_range.high_pct,
+  },
+});
+const inputForRow = (source, row, index = 0) => ({
+  input_index: index,
+  market: source.market,
+  code: source.code,
+  name: source.name,
+  blocker_codes: clone(source.blocker_codes),
+  legacy_signal: source.legacy_signal,
+  legacy_recommendation_degree: source.legacy_recommendation_degree,
+  v2_rank: source.v2_rank,
+  v2_rank_universe_size: source.v2_rank_universe_size,
+  priority_components: clone(source.priority_components),
+  event_candidate_scanned: source.event_candidate_scanned,
+  verified_positive_event_ids: clone(source.verified_positive_event_ids),
+  estimated_10d_range: clone(source.estimated_10d_range),
+  source_candidate_present: true,
+  source_data_quality_score: row.data_quality_score,
+  candidate_snapshot: clone(row.candidate_snapshot),
+});
+const makeSnapshot = (row, version = 3) => {
+  const ledgerHash = "a".repeat(64);
+  const decision = {
+    contract_version: "production-rule-10d-v1",
+    decision_scope: "global_10d_bounded_recall",
+    action_basis: version === 3
+      ? "dual_track_candidate_qualification_v3"
+      : version === 2
+        ? "candidate_level_rule_qualification_v2"
+        : "strict_rule_qualification_v1",
+    rule_model_id: version === 3
+      ? "ten-day-audited-rule-ensemble-v3"
+      : version === 2
+        ? "ten-day-audited-rule-ensemble-v2"
+        : "ten-day-audited-rule-ensemble-v1",
+    action: "QUALIFIED_PICK",
+    score_kind: "RULE_QUALIFICATION_SCORE",
+    probability: null,
+    calibrated: false,
+    qualified_candidate_count: 1,
+    rejected_candidate_count: 0,
+    evaluated_candidate_count: 1,
+    primary: clone(row),
+    qualified_candidates: [clone(row)],
+    evaluated_candidates: [clone(row)],
+    blocker_codes: [],
+  };
+  const snapshot = {
+    model_version: version === 3
+      ? "smart-selector-2026-08-26.2-dual-track-rule"
+      : `archived-production-rule-v${version}`,
+    markets: { a_share: { decision: {} }, hk: { decision: {} }, us: { decision: {} } },
+    production_decision: decision,
+  };
+  if (version === 3) {
+    const source = sourceForRow(row);
+    snapshot.global_decision = { evaluated_candidates: [source] };
+    snapshot.production_rule_inputs = {
+      contract_version: "production-rule-inputs-v1",
+      action_basis: "dual_track_candidate_qualification_v3",
+      rule_model_id: "ten-day-audited-rule-ensemble-v3",
+      evaluated_candidate_count: 1,
+      rows: [inputForRow(source, row)],
+      ledger_sha256: ledgerHash,
+    };
+    Object.assign(decision, {
+      source_rule_inputs_contract_version: "production-rule-inputs-v1",
+      source_rule_inputs_sha256: ledgerHash,
+      source_rule_input_count: 1,
+    });
+  }
+  return snapshot;
+};
+const assertRejected = (label, mutate) => {
+  const snapshot = makeSnapshot(makeRow());
+  mutate(snapshot.production_decision.primary);
+  mutate(snapshot.production_decision.qualified_candidates[0]);
+  mutate(snapshot.production_decision.evaluated_candidates[0]);
+  assert.equal(productionQualifiedRows(snapshot).length, 0, `${label}: qualified rows`);
+  assert.equal(productionDecisionTruth(snapshot).action, "NO_QUALIFIED_PICK", `${label}: decision`);
+};
+
+assertRejected("unknown track", (row) => { row.qualification_track = "unknown"; });
+assertRejected("track order", (row) => { row.track_evaluations.reverse(); });
+assertRejected("PASS with blockers", (row) => { row.track_evaluations[0].blocker_codes = ["IMPOSSIBLE_PASS_BLOCKER"]; });
+assertRejected("FAIL without blockers", (row) => {
+  row.track_evaluations[1] = { track: "quality_technical", status: "FAIL", blocker_codes: [] };
+});
+assertRejected("selected track not PASS", (row) => {
+  row.track_evaluations[0] = { track: "event_catalyst", status: "FAIL", blocker_codes: ["EVENT_GATE_FAILED"] };
+  row.track_evaluations[1] = { track: "quality_technical", status: "PASS", blocker_codes: [] };
+});
+assertRejected("event scan missing", (row) => { row.event_candidate_scanned = false; });
+assertRejected("event catalyst evidence missing", (row) => { row.verified_positive_event_ids = []; });
+
+const mixedSnapshot = makeSnapshot(makeRow());
+mixedSnapshot.production_decision.primary.event_candidate_scanned = false;
+assert.equal(productionQualifiedRows(mixedSnapshot).length, 0, "a valid duplicate must not launder a malformed V3 primary");
+assert.equal(productionDecisionTruth(mixedSnapshot).action, "NO_QUALIFIED_PICK");
+
+const evilPrimary = makeSnapshot(makeRow());
+evilPrimary.production_decision.primary.name = "EVIL mirror";
+evilPrimary.production_decision.primary.candidate_snapshot.name = "EVIL mirror";
+assert.equal(productionQualifiedRows(evilPrimary).length, 0, "same-id EVIL primary mirror must not replace evaluated truth");
+
+const evilQualifiedMirror = makeSnapshot(makeRow());
+evilQualifiedMirror.production_decision.qualified_candidates[0].score_components.data_quality = 99;
+assert.equal(productionQualifiedRows(evilQualifiedMirror).length, 0, "nested EVIL qualified mirror must fail full normalized JSON equality");
+
+const forgedQuality = makeSnapshot(makeRow("quality_technical"));
+forgedQuality.global_decision.evaluated_candidates[0].legacy_recommendation_degree = 64;
+forgedQuality.production_rule_inputs.rows[0].legacy_recommendation_degree = 64;
+assert.equal(productionQualifiedRows(forgedQuality).length, 0, "forged quality PASS below the US Legacy 68 gate must be rejected");
+
+const sharedBlockerBypass = makeSnapshot(makeRow("quality_technical"));
+sharedBlockerBypass.global_decision.evaluated_candidates[0].blocker_codes.push("MATERIAL_NEGATIVE_EVENT");
+sharedBlockerBypass.production_rule_inputs.rows[0].blocker_codes.push("MATERIAL_NEGATIVE_EVENT");
+assert.equal(productionQualifiedRows(sharedBlockerBypass).length, 0, "quality track must not waive a shared safety blocker");
+
+const qualitySnapshot = makeSnapshot(makeRow("quality_technical"));
+assert.equal(productionQualifiedRows(qualitySnapshot).length, 1, "valid quality row remains accepted without positive events");
+
+const downgradedV3 = makeSnapshot(makeRow("quality_technical"));
+downgradedV3.model_version = "archived-production-rule-v2";
+assert.equal(productionQualifiedRows(downgradedV3).length, 0, "V3 cannot bypass strict checks under an older model_version");
+
+const bothPassWrongSelection = makeSnapshot(makeRow());
+for (const row of [
+  bothPassWrongSelection.production_decision.primary,
+  bothPassWrongSelection.production_decision.qualified_candidates[0],
+  bothPassWrongSelection.production_decision.evaluated_candidates[0],
+]) row.qualification_track = "quality_technical";
+assert.equal(productionQualifiedRows(bothPassWrongSelection).length, 0, "event track must win when both tracks truly PASS");
+
+const highRow = makeRow();
+highRow.code = "HIGH";
+highRow.name = "Higher Score";
+highRow.qualification_id = "qual_111111111111111111111111";
+highRow.candidate_snapshot.code = highRow.code;
+highRow.candidate_snapshot.name = highRow.name;
+const lowRow = makeRow("quality_technical");
+lowRow.code = "LOW";
+lowRow.name = "Lower Score";
+lowRow.qualification_id = "qual_222222222222222222222222";
+lowRow.candidate_snapshot.code = lowRow.code;
+lowRow.candidate_snapshot.name = lowRow.name;
+const highSource = sourceForRow(highRow);
+const lowSource = sourceForRow(lowRow);
+const forgedOrder = makeSnapshot(highRow);
+forgedOrder.global_decision.evaluated_candidates = [highSource, lowSource];
+forgedOrder.production_rule_inputs.rows = [
+  inputForRow(highSource, highRow, 0),
+  inputForRow(lowSource, lowRow, 1),
+];
+forgedOrder.production_rule_inputs.evaluated_candidate_count = 2;
+forgedOrder.production_decision.source_rule_input_count = 2;
+forgedOrder.production_decision.evaluated_candidate_count = 2;
+forgedOrder.production_decision.qualified_candidate_count = 2;
+forgedOrder.production_decision.rejected_candidate_count = 0;
+forgedOrder.production_decision.evaluated_candidates = [clone(lowRow), clone(highRow)];
+forgedOrder.production_decision.qualified_candidates = [clone(lowRow), clone(highRow)];
+forgedOrder.production_decision.primary = clone(lowRow);
+assert.equal(productionQualifiedRows(forgedOrder).length, 0, "a lower score cannot become primary by reordering every published mirror");
+assert.equal(productionDecisionTruth(forgedOrder).action, "NO_QUALIFIED_PICK", "reordered V3 primary must fail closed");
+
+const archivedV2Row = makeRow();
+archivedV2Row.rule_model_id = "ten-day-audited-rule-ensemble-v2";
+delete archivedV2Row.qualification_track;
+delete archivedV2Row.track_evaluations;
+delete archivedV2Row.event_candidate_scanned;
+delete archivedV2Row.verified_positive_event_ids;
+assert.equal(productionQualifiedRows(makeSnapshot(archivedV2Row, 2)).length, 1, "archived V2 remains compatible");
+const currentVersionWithV2 = makeSnapshot(archivedV2Row, 2);
+currentVersionWithV2.model_version = "smart-selector-2026-08-26.2-dual-track-rule";
+assert.equal(productionQualifiedRows(currentVersionWithV2).length, 0, "current model_version cannot publish a V2 decision");
+
+const archivedV1Row = clone(archivedV2Row);
+archivedV1Row.rule_model_id = "ten-day-audited-rule-ensemble-v1";
+assert.equal(productionQualifiedRows(makeSnapshot(archivedV1Row, 1)).length, 1, "archived V1 remains compatible");
+"""
+        )
+
+    def test_event_tab_audits_every_v3_qualified_candidate_without_promoting_secondaries(self) -> None:
+        run_app_node(
+            r"""
+const candidate = (market, code, name, track, score, eventIds = []) => ({
+  ...(() => {
+    const legacy = score;
+    const round2 = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
+    const eventStrength = eventIds.length ? Math.min(100, 80 + 5 * eventIds.length) : 0;
+    const components = {
+      legacy_recommendation: round2(legacy * 0.30),
+      v2_rank_strength: 30,
+      data_quality: 15,
+      verified_event_evidence: round2(eventStrength * 0.15),
+      risk_reward_scenario: 10,
+    };
+    return {
+      qualification_score: round2(Object.values(components).reduce((total, value) => total + value, 0)),
+      score_components: components,
+    };
+  })(),
+  qualification_id: `qual_${code.toLowerCase().replace(/[^a-f0-9]/g, "a").padEnd(24, "0").slice(0, 24)}`,
+  market,
+  code,
+  name,
+  status: "QUALIFIED",
+  qualification_track: track,
+  rule_model_id: "ten-day-audited-rule-ensemble-v3",
+  score_kind: "RULE_QUALIFICATION_SCORE",
+  probability: null,
+  probability_status: "NOT_APPLICABLE",
+  calibrated: false,
+  expected_net_utility: null,
+  blocker_codes: [],
+  legacy_signal: "BUY_CANDIDATE",
+  legacy_recommendation_degree: score,
+  v2_rank: 1,
+  v2_rank_universe_size: 20,
+  v2_rank_fraction: 0.05,
+  data_quality_score: 100,
+  event_candidate_scanned: true,
+  verified_positive_event_ids: eventIds,
+  track_evaluations: [
+    {
+      track: "event_catalyst",
+      status: track === "event_catalyst" ? "PASS" : "FAIL",
+      blocker_codes: track === "event_catalyst" ? [] : ["VERIFIED_POSITIVE_EVENT_MISSING"],
+    },
+    { track: "quality_technical", status: "PASS", blocker_codes: [] },
+  ],
+  estimated_10d_range: { low_pct: -4, high_pct: 8, horizon_trade_days: 10 },
+  risk_reward: { upside_pct: 8, downside_pct: 4, ratio: 2 },
+  candidate_snapshot: { market, code, name },
+});
+const midea = candidate("hk", "0300.HK", "美的集团", "event_catalyst", 70, ["evt:midea"]);
+const vz = candidate("us", "VZ", "威瑞森通讯(Verizon)", "quality_technical", 71);
+const pfe = candidate("us", "PFE", "辉瑞", "quality_technical", 72);
+const qualified = [midea, pfe, vz];
+const sources = qualified.map((row) => ({
+  market: row.market,
+  code: row.code,
+  name: row.name,
+  blocker_codes: row.qualification_track === "quality_technical" ? ["VERIFIED_POSITIVE_EVENT_MISSING"] : [],
+  legacy_signal: row.legacy_signal,
+  legacy_recommendation_degree: row.legacy_recommendation_degree,
+  v2_rank: row.v2_rank,
+  v2_rank_universe_size: row.v2_rank_universe_size,
+  priority_components: { data_quality: 20 },
+  event_candidate_scanned: true,
+  verified_positive_event_ids: [...row.verified_positive_event_ids],
+  estimated_10d_range: { low_pct: -4, high_pct: 8 },
+}));
+const inputRows = sources.map((source, index) => ({
+  input_index: index,
+  market: source.market,
+  code: source.code,
+  name: source.name,
+  blocker_codes: [...source.blocker_codes],
+  legacy_signal: source.legacy_signal,
+  legacy_recommendation_degree: source.legacy_recommendation_degree,
+  v2_rank: source.v2_rank,
+  v2_rank_universe_size: source.v2_rank_universe_size,
+  priority_components: { ...source.priority_components },
+  event_candidate_scanned: source.event_candidate_scanned,
+  verified_positive_event_ids: [...source.verified_positive_event_ids],
+  estimated_10d_range: { ...source.estimated_10d_range },
+  source_candidate_present: true,
+  source_data_quality_score: 100,
+  candidate_snapshot: { ...qualified[index].candidate_snapshot },
+}));
+const ledgerHash = "b".repeat(64);
+state.snapshot = {
+  model_version: "smart-selector-2026-08-26.2-dual-track-rule",
+  generated_at: "2026-08-26T08:00:00+08:00",
+  target_date: "2026-08-26",
+  forecast_end_date: "2026-09-08",
+  markets: { a_share: { decision: {} }, hk: { decision: {} }, us: { decision: {} } },
+  global_decision: { evaluated_candidates: sources },
+  production_rule_inputs: {
+    contract_version: "production-rule-inputs-v1",
+    action_basis: "dual_track_candidate_qualification_v3",
+    rule_model_id: "ten-day-audited-rule-ensemble-v3",
+    evaluated_candidate_count: 3,
+    rows: inputRows,
+    ledger_sha256: ledgerHash,
+  },
+  events: { items: [{
+    event_id: "evt:midea",
+    event_type: "announcement",
+    market: "hk",
+    symbol: "0300.HK",
+    company: "美的集团",
+    title: "美的集团官方公告",
+    source: "HKEXnews",
+    url: "https://example.test/midea",
+    published_at: "2026-08-25T18:00:00+08:00",
+    effective_at: "2026-08-26T09:00:00+08:00",
+    decision_eligible: true,
+    ingestion_mode: "automatic",
+    evidence_status: "verified",
+    source_tier: "official",
+    direction: "positive",
+  }] },
+  production_decision: {
+    contract_version: "production-rule-10d-v1",
+    decision_scope: "global_10d_bounded_recall",
+    action_basis: "dual_track_candidate_qualification_v3",
+    rule_model_id: "ten-day-audited-rule-ensemble-v3",
+    action: "QUALIFIED_PICK",
+    score_kind: "RULE_QUALIFICATION_SCORE",
+    probability: null,
+    calibrated: false,
+    qualified_candidate_count: 3,
+    primary: midea,
+    qualified_candidates: qualified,
+    evaluated_candidates: qualified,
+    evaluated_candidate_count: 3,
+    rejected_candidate_count: 0,
+    source_rule_inputs_contract_version: "production-rule-inputs-v1",
+    source_rule_inputs_sha256: ledgerHash,
+    source_rule_input_count: 3,
+    blocker_codes: [],
+  },
+};
+
+renderEvents();
+const html = __roots.get("#eventsView").innerHTML;
+for (const text of [
+  "美的集团", "威瑞森通讯(Verizon)", "辉瑞",
+  "规则资格分 88.8", "规则资格分 76.3", "规则资格分 76.6",
+  "事件催化合格", "质量趋势合格", "evt:midea",
+]) assert.ok(html.includes(text), `missing event audit text: ${text}`);
+assert.equal((html.match(/已完成事件扫描且未发现重大负面；本通道不要求正向催化/g) || []).length, 2);
+assert.equal((html.match(/合格候选（非主候选）/g) || []).length, 2);
+assert.equal((html.match(/主候选 ·/g) || []).length, 1);
+assert.equal(productionDecisionTruth().primary.code, "0300.HK", "secondary audit must not replace primary");
+"""
+        )
 
     def test_manual_evidence_never_becomes_automatic_evidence(self) -> None:
         self.assertIn("MANUAL_RESEARCH_EVIDENCE", self.js)

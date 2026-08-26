@@ -9,6 +9,7 @@ import types
 import unittest
 from unittest import mock
 
+import production_rule_model
 import server
 from scripts.validate_snapshot import validate_snapshot, validate_snapshot_file
 from tests.test_selector_v2 import fixture_candidate
@@ -98,6 +99,60 @@ def snapshot_fixture() -> dict:
         "market": {"risk": "normal", "items": []},
         "markets": markets,
     }
+
+
+def current_v3_snapshot() -> dict:
+    snapshot = snapshot_fixture()
+    snapshot["model_version"] = server.MODEL_VERSION
+    return server.enrich_snapshot_v2(snapshot)
+
+
+def qualify_current_v3_row(
+    snapshot: dict,
+    index: int,
+    *,
+    code: str | None = None,
+    with_positive_event: bool = True,
+) -> None:
+    row = snapshot["global_decision"]["evaluated_candidates"][index]
+    market = row["market"]
+    if code:
+        row["code"] = code
+    row.update(
+        {
+            "legacy_recommendation_degree": 80,
+            "v2_rank": 1,
+            "v2_rank_universe_size": 100,
+            "event_candidate_scanned": True,
+            "verified_positive_event_ids": ["evt-qualified"] if with_positive_event else [],
+            "estimated_10d_range": {"low_pct": -4.0, "high_pct": 8.0},
+            "blocker_codes": [] if with_positive_event else ["VERIFIED_POSITIVE_EVENT_MISSING"],
+        }
+    )
+    snapshot["global_decision"]["market_states"][market].update(
+        {"state": "READY", "reason_codes": []}
+    )
+    entry = snapshot["production_rule_inputs"]["rows"][index]
+    entry.clear()
+    entry.update(production_rule_model.freeze_production_rule_input_row(row, index))
+    entry.update(
+        {
+            "market": market,
+            "code": row["code"],
+            "source_candidate_present": True,
+            "source_data_quality_score": 100.0,
+        }
+    )
+    candidate_snapshot = copy.deepcopy(snapshot["markets"][market]["decision"]["primary"])
+    candidate_snapshot["code"] = row["code"]
+    candidate_snapshot["symbol"] = row["code"]
+    entry["candidate_snapshot"] = candidate_snapshot
+
+
+def rebuild_current_v3(snapshot: dict) -> None:
+    inputs = snapshot["production_rule_inputs"]
+    inputs["ledger_sha256"] = production_rule_model.production_rule_inputs_sha256(inputs)
+    snapshot["production_decision"] = production_rule_model.build_production_decision(snapshot)
 
 
 def dynamic_hk_us_snapshot_fixture() -> dict:
@@ -333,7 +388,10 @@ class SnapshotContractTests(unittest.TestCase):
     def test_dynamic_hk_us_snapshot_contract_is_auditable(self) -> None:
         enriched = dynamic_hk_us_snapshot_fixture()
 
-        self.assertEqual(validate_snapshot(enriched), [])
+        self.assertEqual(
+            validate_snapshot(enriched),
+            ["production_decision rule contract does not match model_version"],
+        )
         for market_key, target in (("hk", 200), ("us", 300)):
             stats = enriched["markets"][market_key]["stats"]
             self.assertEqual(stats["universe_origin"], server.DYNAMIC_MARKET_ORIGIN)
@@ -484,9 +542,10 @@ class SnapshotContractTests(unittest.TestCase):
     def test_enrichment_publishes_independent_production_rule_contract(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())
 
+        self.assertEqual(server.MODEL_VERSION, "smart-selector-2026-08-26.2-dual-track-rule")
         self.assertEqual(enriched["production_decision"]["contract_version"], "production-rule-10d-v1")
-        self.assertEqual(enriched["production_decision"]["action_basis"], "candidate_level_rule_qualification_v2")
-        self.assertEqual(enriched["production_decision"]["rule_model_id"], "ten-day-audited-rule-ensemble-v2")
+        self.assertEqual(enriched["production_decision"]["action_basis"], "dual_track_candidate_qualification_v3")
+        self.assertEqual(enriched["production_decision"]["rule_model_id"], "ten-day-audited-rule-ensemble-v3")
         self.assertEqual(enriched["production_decision"]["action"], "NO_QUALIFIED_PICK")
         self.assertEqual(enriched["production_decision"]["score_kind"], "RULE_QUALIFICATION_SCORE")
         self.assertIsNone(enriched["production_decision"]["probability"])
@@ -494,23 +553,293 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(enriched["global_decision"]["action"], "NO_VALID_PICK")
         self.assertFalse(enriched["data_health"]["qualification_usable"])
         self.assertFalse(enriched["data_health"]["calibrated_decision_usable"])
-        self.assertEqual(validate_snapshot(enriched), [])
+        self.assertEqual(
+            validate_snapshot(enriched),
+            ["production_decision rule contract does not match model_version"],
+        )
 
         enriched["production_decision"]["probability"] = 0.88
         self.assertIn("production_decision probability must be null", validate_snapshot(enriched))
+
+    def test_current_v3_rule_input_ledger_survives_json_and_enforces_hash_identity_and_count(self) -> None:
+        enriched = current_v3_snapshot()
+        round_tripped = json.loads(json.dumps(enriched, ensure_ascii=False, allow_nan=False))
+        production_errors = [
+            error for error in validate_snapshot(round_tripped)
+            if error.startswith("production")
+        ]
+        self.assertEqual(production_errors, [])
+        self.assertFalse(any("_candidate_pool" in section for section in round_tripped["markets"].values()))
+        self.assertEqual(
+            production_rule_model.build_production_decision(round_tripped),
+            round_tripped["production_decision"],
+        )
+
+        bad_hash = copy.deepcopy(round_tripped)
+        bad_hash["production_rule_inputs"]["rows"][0]["source_data_quality_score"] = 99.0
+        self.assertIn(
+            "production_rule_inputs.ledger_sha256 does not match its payload",
+            validate_snapshot(bad_hash),
+        )
+
+        bad_identity = copy.deepcopy(round_tripped)
+        bad_identity["production_rule_inputs"]["rows"][0]["code"] = "000001"
+        bad_identity["production_rule_inputs"]["ledger_sha256"] = (
+            production_rule_model.production_rule_inputs_sha256(bad_identity["production_rule_inputs"])
+        )
+        self.assertIn(
+            "production_rule_inputs.rows[0] identity does not match global evaluated candidate",
+            validate_snapshot(bad_identity),
+        )
+
+        bad_count = copy.deepcopy(round_tripped)
+        bad_count["production_rule_inputs"]["rows"].pop()
+        bad_count["production_rule_inputs"]["ledger_sha256"] = (
+            production_rule_model.production_rule_inputs_sha256(bad_count["production_rule_inputs"])
+        )
+        errors = validate_snapshot(bad_count)
+        self.assertIn("production_rule_inputs.evaluated_candidate_count does not match rows", errors)
+        self.assertIn("production_rule_inputs rows must cover every global evaluated candidate", errors)
+
+    def test_current_v3_rejects_forged_quality_pass_shared_blocker_bypass_and_mirror_tamper(self) -> None:
+        enriched = current_v3_snapshot()
+        forged = copy.deepcopy(enriched)
+        row = forged["production_decision"]["evaluated_candidates"][0]
+        row.update(
+            {
+                "status": "QUALIFIED",
+                "qualification_id": "qual_0123456789abcdef01234567",
+                "qualification_track": "quality_technical",
+                "track_evaluations": [
+                    {
+                        "track": "event_catalyst",
+                        "status": "FAIL",
+                        "blocker_codes": ["MATERIAL_NEGATIVE_EVENT"],
+                    },
+                    {"track": "quality_technical", "status": "PASS", "blocker_codes": []},
+                ],
+                "blocker_codes": [],
+                "candidate_snapshot": copy.deepcopy(
+                    forged["markets"]["a_share"]["decision"]["primary"]
+                ),
+            }
+        )
+        decision = forged["production_decision"]
+        decision.update(
+            {
+                "action": "QUALIFIED_PICK",
+                "primary": copy.deepcopy(row),
+                "qualified_candidates": [copy.deepcopy(row)],
+                "qualified_candidate_count": 1,
+                "rejected_candidate_count": len(decision["evaluated_candidates"]) - 1,
+                "blocker_codes": [],
+            }
+        )
+        self.assertIn(
+            "production_decision does not match deterministic current V3 rebuild",
+            validate_snapshot(forged),
+        )
+
+        ledger_bypass = current_v3_snapshot()
+        entry = ledger_bypass["production_rule_inputs"]["rows"][0]
+        entry.update(
+            {
+                "legacy_recommendation_degree": 80,
+                "v2_rank": 1,
+                "v2_rank_universe_size": 100,
+                "event_candidate_scanned": True,
+                "verified_positive_event_ids": [],
+                "estimated_10d_range": {"low_pct": -4.0, "high_pct": 8.0},
+                "blocker_codes": ["VERIFIED_POSITIVE_EVENT_MISSING"],
+                "source_data_quality_score": 100.0,
+                "candidate_snapshot": copy.deepcopy(
+                    ledger_bypass["markets"]["a_share"]["decision"]["primary"]
+                ),
+            }
+        )
+        rebuild_current_v3(ledger_bypass)
+        self.assertIn(
+            "production_rule_inputs.rows[0] rule fields do not match global evaluated candidate",
+            validate_snapshot(ledger_bypass),
+        )
+
+        valid_pick = current_v3_snapshot()
+        qualify_current_v3_row(valid_pick, 0)
+        rebuild_current_v3(valid_pick)
+        production_errors = [
+            error for error in validate_snapshot(valid_pick)
+            if error.startswith("production")
+        ]
+        self.assertEqual(production_errors, [])
+
+        wrong_track = copy.deepcopy(valid_pick)
+        for candidate in (
+            wrong_track["production_decision"]["evaluated_candidates"][0],
+            wrong_track["production_decision"]["qualified_candidates"][0],
+            wrong_track["production_decision"]["primary"],
+        ):
+            self.assertEqual(
+                [evaluation["status"] for evaluation in candidate["track_evaluations"]],
+                ["PASS", "PASS"],
+            )
+            candidate["qualification_track"] = "quality_technical"
+        self.assertIn(
+            "production_decision does not match deterministic current V3 rebuild",
+            validate_snapshot(wrong_track),
+        )
+
+        valid_pick["production_decision"]["primary"]["name"] = "未审计镜像"
+        errors = validate_snapshot(valid_pick)
+        self.assertIn(
+            "production primary must exactly match the first qualified evaluated row",
+            errors,
+        )
+        self.assertIn(
+            "production_decision does not match deterministic current V3 rebuild",
+            errors,
+        )
+
+    def test_all_production_qualified_candidates_require_complete_live_quotes(self) -> None:
+        enriched = current_v3_snapshot()
+        qualify_current_v3_row(enriched, 0)
+        qualify_current_v3_row(enriched, 1, code="0005.HK")
+        enriched["production_rule_inputs"]["rows"][1]["candidate_snapshot"].pop("realtime", None)
+        rebuild_current_v3(enriched)
+
+        self.assertIn(
+            "hk:0005.HK realtime quote is required for live publication",
+            validate_snapshot(enriched),
+        )
 
     def test_new_model_requires_production_contract_but_previous_snapshot_remains_deployable(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())
         enriched.pop("production_decision")
 
-        enriched["model_version"] = "smart-selector-2026-08-26.1-candidate-rule"
+        enriched["model_version"] = server.MODEL_VERSION
         self.assertIn("production_decision is required", validate_snapshot(enriched))
 
-        enriched["model_version"] = "smart-selector-2026-08-23.3-evidence-loop"
+        enriched["model_version"] = "smart-selector-2026-08-26.1-candidate-rule"
         self.assertNotIn("production_decision is required", validate_snapshot(enriched))
 
         enriched["markets"]["a_share"]["stats"]["deep_score_limit"] = 96
         self.assertNotIn("markets.a_share.stats.deep_score_limit must be 96/300", validate_snapshot(enriched))
+
+    def test_v3_qualified_rows_enforce_the_selected_track_without_requiring_events_for_quality(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        source = enriched["markets"]["a_share"]["decision"]["primary"]
+        row = {
+            "qualification_id": "qual_0123456789abcdef01234567",
+            "status": "QUALIFIED",
+            "market": "a_share",
+            "code": source["code"],
+            "name": source["name"],
+            "rule_model_id": "ten-day-audited-rule-ensemble-v3",
+            "score_kind": "RULE_QUALIFICATION_SCORE",
+            "qualification_score": 82.4,
+            "probability": None,
+            "calibrated": False,
+            "expected_net_utility": None,
+            "blocker_codes": [],
+            "event_candidate_scanned": True,
+            "verified_positive_event_ids": [],
+            "qualification_track": "quality_technical",
+            "track_evaluations": [
+                {
+                    "track": "event_catalyst",
+                    "status": "FAIL",
+                    "blocker_codes": ["VERIFIED_POSITIVE_EVENT_MISSING"],
+                },
+                {"track": "quality_technical", "status": "PASS", "blocker_codes": []},
+            ],
+            "candidate_snapshot": copy.deepcopy(source),
+        }
+        decision = enriched["production_decision"]
+        decision.update(
+            {
+                "action": "QUALIFIED_PICK",
+                "action_basis": "dual_track_candidate_qualification_v3",
+                "rule_model_id": "ten-day-audited-rule-ensemble-v3",
+                "primary": copy.deepcopy(row),
+                "qualified_candidates": [copy.deepcopy(row)],
+                "evaluated_candidates": [copy.deepcopy(row)],
+                "qualified_candidate_count": 1,
+                "rejected_candidate_count": 0,
+                "evaluated_candidate_count": 1,
+                "blocker_codes": [],
+            }
+        )
+        enriched["markets"]["a_share"]["market_regime"] = {"state": "normal"}
+        enriched["global_decision"]["market_states"]["a_share"].update(
+            {"state": "READY", "reason_codes": []}
+        )
+
+        self.assertEqual(
+            validate_snapshot(enriched),
+            ["production_decision rule contract does not match model_version"],
+        )
+
+        event_track = copy.deepcopy(enriched)
+        for candidate in (
+            event_track["production_decision"]["primary"],
+            event_track["production_decision"]["qualified_candidates"][0],
+            event_track["production_decision"]["evaluated_candidates"][0],
+        ):
+            candidate["qualification_track"] = "event_catalyst"
+        self.assertIn(
+            "production_decision.evaluated_candidates[0] event_catalyst requires verified positive event evidence",
+            validate_snapshot(event_track),
+        )
+
+        failed_track = copy.deepcopy(enriched)
+        failed_track["production_decision"]["evaluated_candidates"][0]["track_evaluations"][1]["status"] = "FAIL"
+        self.assertIn(
+            "production_decision.evaluated_candidates[0] selected qualification track must PASS",
+            validate_snapshot(failed_track),
+        )
+
+        unscanned = copy.deepcopy(enriched)
+        unscanned["production_decision"]["evaluated_candidates"][0]["event_candidate_scanned"] = False
+        self.assertIn(
+            "production_decision.evaluated_candidates[0] requires event candidate scan",
+            validate_snapshot(unscanned),
+        )
+
+    def test_new_model_rejects_v2_pair_but_archived_v2_contract_remains_supported(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        current = copy.deepcopy(enriched)
+        current["model_version"] = server.MODEL_VERSION
+        current["production_decision"]["action_basis"] = "candidate_level_rule_qualification_v2"
+        current["production_decision"]["rule_model_id"] = "ten-day-audited-rule-ensemble-v2"
+        for row in current["production_decision"].get("evaluated_candidates", []):
+            row["rule_model_id"] = "ten-day-audited-rule-ensemble-v2"
+        self.assertIn("production_decision rule contract does not match model_version", validate_snapshot(current))
+
+        archived = copy.deepcopy(current)
+        archived["model_version"] = "smart-selector-2026-08-26.1-candidate-rule"
+        self.assertNotIn("production_decision rule contract does not match model_version", validate_snapshot(archived))
+
+        archived_with_v3 = current_v3_snapshot()
+        archived_with_v3["model_version"] = "smart-selector-2026-08-26.1-candidate-rule"
+        self.assertIn(
+            "production_decision rule contract does not match model_version",
+            validate_snapshot(archived_with_v3),
+        )
+
+    def test_v3_rejected_rows_require_complete_dual_track_audit(self) -> None:
+        enriched = server.enrich_snapshot_v2(snapshot_fixture())
+        rejected = enriched["production_decision"]["evaluated_candidates"][0]
+        self.assertEqual(rejected["status"], "REJECTED")
+        self.assertIsNone(rejected["qualification_track"])
+        self.assertEqual(
+            [item["track"] for item in rejected["track_evaluations"]],
+            ["event_catalyst", "quality_technical"],
+        )
+
+        rejected.pop("track_evaluations")
+        self.assertIn(
+            "production_decision.evaluated_candidates[0].track_evaluations is invalid",
+            validate_snapshot(enriched),
+        )
 
     def test_global_ten_day_gate_is_strict_without_calibration_or_event_pipeline_scan(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())
@@ -548,7 +877,10 @@ class SnapshotContractTests(unittest.TestCase):
 
     def test_snapshot_validator_accepts_shadow_fallback_and_rejects_decision_participation(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())
-        self.assertEqual(validate_snapshot(enriched), [])
+        self.assertEqual(
+            validate_snapshot(enriched),
+            ["production_decision rule contract does not match model_version"],
+        )
         enriched["analysis_models"]["dual_low"]["participates_in_decision"] = True
         self.assertIn("dual-low model must not participate in the decision", validate_snapshot(enriched))
 
@@ -571,7 +903,10 @@ class SnapshotContractTests(unittest.TestCase):
                 "board_counts": server.A_SHARE_BOARD_TARGETS,
             }
         )
-        self.assertEqual(validate_snapshot(enriched), [])
+        self.assertEqual(
+            validate_snapshot(enriched),
+            ["production_decision rule contract does not match model_version"],
+        )
 
         enriched["markets"]["hk"]["stats"]["recall_selected_size"] = 199
         errors = validate_snapshot(enriched)
@@ -651,7 +986,10 @@ class SnapshotContractTests(unittest.TestCase):
         # The production contract fixes the limit at 300, so validate the
         # eligible basis with the production limit and a two-name deep pool.
         stats["deep_score_limit"] = 300
-        self.assertEqual(validate_snapshot(enriched), [])
+        self.assertEqual(
+            validate_snapshot(enriched),
+            ["production_decision rule contract does not match model_version"],
+        )
 
         stats["deep_attempted_size"] = 3
         errors = validate_snapshot(enriched)
@@ -842,7 +1180,10 @@ class SnapshotContractTests(unittest.TestCase):
             self.assertIn("immutable snapshot file is missing", missing_errors)
 
             immutable.write_text(encoded, encoding="utf-8")
-            self.assertEqual(validate_snapshot_file(latest), [])
+            self.assertEqual(
+                validate_snapshot_file(latest),
+                ["production_decision rule contract does not match model_version"],
+            )
 
             immutable.write_text(encoded.replace("legacy-fixture", "different-model"), encoding="utf-8")
             mismatch_errors = validate_snapshot_file(latest)

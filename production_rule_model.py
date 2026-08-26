@@ -1,28 +1,33 @@
 """Auditable ten-session production qualification rules.
 
 The calibrated ``global_decision`` remains the only probability-bearing
-contract. This module consumes its evaluated candidate ledger, removes only
-the two blockers meaning that the probability model is unavailable, and then
-applies a separate deterministic qualification policy. A qualification score
-is a rule match score, never a probability or expected return.
+contract. This module consumes its evaluated candidate ledger and applies two
+deterministic qualification tracks: the established event-catalyst rules and
+a stricter quality-technical path that may waive only missing positive-event
+evidence. A qualification score is a rule match score, never a probability or
+expected return.
 """
 
 from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import math
 from typing import Any, Mapping, Sequence
 
 
 CONTRACT_VERSION = "production-rule-10d-v1"
 DECISION_SCOPE = "global_10d_bounded_recall"
-ACTION_BASIS = "candidate_level_rule_qualification_v2"
-RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v2"
+ACTION_BASIS = "dual_track_candidate_qualification_v3"
+RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v3"
 SCORE_KIND = "RULE_QUALIFICATION_SCORE"
 HORIZON_TRADE_DAYS = 10
 ACTION_PICK = "QUALIFIED_PICK"
 ACTION_NONE = "NO_QUALIFIED_PICK"
+TRACK_EVENT_CATALYST = "event_catalyst"
+TRACK_QUALITY_TECHNICAL = "quality_technical"
+RULE_INPUTS_CONTRACT_VERSION = "production-rule-inputs-v1"
 
 MARKET_POLICY = {
     "a_share": {"minimum_legacy": 64.0, "maximum_downside": 8.0, "minimum_upside": 5.0},
@@ -32,8 +37,19 @@ MARKET_POLICY = {
 MAX_V2_RANK_FRACTION = 0.20
 MIN_RISK_REWARD_RATIO = 1.20
 
-# A real non-positive utility, unknown future blocker, or data/event/risk
-# blocker remains blocking. Only model unavailability is irrelevant here.
+QUALITY_POLICY = {
+    "a_share": {"minimum_legacy": 66.0, "maximum_downside": 6.0, "minimum_upside": 6.0},
+    "hk": {"minimum_legacy": 67.0, "maximum_downside": 6.0, "minimum_upside": 6.0},
+    "us": {"minimum_legacy": 68.0, "maximum_downside": 7.5, "minimum_upside": 6.5},
+}
+QUALITY_MAX_V2_RANK_FRACTION = 0.10
+QUALITY_MIN_DATA_QUALITY = 95.0
+QUALITY_MIN_RISK_REWARD_RATIO = 1.50
+QUALITY_MIN_QUALIFICATION_SCORE = 72.0
+
+# Model availability does not participate in either deterministic track.
+# All safety blockers remain shared; only the quality track separately waives
+# VERIFIED_POSITIVE_EVENT_MISSING before applying its stricter non-event gates.
 MODEL_AVAILABILITY_BLOCKERS = frozenset(
     {"TEN_DAY_MODEL_NOT_READY", "TEN_DAY_PREDICTION_MISSING"}
 )
@@ -50,6 +66,24 @@ CANDIDATE_SNAPSHOT_FIELDS = (
     "execution_state", "estimated_2d_range", "estimated_10d_range", "estimated_2w_range",
     "stop_loss", "take_profit_reference", "reasons",
 )
+RULE_INPUT_ROW_FIELDS = (
+    "name",
+    "blocker_codes",
+    "legacy_signal",
+    "legacy_recommendation_degree",
+    "v2_rank",
+    "v2_rank_universe_size",
+    "event_candidate_scanned",
+    "verified_positive_event_ids",
+    "entry_price",
+    "calendar_id",
+    "calendar_version",
+    "entry_trade_date",
+    "forecast_end_trade_date",
+)
+
+_SOURCE_FROM_SNAPSHOT = object()
+_CANDIDATE_SNAPSHOT_FROM_SOURCE = object()
 
 
 def _finite_number(value: Any) -> bool:
@@ -138,26 +172,84 @@ def _raw_data_quality(row: Mapping[str, Any], candidate: Mapping[str, Any] | Non
     return None
 
 
-def _evaluate_candidate(snapshot: Mapping[str, Any], row: Mapping[str, Any]) -> dict[str, Any]:
+def _source_data_quality(candidate: Mapping[str, Any] | None) -> float | None:
+    quality = candidate.get("data_quality") if isinstance(candidate, Mapping) else None
+    value = quality.get("score") if isinstance(quality, Mapping) else None
+    return _clamp(float(value)) if _finite_number(value) else None
+
+
+def freeze_production_rule_input_row(row: Mapping[str, Any], index: int) -> dict[str, Any]:
+    """Project one global row to exactly the fields consumed by V3."""
+
+    result = {
+        "input_index": index,
+        "market": _text(row.get("market")),
+        "code": _text(row.get("code") or row.get("symbol")),
+    }
+    for key in RULE_INPUT_ROW_FIELDS:
+        if key in row:
+            result[key] = copy.deepcopy(row.get(key))
+    components = row.get("priority_components")
+    if isinstance(components, Mapping) and "data_quality" in components:
+        result["priority_components"] = {
+            "data_quality": copy.deepcopy(components.get("data_quality")),
+        }
+    estimated_range = row.get("estimated_10d_range")
+    if isinstance(estimated_range, Mapping):
+        result["estimated_10d_range"] = {
+            key: copy.deepcopy(estimated_range.get(key))
+            for key in ("low_pct", "high_pct")
+            if key in estimated_range
+        }
+    return result
+
+
+def _evaluate_candidate(
+    snapshot: Mapping[str, Any],
+    row: Mapping[str, Any],
+    *,
+    source_candidate_override: Any = _SOURCE_FROM_SNAPSHOT,
+    qualified_candidate_snapshot: Any = _CANDIDATE_SNAPSHOT_FROM_SOURCE,
+) -> dict[str, Any]:
     source_blockers = row.get("blocker_codes")
-    blockers = (
+    shared_source_blockers = (
         _dedupe([str(code) for code in source_blockers if str(code) not in MODEL_AVAILABILITY_BLOCKERS])
         if isinstance(source_blockers, list)
         else ["SOURCE_BLOCKER_CODES_INVALID"]
     )
+    catalyst_blockers = list(shared_source_blockers)
+    quality_blockers = [
+        code for code in shared_source_blockers
+        if code != "VERIFIED_POSITIVE_EVENT_MISSING"
+    ]
+
+    def block_both(code: str) -> None:
+        catalyst_blockers.append(code)
+        quality_blockers.append(code)
+
     market = _text(row.get("market"))
     code = _text(row.get("code") or row.get("symbol"))
     name = _text(row.get("name"))
     policy = MARKET_POLICY.get(market or "")
+    quality_policy = QUALITY_POLICY.get(market or "")
     if not market or not code:
-        blockers.append("CANDIDATE_IDENTITY_INVALID")
-    if policy is None:
-        blockers.append("MARKET_POLICY_MISSING")
+        block_both("CANDIDATE_IDENTITY_INVALID")
+    if policy is None or quality_policy is None:
+        block_both("MARKET_POLICY_MISSING")
         policy = {"minimum_legacy": 100.0, "maximum_downside": 0.0, "minimum_upside": 100.0}
+        quality_policy = {
+            "minimum_legacy": 100.0,
+            "maximum_downside": 0.0,
+            "minimum_upside": 100.0,
+        }
 
-    source_candidate = _source_candidate(snapshot, market, code)
+    source_candidate = (
+        _source_candidate(snapshot, market, code)
+        if source_candidate_override is _SOURCE_FROM_SNAPSHOT
+        else source_candidate_override
+    )
     if source_candidate is None:
-        blockers.append("CANDIDATE_SNAPSHOT_MISSING")
+        block_both("CANDIDATE_SNAPSHOT_MISSING")
 
     # ``legacy_signal`` is a market-level decision: one failed Legacy primary
     # can set it to NO_TRADE for every candidate in that market. Requiring it
@@ -168,11 +260,13 @@ def _evaluate_candidate(snapshot: Mapping[str, Any], row: Mapping[str, Any]) -> 
     recommendation = row.get("legacy_recommendation_degree")
     if not _finite_number(recommendation):
         recommendation_value = 0.0
-        blockers.append("LEGACY_RECOMMENDATION_INVALID")
+        block_both("LEGACY_RECOMMENDATION_INVALID")
     else:
         recommendation_value = _clamp(float(recommendation))
         if recommendation_value < float(policy["minimum_legacy"]):
-            blockers.append("LEGACY_RECOMMENDATION_BELOW_THRESHOLD")
+            catalyst_blockers.append("LEGACY_RECOMMENDATION_BELOW_THRESHOLD")
+        if recommendation_value < float(quality_policy["minimum_legacy"]):
+            quality_blockers.append("QUALITY_LEGACY_BELOW_THRESHOLD")
 
     rank = row.get("v2_rank")
     universe_size = row.get("v2_rank_universe_size")
@@ -185,27 +279,31 @@ def _evaluate_candidate(snapshot: Mapping[str, Any], row: Mapping[str, Any]) -> 
     if not rank_valid:
         rank_value = universe_value = rank_fraction = None
         v2_strength = 0.0
-        blockers.append("V2_RANK_INVALID")
+        block_both("V2_RANK_INVALID")
     else:
         rank_value = float(rank)
         universe_value = float(universe_size)
         rank_fraction = rank_value / universe_value
         v2_strength = _clamp((universe_value - rank_value + 1.0) / universe_value * 100.0)
         if rank_fraction > MAX_V2_RANK_FRACTION:
-            blockers.append("V2_TOP_PERCENTILE_REQUIRED")
+            catalyst_blockers.append("V2_TOP_PERCENTILE_REQUIRED")
+        if rank_fraction > QUALITY_MAX_V2_RANK_FRACTION:
+            quality_blockers.append("QUALITY_V2_TOP_DECILE_REQUIRED")
 
     quality_score = _raw_data_quality(row, source_candidate)
     if quality_score is None:
         quality_score = 0.0
-        blockers.append("DATA_QUALITY_SCORE_INVALID")
+        block_both("DATA_QUALITY_SCORE_INVALID")
+    elif quality_score < QUALITY_MIN_DATA_QUALITY:
+        quality_blockers.append("QUALITY_DATA_QUALITY_BELOW_THRESHOLD")
 
     event_scanned = row.get("event_candidate_scanned") is True
     event_ids_raw = row.get("verified_positive_event_ids")
     event_ids = _dedupe([str(value) for value in event_ids_raw if _text(value)]) if isinstance(event_ids_raw, list) else []
     if not event_scanned:
-        blockers.append("EVENT_CANDIDATE_NOT_SCANNED")
+        block_both("EVENT_CANDIDATE_NOT_SCANNED")
     if not event_ids:
-        blockers.append("VERIFIED_POSITIVE_EVENT_MISSING")
+        catalyst_blockers.append("VERIFIED_POSITIVE_EVENT_MISSING")
     event_strength = min(100.0, 80.0 + 5.0 * len(event_ids)) if event_scanned and event_ids else 0.0
 
     estimated_range = row.get("estimated_10d_range")
@@ -215,18 +313,24 @@ def _evaluate_candidate(snapshot: Mapping[str, Any], row: Mapping[str, Any]) -> 
     if not range_valid:
         low_value = high_value = downside = ratio = None
         risk_reward_strength = 0.0
-        blockers.append("TEN_DAY_RANGE_INVALID")
+        block_both("TEN_DAY_RANGE_INVALID")
     else:
         low_value = float(low_pct)
         high_value = float(high_pct)
         downside = abs(low_value)
         ratio = high_value / downside
         if high_value < float(policy["minimum_upside"]):
-            blockers.append("TEN_DAY_UPSIDE_BELOW_THRESHOLD")
+            catalyst_blockers.append("TEN_DAY_UPSIDE_BELOW_THRESHOLD")
         if downside > float(policy["maximum_downside"]):
-            blockers.append("TEN_DAY_DOWNSIDE_ABOVE_LIMIT")
+            catalyst_blockers.append("TEN_DAY_DOWNSIDE_ABOVE_LIMIT")
         if ratio < MIN_RISK_REWARD_RATIO:
-            blockers.append("RISK_REWARD_BELOW_THRESHOLD")
+            catalyst_blockers.append("RISK_REWARD_BELOW_THRESHOLD")
+        if high_value < float(quality_policy["minimum_upside"]):
+            quality_blockers.append("QUALITY_TEN_DAY_UPSIDE_BELOW_THRESHOLD")
+        if downside > float(quality_policy["maximum_downside"]):
+            quality_blockers.append("QUALITY_TEN_DAY_DOWNSIDE_ABOVE_LIMIT")
+        if ratio < QUALITY_MIN_RISK_REWARD_RATIO:
+            quality_blockers.append("QUALITY_RISK_REWARD_BELOW_THRESHOLD")
         risk_reward_strength = _clamp(ratio / 2.0 * 100.0)
 
     components = {
@@ -237,13 +341,36 @@ def _evaluate_candidate(snapshot: Mapping[str, Any], row: Mapping[str, Any]) -> 
         "risk_reward_scenario": round(risk_reward_strength * 0.10, 2),
     }
     qualification_score = round(_clamp(sum(components.values())), 2)
-    blockers = _dedupe(blockers)
-    qualified = not blockers
+    if qualification_score < QUALITY_MIN_QUALIFICATION_SCORE:
+        quality_blockers.append("QUALITY_QUALIFICATION_SCORE_BELOW_THRESHOLD")
+
+    catalyst_blockers = _dedupe(catalyst_blockers)
+    quality_blockers = _dedupe(quality_blockers)
+    track_evaluations = [
+        {
+            "track": TRACK_EVENT_CATALYST,
+            "status": "PASS" if not catalyst_blockers else "FAIL",
+            "blocker_codes": catalyst_blockers,
+        },
+        {
+            "track": TRACK_QUALITY_TECHNICAL,
+            "status": "PASS" if not quality_blockers else "FAIL",
+            "blocker_codes": quality_blockers,
+        },
+    ]
+    qualification_track = next(
+        (item["track"] for item in track_evaluations if item["status"] == "PASS"),
+        None,
+    )
+    qualified = qualification_track is not None
+    blockers = [] if qualified else _dedupe(catalyst_blockers + quality_blockers)
     result = {
         "market": market,
         "code": code,
         "name": name,
         "status": "QUALIFIED" if qualified else "REJECTED",
+        "qualification_track": qualification_track,
+        "track_evaluations": track_evaluations,
         "rule_model_id": RULE_MODEL_ID,
         "score_kind": SCORE_KIND,
         "qualification_score": qualification_score,
@@ -279,8 +406,107 @@ def _evaluate_candidate(snapshot: Mapping[str, Any], row: Mapping[str, Any]) -> 
     }
     if qualified:
         result["qualification_id"] = _stable_qualification_id(snapshot, market, code)
-        result["candidate_snapshot"] = _compact_candidate_snapshot(source_candidate, market)
+        result["candidate_snapshot"] = (
+            _compact_candidate_snapshot(source_candidate, market)
+            if qualified_candidate_snapshot is _CANDIDATE_SNAPSHOT_FROM_SOURCE
+            else copy.deepcopy(qualified_candidate_snapshot)
+            if isinstance(qualified_candidate_snapshot, Mapping)
+            else None
+        )
     return result
+
+
+def production_rule_inputs_sha256(inputs: Mapping[str, Any]) -> str | None:
+    """Hash every frozen input field except the hash itself using canonical JSON."""
+
+    if not isinstance(inputs, Mapping):
+        return None
+    payload = {
+        str(key): copy.deepcopy(value)
+        for key, value in inputs.items()
+        if key != "ledger_sha256"
+    }
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_production_rule_inputs(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Freeze the smallest self-contained ledger needed to reproduce V3.
+
+    Each global evaluated row is reduced to fields the rules consume, plus
+    source-candidate presence and raw data quality.  The substantially larger
+    public candidate snapshot is retained solely for rows that qualify.
+    """
+
+    global_decision = snapshot.get("global_decision")
+    global_decision = global_decision if isinstance(global_decision, Mapping) else {}
+    raw_rows = global_decision.get("evaluated_candidates")
+    source_rows = raw_rows if isinstance(raw_rows, list) else []
+    rows: list[dict[str, Any]] = []
+    for index, row in enumerate(source_rows):
+        if not isinstance(row, Mapping):
+            continue
+        entry = freeze_production_rule_input_row(row, index)
+        market = entry.get("market")
+        code = entry.get("code")
+        source_candidate = _source_candidate(snapshot, market, code)
+        entry.update({
+            "source_candidate_present": source_candidate is not None,
+            "source_data_quality_score": _source_data_quality(source_candidate),
+        })
+        evaluated = _evaluate_candidate(snapshot, entry)
+        if evaluated.get("status") == "QUALIFIED":
+            entry["candidate_snapshot"] = copy.deepcopy(evaluated.get("candidate_snapshot"))
+        rows.append(entry)
+    result: dict[str, Any] = {
+        "contract_version": RULE_INPUTS_CONTRACT_VERSION,
+        "action_basis": ACTION_BASIS,
+        "rule_model_id": RULE_MODEL_ID,
+        "evaluated_candidate_count": len(source_rows),
+        "rows": rows,
+    }
+    result["ledger_sha256"] = production_rule_inputs_sha256(result)
+    return result
+
+
+def _rule_input_ledger(snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+    inputs = snapshot.get("production_rule_inputs")
+    return inputs if isinstance(inputs, Mapping) else build_production_rule_inputs(snapshot)
+
+
+def _evaluate_from_rule_input(
+    snapshot: Mapping[str, Any],
+    entry: Mapping[str, Any] | None,
+    index: int,
+) -> dict[str, Any]:
+    row = entry if isinstance(entry, Mapping) else {}
+    identity_matches = bool(isinstance(entry, Mapping) and entry.get("input_index") == index)
+    source_present = identity_matches and entry.get("source_candidate_present") is True
+    source_candidate = None
+    if source_present:
+        source_candidate = {
+            "data_quality": {"score": entry.get("source_data_quality_score")},
+        }
+    candidate_snapshot = (
+        entry.get("candidate_snapshot")
+        if identity_matches and "candidate_snapshot" in entry
+        else None
+    )
+    return _evaluate_candidate(
+        snapshot,
+        row,
+        source_candidate_override=source_candidate,
+        qualified_candidate_snapshot=candidate_snapshot,
+    )
 
 
 def build_production_decision(snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -288,8 +514,18 @@ def build_production_decision(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     global_decision = snapshot.get("global_decision")
     global_decision = global_decision if isinstance(global_decision, Mapping) else {}
     rows = global_decision.get("evaluated_candidates")
-    source_rows = rows if isinstance(rows, list) else []
-    evaluated = [_evaluate_candidate(snapshot, row) for row in source_rows if isinstance(row, Mapping)]
+    input_ledger = _rule_input_ledger(snapshot)
+    input_rows = input_ledger.get("rows")
+    input_rows = input_rows if isinstance(input_rows, list) else []
+    evaluated = [
+        _evaluate_from_rule_input(
+            snapshot,
+            entry,
+            index,
+        )
+        for index, entry in enumerate(input_rows)
+        if isinstance(entry, Mapping)
+    ]
     evaluated.sort(key=lambda row: (
         -float(row.get("qualification_score") or 0.0),
         str(row.get("market") or ""),
@@ -315,6 +551,9 @@ def build_production_decision(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "expected_net_utility": None,
         "source_global_contract_version": global_decision.get("contract_version"),
         "source_global_action": global_decision.get("action"),
+        "source_rule_inputs_contract_version": input_ledger.get("contract_version"),
+        "source_rule_inputs_sha256": production_rule_inputs_sha256(input_ledger),
+        "source_rule_input_count": len(input_rows),
         "generated_at": snapshot.get("generated_at"),
         "signal_date": snapshot.get("signal_date"),
         "primary": primary,
@@ -329,7 +568,7 @@ def build_production_decision(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             "legacy_market_action": "DIAGNOSTIC_ONLY",
             "candidate_level_legacy_threshold_required": True,
             "maximum_v2_rank_fraction": MAX_V2_RANK_FRACTION,
-            "verified_positive_event_required": True,
+            "verified_positive_event_required": False,
             "minimum_risk_reward_ratio": MIN_RISK_REWARD_RATIO,
             "score_weights": {
                 "legacy_recommendation": 0.30,
@@ -338,9 +577,42 @@ def build_production_decision(snapshot: Mapping[str, Any]) -> dict[str, Any]:
                 "verified_event_evidence": 0.15,
                 "risk_reward_scenario": 0.10,
             },
+            "tracks": {
+                TRACK_EVENT_CATALYST: {
+                    "market_thresholds": copy.deepcopy(MARKET_POLICY),
+                    "verified_positive_event_required": True,
+                    "event_scan_required": True,
+                    "maximum_v2_rank_fraction": MAX_V2_RANK_FRACTION,
+                    "minimum_risk_reward_ratio": MIN_RISK_REWARD_RATIO,
+                    "minimum_qualification_score": None,
+                },
+                TRACK_QUALITY_TECHNICAL: {
+                    "market_thresholds": copy.deepcopy(QUALITY_POLICY),
+                    "verified_positive_event_required": False,
+                    "event_scan_required": True,
+                    "maximum_v2_rank_fraction": QUALITY_MAX_V2_RANK_FRACTION,
+                    "minimum_data_quality": QUALITY_MIN_DATA_QUALITY,
+                    "minimum_risk_reward_ratio": QUALITY_MIN_RISK_REWARD_RATIO,
+                    "minimum_qualification_score": QUALITY_MIN_QUALIFICATION_SCORE,
+                },
+            },
             "ignored_model_availability_blocker_codes": sorted(MODEL_AVAILABILITY_BLOCKERS),
         },
     }
 
 
-__all__ = ["ACTION_NONE", "ACTION_PICK", "CONTRACT_VERSION", "RULE_MODEL_ID", "SCORE_KIND", "build_production_decision"]
+__all__ = [
+    "ACTION_BASIS",
+    "ACTION_NONE",
+    "ACTION_PICK",
+    "CONTRACT_VERSION",
+    "RULE_INPUTS_CONTRACT_VERSION",
+    "RULE_MODEL_ID",
+    "SCORE_KIND",
+    "TRACK_EVENT_CATALYST",
+    "TRACK_QUALITY_TECHNICAL",
+    "build_production_decision",
+    "build_production_rule_inputs",
+    "freeze_production_rule_input_row",
+    "production_rule_inputs_sha256",
+]

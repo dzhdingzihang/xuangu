@@ -23,6 +23,16 @@ REQUIRED_STATIC_FILES = ("index.html", "styles.css", "app.js")
 MANIFEST_VERSION = "selector-manifest-v2"
 MAX_PUBLIC_FULL_SNAPSHOT_DAYS = 30
 MAX_QUALIFIED_SUMMARY_CANDIDATES = 20
+CURRENT_PRODUCTION_MODEL_VERSION = "smart-selector-2026-08-26.2-dual-track-rule"
+PRODUCTION_RULE_CONTRACTS = {
+    ("strict_rule_qualification_v1", "ten-day-audited-rule-ensemble-v1"),
+    ("candidate_level_rule_qualification_v2", "ten-day-audited-rule-ensemble-v2"),
+    ("dual_track_candidate_qualification_v3", "ten-day-audited-rule-ensemble-v3"),
+}
+CURRENT_PRODUCTION_RULE_CONTRACT = (
+    "dual_track_candidate_qualification_v3",
+    "ten-day-audited-rule-ensemble-v3",
+)
 PRODUCTION_CANDIDATE_SUMMARY_FIELDS = (
     "qualification_id",
     "status",
@@ -44,6 +54,8 @@ PRODUCTION_CANDIDATE_SUMMARY_FIELDS = (
     "data_quality_score",
     "event_candidate_scanned",
     "verified_positive_event_ids",
+    "qualification_track",
+    "track_evaluations",
     "entry_price",
     "entry_trade_date",
     "forecast_end_trade_date",
@@ -528,9 +540,30 @@ def summarize_qualified_candidates(decision: dict) -> list[dict]:
     return result
 
 
+def valid_production_rule_contract(pick: dict, decision: dict) -> bool:
+    pair = (decision.get("action_basis"), decision.get("rule_model_id"))
+    if pair not in PRODUCTION_RULE_CONTRACTS:
+        return False
+    # CURRENT model <-> V3 contract is a strict bijection.  Historical V1/V2
+    # contracts remain readable, while a V3 decision under an older (or
+    # missing) model version is excluded from both history and status assets.
+    if (
+        pick.get("model_version") == CURRENT_PRODUCTION_MODEL_VERSION
+    ) != (pair == CURRENT_PRODUCTION_RULE_CONTRACT):
+        return False
+    return bool(
+        decision.get("contract_version") == "production-rule-10d-v1"
+        and decision.get("decision_scope") == "global_10d_bounded_recall"
+        and decision.get("action") in {"QUALIFIED_PICK", "NO_QUALIFIED_PICK"}
+        and decision.get("score_kind") == "RULE_QUALIFICATION_SCORE"
+        and decision.get("probability") is None
+        and decision.get("calibrated") is False
+    )
+
+
 def summarize_production_decision(pick: dict) -> dict | None:
     decision = pick.get("production_decision")
-    if not isinstance(decision, dict):
+    if not isinstance(decision, dict) or not valid_production_rule_contract(pick, decision):
         return None
     summary = {
         key: decision.get(key)

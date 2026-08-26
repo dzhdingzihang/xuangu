@@ -17,7 +17,10 @@ FIXTURE_COMPLETED_SESSIONS = {
 
 
 def valid_no_pick_snapshot() -> dict:
-    return server.enrich_snapshot_v2(snapshot_fixture())
+    snapshot = server.enrich_snapshot_v2(snapshot_fixture())
+    snapshot.pop("production_decision", None)
+    snapshot.pop("production_rule_inputs", None)
+    return snapshot
 
 
 def valid_executable_snapshot() -> dict:
@@ -75,6 +78,8 @@ def valid_executable_snapshot() -> dict:
             "blocker_codes": [],
         }
     )
+    snapshot.pop("production_decision", None)
+    snapshot.pop("production_rule_inputs", None)
     return snapshot
 
 

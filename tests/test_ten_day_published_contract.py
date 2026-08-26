@@ -88,7 +88,10 @@ def shadow_snapshot(prediction_as_of: str | None = None) -> dict:
         snapshot["analysis_models"]["ten_day_return"]["shadow_predictions"][0][
             "prediction_as_of"
         ] = prediction_as_of
-    return server.enrich_snapshot_v2(snapshot)
+    snapshot = server.enrich_snapshot_v2(snapshot)
+    snapshot.pop("production_decision", None)
+    snapshot.pop("production_rule_inputs", None)
+    return snapshot
 
 
 class TenDayPublishedContractTests(unittest.TestCase):
@@ -212,6 +215,8 @@ class TenDayPublishedContractTests(unittest.TestCase):
         )
 
         refreshed = server.enrich_snapshot_v2(snapshot)
+        refreshed.pop("production_decision", None)
+        refreshed.pop("production_rule_inputs", None)
         joined = next(
             row["shadow_model"]
             for row in refreshed["global_decision"]["evaluated_candidates"]

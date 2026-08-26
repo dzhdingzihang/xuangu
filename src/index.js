@@ -36,6 +36,35 @@ const SCHEDULED_REFRESH_CHECKPOINTS = [...WEEKDAY_CHECKPOINTS, ...FALLBACK_CHECK
 const LIVE_MARKETS = new Set(["a_share", "hk", "us"]);
 const LIVE_CACHE_TTL_MS = 10_000;
 const MAX_QUALIFIED_SUMMARY_CANDIDATES = 20;
+const CURRENT_PRODUCTION_MODEL_VERSION = "smart-selector-2026-08-26.2-dual-track-rule";
+const PRODUCTION_RULE_V3_ACTION_BASIS = "dual_track_candidate_qualification_v3";
+const PRODUCTION_RULE_V3_MODEL_ID = "ten-day-audited-rule-ensemble-v3";
+const PRODUCTION_MODEL_AVAILABILITY_BLOCKERS = new Set([
+  "TEN_DAY_MODEL_NOT_READY",
+  "TEN_DAY_PREDICTION_MISSING",
+]);
+const PRODUCTION_EVENT_MARKET_POLICY = {
+  a_share: { minimumLegacy: 64, maximumDownside: 8, minimumUpside: 5 },
+  hk: { minimumLegacy: 63, maximumDownside: 8, minimumUpside: 5 },
+  us: { minimumLegacy: 64, maximumDownside: 10, minimumUpside: 6 },
+};
+const PRODUCTION_QUALITY_MARKET_POLICY = {
+  a_share: { minimumLegacy: 66, maximumDownside: 6, minimumUpside: 6 },
+  hk: { minimumLegacy: 67, maximumDownside: 6, minimumUpside: 6 },
+  us: { minimumLegacy: 68, maximumDownside: 7.5, minimumUpside: 6.5 },
+};
+const PRODUCTION_EVENT_MAX_RANK_FRACTION = 0.20;
+const PRODUCTION_EVENT_MIN_RISK_REWARD = 1.20;
+const PRODUCTION_QUALITY_MAX_RANK_FRACTION = 0.10;
+const PRODUCTION_QUALITY_MIN_DATA_QUALITY = 95;
+const PRODUCTION_QUALITY_MIN_RISK_REWARD = 1.50;
+const PRODUCTION_QUALITY_MIN_SCORE = 72;
+const PRODUCTION_RULE_INPUT_ROW_FIELDS = [
+  "name", "blocker_codes", "legacy_signal", "legacy_recommendation_degree",
+  "v2_rank", "v2_rank_universe_size", "event_candidate_scanned",
+  "verified_positive_event_ids", "entry_price", "calendar_id", "calendar_version",
+  "entry_trade_date", "forecast_end_trade_date",
+];
 
 function withSecurityHeaders(response) {
   const headers = new Headers(response.headers);
@@ -241,9 +270,506 @@ function validIsoDate(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text;
 }
 
+function contractDeepEqual(left, right) {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => contractDeepEqual(value, right[index]));
+  }
+  if (
+    !left || !right
+    || typeof left !== "object" || typeof right !== "object"
+    || Array.isArray(left) || Array.isArray(right)
+  ) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => (
+      key === rightKeys[index]
+      && contractDeepEqual(left[key], right[key])
+    ));
+}
+
+function finiteRuleNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function clampRuleNumber(value, lower = 0, upper = 100) {
+  return Math.max(lower, Math.min(upper, value));
+}
+
+function roundRuleNumber(value, digits = 2) {
+  const factor = 10 ** digits;
+  return Math.round((value + Number.EPSILON) * factor) / factor;
+}
+
+function ruleText(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function dedupeRuleStrings(values) {
+  if (!Array.isArray(values)) return null;
+  const result = [];
+  const seen = new Set();
+  for (const value of values) {
+    const text = String(value);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    result.push(text);
+  }
+  return result;
+}
+
+// Web Crypto is asynchronous, while the production-decision gate is a
+// synchronous parser.  Keep this small SHA-256 implementation local so the
+// Worker can independently reproduce Python's stable qualification id instead
+// of trusting an id copied into the published decision.
+function sha256RuleText(value) {
+  const bytes = new TextEncoder().encode(String(value));
+  const bitLength = bytes.length * 8;
+  const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  const high = Math.floor(bitLength / 0x100000000);
+  const low = bitLength >>> 0;
+  view.setUint32(paddedLength - 8, high, false);
+  view.setUint32(paddedLength - 4, low, false);
+
+  const constants = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+  const state = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ];
+  const rotateRight = (word, bits) => (word >>> bits) | (word << (32 - bits));
+  const words = new Uint32Array(64);
+
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    for (let index = 0; index < 16; index += 1) {
+      words[index] = view.getUint32(offset + index * 4, false);
+    }
+    for (let index = 16; index < 64; index += 1) {
+      const left = words[index - 15];
+      const right = words[index - 2];
+      const sigma0 = rotateRight(left, 7) ^ rotateRight(left, 18) ^ (left >>> 3);
+      const sigma1 = rotateRight(right, 17) ^ rotateRight(right, 19) ^ (right >>> 10);
+      words[index] = (words[index - 16] + sigma0 + words[index - 7] + sigma1) >>> 0;
+    }
+
+    let [a, b, c, d, e, f, g, h] = state;
+    for (let index = 0; index < 64; index += 1) {
+      const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
+      const choose = (e & f) ^ (~e & g);
+      const temporary1 = (h + sum1 + choose + constants[index] + words[index]) >>> 0;
+      const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
+      const majority = (a & b) ^ (a & c) ^ (b & c);
+      const temporary2 = (sum0 + majority) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temporary1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temporary1 + temporary2) >>> 0;
+    }
+    state[0] = (state[0] + a) >>> 0;
+    state[1] = (state[1] + b) >>> 0;
+    state[2] = (state[2] + c) >>> 0;
+    state[3] = (state[3] + d) >>> 0;
+    state[4] = (state[4] + e) >>> 0;
+    state[5] = (state[5] + f) >>> 0;
+    state[6] = (state[6] + g) >>> 0;
+    state[7] = (state[7] + h) >>> 0;
+  }
+  return state.map((word) => word.toString(16).padStart(8, "0")).join("");
+}
+
+function stableV3QualificationId(snapshot, market, code) {
+  const automation = snapshot?.automation;
+  const scheduledSlot = automation && typeof automation === "object" && !Array.isArray(automation)
+    ? automation.scheduled_slot
+    : null;
+  const target = snapshot?.target_date || snapshot?.signal_date || "";
+  const identity = [
+    "production-rule-10d-v1",
+    PRODUCTION_RULE_V3_MODEL_ID,
+    scheduledSlot || target,
+    target,
+    market,
+    code,
+  ].map((item) => String(item || "")).join("|");
+  return `qual_${sha256RuleText(identity).slice(0, 24)}`;
+}
+
+function frozenV3SourceProjection(source, index) {
+  const result = {
+    input_index: index,
+    market: ruleText(source?.market),
+    code: ruleText(source?.code || source?.symbol),
+  };
+  for (const field of PRODUCTION_RULE_INPUT_ROW_FIELDS) {
+    if (Object.hasOwn(source, field)) result[field] = source[field];
+  }
+  if (source?.priority_components && typeof source.priority_components === "object"
+    && !Array.isArray(source.priority_components)
+    && Object.hasOwn(source.priority_components, "data_quality")) {
+    result.priority_components = { data_quality: source.priority_components.data_quality };
+  }
+  if (source?.estimated_10d_range && typeof source.estimated_10d_range === "object"
+    && !Array.isArray(source.estimated_10d_range)) {
+    result.estimated_10d_range = Object.fromEntries(
+      ["low_pct", "high_pct"]
+        .filter((field) => Object.hasOwn(source.estimated_10d_range, field))
+        .map((field) => [field, source.estimated_10d_range[field]]),
+    );
+  }
+  return result;
+}
+
+function v3RuleInputContext(snapshot) {
+  const sources = snapshot?.global_decision?.evaluated_candidates;
+  const inputs = snapshot?.production_rule_inputs;
+  const inputRows = inputs?.rows;
+  if (
+    !Array.isArray(sources)
+    || !inputs || typeof inputs !== "object" || Array.isArray(inputs)
+    || inputs.contract_version !== "production-rule-inputs-v1"
+    || inputs.action_basis !== PRODUCTION_RULE_V3_ACTION_BASIS
+    || inputs.rule_model_id !== PRODUCTION_RULE_V3_MODEL_ID
+    || !Array.isArray(inputRows)
+    || !Number.isInteger(inputs.evaluated_candidate_count)
+    || inputs.evaluated_candidate_count !== sources.length
+    || inputRows.length !== sources.length
+  ) return null;
+  const byIdentity = new Map();
+  for (let index = 0; index < sources.length; index += 1) {
+    const source = sources[index];
+    const input = inputRows[index];
+    if (
+      !source || typeof source !== "object" || Array.isArray(source)
+      || !input || typeof input !== "object" || Array.isArray(input)
+      || input.input_index !== index
+    ) return null;
+    const market = ruleText(source.market);
+    const code = ruleText(source.code || source.symbol);
+    if (
+      !market || !code
+      || input.market !== market
+      || input.code !== code
+      || typeof input.source_candidate_present !== "boolean"
+    ) return null;
+    const frozenInput = Object.fromEntries(
+      Object.entries(input).filter(([field]) => ![
+        "source_candidate_present",
+        "source_data_quality_score",
+        "candidate_snapshot",
+      ].includes(field)),
+    );
+    if (!contractDeepEqual(frozenInput, frozenV3SourceProjection(source, index))) return null;
+    const key = `${market}:${code}`;
+    if (byIdentity.has(key)) return null;
+    byIdentity.set(key, { source, input });
+  }
+  return { sources, inputRows, byIdentity };
+}
+
+function expectedV3RuleEvaluation(snapshot, input) {
+  const source = input;
+  const market = ruleText(source?.market);
+  const code = ruleText(source?.code || source?.symbol);
+  const eventPolicy = PRODUCTION_EVENT_MARKET_POLICY[market];
+  const qualityPolicy = PRODUCTION_QUALITY_MARKET_POLICY[market];
+  if (!market || !code || !eventPolicy || !qualityPolicy) return null;
+
+  const sourceBlockers = dedupeRuleStrings(source.blocker_codes);
+  const sharedBlockers = sourceBlockers
+    ? sourceBlockers.filter((codeValue) => !PRODUCTION_MODEL_AVAILABILITY_BLOCKERS.has(codeValue))
+    : ["SOURCE_BLOCKER_CODES_INVALID"];
+  const eventBlockers = [...sharedBlockers];
+  const qualityBlockers = sharedBlockers.filter((codeValue) => codeValue !== "VERIFIED_POSITIVE_EVENT_MISSING");
+  const blockBoth = (codeValue) => {
+    eventBlockers.push(codeValue);
+    qualityBlockers.push(codeValue);
+  };
+  if (input?.source_candidate_present !== true) blockBoth("CANDIDATE_SNAPSHOT_MISSING");
+
+  let recommendation = source.legacy_recommendation_degree;
+  if (!finiteRuleNumber(recommendation)) {
+    recommendation = 0;
+    blockBoth("LEGACY_RECOMMENDATION_INVALID");
+  } else {
+    recommendation = clampRuleNumber(recommendation);
+    if (recommendation < eventPolicy.minimumLegacy) eventBlockers.push("LEGACY_RECOMMENDATION_BELOW_THRESHOLD");
+    if (recommendation < qualityPolicy.minimumLegacy) qualityBlockers.push("QUALITY_LEGACY_BELOW_THRESHOLD");
+  }
+
+  const rank = source.v2_rank;
+  const universe = source.v2_rank_universe_size;
+  const rankValid = finiteRuleNumber(rank)
+    && finiteRuleNumber(universe)
+    && universe >= 1
+    && rank >= 1
+    && rank <= universe;
+  let rankFraction = null;
+  let rankStrength = 0;
+  if (!rankValid) {
+    blockBoth("V2_RANK_INVALID");
+  } else {
+    rankFraction = rank / universe;
+    rankStrength = clampRuleNumber((universe - rank + 1) / universe * 100);
+    if (rankFraction > PRODUCTION_EVENT_MAX_RANK_FRACTION) eventBlockers.push("V2_TOP_PERCENTILE_REQUIRED");
+    if (rankFraction > PRODUCTION_QUALITY_MAX_RANK_FRACTION) qualityBlockers.push("QUALITY_V2_TOP_DECILE_REQUIRED");
+  }
+
+  const inputQuality = input.source_candidate_present === true
+    ? input.source_data_quality_score
+    : null;
+  const priorityQuality = source?.priority_components?.data_quality;
+  let dataQuality = finiteRuleNumber(inputQuality)
+    ? clampRuleNumber(inputQuality)
+    : finiteRuleNumber(priorityQuality)
+      ? clampRuleNumber(priorityQuality / 20 * 100)
+      : null;
+  if (dataQuality === null) {
+    dataQuality = 0;
+    blockBoth("DATA_QUALITY_SCORE_INVALID");
+  } else if (dataQuality < PRODUCTION_QUALITY_MIN_DATA_QUALITY) {
+    qualityBlockers.push("QUALITY_DATA_QUALITY_BELOW_THRESHOLD");
+  }
+
+  const eventScanned = source.event_candidate_scanned === true;
+  const eventIds = Array.isArray(source.verified_positive_event_ids)
+    ? dedupeRuleStrings(source.verified_positive_event_ids.filter((value) => ruleText(value)))
+    : [];
+  if (!eventScanned) blockBoth("EVENT_CANDIDATE_NOT_SCANNED");
+  if (!eventIds.length) eventBlockers.push("VERIFIED_POSITIVE_EVENT_MISSING");
+  const eventStrength = eventScanned && eventIds.length
+    ? Math.min(100, 80 + 5 * eventIds.length)
+    : 0;
+
+  const low = source?.estimated_10d_range?.low_pct;
+  const high = source?.estimated_10d_range?.high_pct;
+  const rangeValid = finiteRuleNumber(low) && finiteRuleNumber(high) && low < 0 && high > 0;
+  let downside = null;
+  let ratio = null;
+  let riskRewardStrength = 0;
+  if (!rangeValid) {
+    blockBoth("TEN_DAY_RANGE_INVALID");
+  } else {
+    downside = Math.abs(low);
+    ratio = high / downside;
+    if (high < eventPolicy.minimumUpside) eventBlockers.push("TEN_DAY_UPSIDE_BELOW_THRESHOLD");
+    if (downside > eventPolicy.maximumDownside) eventBlockers.push("TEN_DAY_DOWNSIDE_ABOVE_LIMIT");
+    if (ratio < PRODUCTION_EVENT_MIN_RISK_REWARD) eventBlockers.push("RISK_REWARD_BELOW_THRESHOLD");
+    if (high < qualityPolicy.minimumUpside) qualityBlockers.push("QUALITY_TEN_DAY_UPSIDE_BELOW_THRESHOLD");
+    if (downside > qualityPolicy.maximumDownside) qualityBlockers.push("QUALITY_TEN_DAY_DOWNSIDE_ABOVE_LIMIT");
+    if (ratio < PRODUCTION_QUALITY_MIN_RISK_REWARD) qualityBlockers.push("QUALITY_RISK_REWARD_BELOW_THRESHOLD");
+    riskRewardStrength = clampRuleNumber(ratio / 2 * 100);
+  }
+
+  const components = {
+    legacy_recommendation: roundRuleNumber(recommendation * 0.30),
+    v2_rank_strength: roundRuleNumber(rankStrength * 0.30),
+    data_quality: roundRuleNumber(dataQuality * 0.15),
+    verified_event_evidence: roundRuleNumber(eventStrength * 0.15),
+    risk_reward_scenario: roundRuleNumber(riskRewardStrength * 0.10),
+  };
+  const score = roundRuleNumber(clampRuleNumber(Object.values(components).reduce((sum, value) => sum + value, 0)));
+  if (score < PRODUCTION_QUALITY_MIN_SCORE) qualityBlockers.push("QUALITY_QUALIFICATION_SCORE_BELOW_THRESHOLD");
+
+  const normalizedEventBlockers = dedupeRuleStrings(eventBlockers);
+  const normalizedQualityBlockers = dedupeRuleStrings(qualityBlockers);
+  const trackEvaluations = [
+    {
+      track: "event_catalyst",
+      status: normalizedEventBlockers.length ? "FAIL" : "PASS",
+      blocker_codes: normalizedEventBlockers,
+    },
+    {
+      track: "quality_technical",
+      status: normalizedQualityBlockers.length ? "FAIL" : "PASS",
+      blocker_codes: normalizedQualityBlockers,
+    },
+  ];
+  const qualificationTrack = trackEvaluations.find((evaluation) => evaluation.status === "PASS")?.track || null;
+  const qualified = qualificationTrack !== null;
+  const row = {
+    market,
+    code,
+    name: ruleText(source.name),
+    status: qualified ? "QUALIFIED" : "REJECTED",
+    qualification_track: qualificationTrack,
+    track_evaluations: trackEvaluations,
+    rule_model_id: PRODUCTION_RULE_V3_MODEL_ID,
+    score_kind: "RULE_QUALIFICATION_SCORE",
+    qualification_score: score,
+    score_components: components,
+    probability: null,
+    probability_status: "NOT_APPLICABLE",
+    calibrated: false,
+    expected_net_utility: null,
+    legacy_signal: ruleText(source.legacy_signal),
+    legacy_recommendation_degree: finiteRuleNumber(source.legacy_recommendation_degree)
+      ? roundRuleNumber(recommendation)
+      : null,
+    v2_rank: rankValid ? Math.trunc(rank) : null,
+    v2_rank_universe_size: rankValid ? Math.trunc(universe) : null,
+    v2_rank_fraction: rankFraction === null ? null : roundRuleNumber(rankFraction, 4),
+    data_quality_score: roundRuleNumber(dataQuality),
+    event_candidate_scanned: eventScanned,
+    verified_positive_event_ids: eventIds,
+    entry_price: finiteRuleNumber(source.entry_price) && source.entry_price > 0
+      ? Number(source.entry_price)
+      : null,
+    calendar_id: ruleText(source.calendar_id),
+    calendar_version: ruleText(source.calendar_version),
+    entry_trade_date: ruleText(source.entry_trade_date),
+    forecast_end_trade_date: ruleText(source.forecast_end_trade_date),
+    estimated_10d_range: {
+      low_pct: rangeValid ? roundRuleNumber(low) : null,
+      high_pct: rangeValid ? roundRuleNumber(high) : null,
+      horizon_trade_days: 10,
+    },
+    risk_reward: {
+      upside_pct: rangeValid ? roundRuleNumber(high) : null,
+      downside_pct: rangeValid ? roundRuleNumber(downside) : null,
+      ratio: rangeValid ? roundRuleNumber(ratio) : null,
+    },
+    blocker_codes: qualified
+      ? []
+      : dedupeRuleStrings([...normalizedEventBlockers, ...normalizedQualityBlockers]),
+  };
+  if (qualified) {
+    row.qualification_id = stableV3QualificationId(snapshot, market, code);
+    row.candidate_snapshot = input.candidate_snapshot && typeof input.candidate_snapshot === "object"
+      && !Array.isArray(input.candidate_snapshot)
+      ? input.candidate_snapshot
+      : null;
+  }
+  return row;
+}
+
+function validV3QualifiedRow(row, decision, snapshot, context = null) {
+  if (productionRuleContractVersion(decision) !== 3) return true;
+  if (!row || typeof row !== "object" || Array.isArray(row) || row.status !== "QUALIFIED") return false;
+  const ruleContext = context || v3RuleInputContext(snapshot);
+  if (!ruleContext) return false;
+  const market = ruleText(row.market);
+  const code = ruleText(row.code || row.symbol);
+  const sourceContext = ruleContext.byIdentity.get(`${market}:${code}`);
+  if (!sourceContext) return false;
+  const expected = expectedV3RuleEvaluation(snapshot, sourceContext.input);
+  if (!expected || expected.status !== "QUALIFIED" || !contractDeepEqual(row, expected)) return false;
+  if (
+    !row.candidate_snapshot || typeof row.candidate_snapshot !== "object" || Array.isArray(row.candidate_snapshot)
+    || normalizeLiveCode(market, row.candidate_snapshot.code || row.candidate_snapshot.symbol)
+      !== normalizeLiveCode(market, code)
+  ) return false;
+  try {
+    strictSnapshotQuote(row.candidate_snapshot, market);
+  } catch (_error) {
+    return false;
+  }
+  return true;
+}
+
+function compareV3EvaluationRows(left, right) {
+  const scoreDifference = Number(right.qualification_score || 0) - Number(left.qualification_score || 0);
+  if (scoreDifference !== 0) return scoreDifference;
+  const leftMarket = String(left.market || "");
+  const rightMarket = String(right.market || "");
+  if (leftMarket !== rightMarket) return leftMarket < rightMarket ? -1 : 1;
+  const leftCode = String(left.code || "");
+  const rightCode = String(right.code || "");
+  if (leftCode !== rightCode) return leftCode < rightCode ? -1 : 1;
+  return 0;
+}
+
+function validatedV3DecisionRows(snapshot, decision) {
+  if (productionRuleContractVersion(decision) !== 3) return null;
+  const evaluated = decision.evaluated_candidates;
+  const published = decision.qualified_candidates;
+  const context = v3RuleInputContext(snapshot);
+  const inputLedger = snapshot?.production_rule_inputs;
+  if (
+    !context
+    || typeof inputLedger?.ledger_sha256 !== "string"
+    || !/^[a-f0-9]{64}$/.test(inputLedger.ledger_sha256)
+    || decision.source_rule_inputs_contract_version !== inputLedger.contract_version
+    || decision.source_rule_inputs_sha256 !== inputLedger.ledger_sha256
+    || decision.source_rule_input_count !== context.inputRows.length
+    || !Array.isArray(evaluated)
+    || !Array.isArray(published)
+    || !Number.isInteger(decision.evaluated_candidate_count)
+    || decision.evaluated_candidate_count !== context.inputRows.length
+    || !Number.isInteger(decision.qualified_candidate_count)
+    || !Number.isInteger(decision.rejected_candidate_count)
+    || !Array.isArray(decision.blocker_codes)
+  ) return null;
+
+  const rebuiltEvaluated = [];
+  for (const input of context.inputRows) {
+    const rebuilt = expectedV3RuleEvaluation(snapshot, input);
+    if (!rebuilt) return null;
+    rebuiltEvaluated.push(rebuilt);
+  }
+  rebuiltEvaluated.sort(compareV3EvaluationRows);
+  const rebuiltQualified = rebuiltEvaluated.filter((row) => row.status === "QUALIFIED");
+  const rebuiltPrimary = rebuiltQualified.length ? rebuiltQualified[0] : null;
+  const expectedAction = rebuiltPrimary ? "QUALIFIED_PICK" : "NO_QUALIFIED_PICK";
+  const expectedBlockers = rebuiltPrimary ? [] : ["NO_RULE_CANDIDATE_PASSED"];
+
+  if (
+    decision.action !== expectedAction
+    || decision.evaluated_candidate_count !== rebuiltEvaluated.length
+    || decision.qualified_candidate_count !== rebuiltQualified.length
+    || decision.rejected_candidate_count !== rebuiltEvaluated.length - rebuiltQualified.length
+    || !contractDeepEqual(decision.evaluated_candidates, rebuiltEvaluated)
+    || !contractDeepEqual(decision.qualified_candidates, rebuiltQualified)
+    || !contractDeepEqual(decision.primary, rebuiltPrimary)
+    || !contractDeepEqual(decision.blocker_codes, expectedBlockers)
+  ) return null;
+  if (!rebuiltQualified.every((row) => validV3QualifiedRow(row, decision, snapshot, context))) return null;
+  return { evaluated: rebuiltEvaluated, qualified: rebuiltQualified, primary: rebuiltPrimary };
+}
+
+function validatedV3QualifiedRows(snapshot, decision) {
+  if (productionRuleContractVersion(decision) !== 3 || decision.action !== "QUALIFIED_PICK") return null;
+  const validated = validatedV3DecisionRows(snapshot, decision);
+  return validated ? validated.qualified : null;
+}
+
 function productionQualifiedCandidateRows(snapshot, market = null) {
   const decision = snapshot?.production_decision;
-  if (!isProductionRuleDecision(decision) || decision.action !== "QUALIFIED_PICK") return [];
+  if (!isProductionRuleDecision(decision, snapshot?.model_version) || decision.action !== "QUALIFIED_PICK") return [];
+  if (productionRuleContractVersion(decision) === 3) {
+    const qualifiedRows = validatedV3QualifiedRows(snapshot, decision);
+    if (!qualifiedRows) return [];
+    return qualifiedRows
+      .filter((row) => !market || row.market === market)
+      .map((row) => row.candidate_snapshot);
+  }
   const rawRows = [decision.primary, ...(Array.isArray(decision.qualified_candidates) ? decision.qualified_candidates : [])];
   const rows = [];
   const seen = new Set();
@@ -410,22 +936,26 @@ function isGlobalTenDayDecision(decision) {
   );
 }
 
-function isProductionRuleDecision(decision) {
-  const ruleModelPairValid = Boolean(
-    decision
-    && (
-      (decision.action_basis === "strict_rule_qualification_v1"
-        && decision.rule_model_id === "ten-day-audited-rule-ensemble-v1")
-      || (decision.action_basis === "candidate_level_rule_qualification_v2"
-        && decision.rule_model_id === "ten-day-audited-rule-ensemble-v2")
-    )
-  );
+function productionRuleContractVersion(decision) {
+  if (!decision || typeof decision !== "object" || Array.isArray(decision)) return null;
+  if (decision.action_basis === "strict_rule_qualification_v1"
+    && decision.rule_model_id === "ten-day-audited-rule-ensemble-v1") return 1;
+  if (decision.action_basis === "candidate_level_rule_qualification_v2"
+    && decision.rule_model_id === "ten-day-audited-rule-ensemble-v2") return 2;
+  if (decision.action_basis === PRODUCTION_RULE_V3_ACTION_BASIS
+    && decision.rule_model_id === PRODUCTION_RULE_V3_MODEL_ID) return 3;
+  return null;
+}
+
+function isProductionRuleDecision(decision, modelVersion = null) {
+  const contractVersion = productionRuleContractVersion(decision);
   return Boolean(
     decision
     && typeof decision === "object"
     && decision.contract_version === "production-rule-10d-v1"
     && decision.decision_scope === "global_10d_bounded_recall"
-    && ruleModelPairValid
+    && contractVersion !== null
+    && ((modelVersion === CURRENT_PRODUCTION_MODEL_VERSION) === (contractVersion === 3))
     && ["QUALIFIED_PICK", "NO_QUALIFIED_PICK"].includes(decision.action)
     && decision.score_kind === "RULE_QUALIFICATION_SCORE"
     && decision.probability === null
@@ -441,15 +971,21 @@ function summarizeProductionCandidate(candidate) {
     "probability", "calibrated", "expected_net_utility", "legacy_signal",
     "legacy_recommendation_degree", "v2_rank", "v2_rank_universe_size",
     "data_quality_score", "event_candidate_scanned", "verified_positive_event_ids",
+    "qualification_track", "track_evaluations",
     "entry_price", "entry_trade_date", "forecast_end_trade_date", "calendar_id",
     "calendar_version", "estimated_10d_range", "risk_reward", "blocker_codes",
   ];
   return Object.fromEntries(fields.filter((field) => Object.hasOwn(candidate, field)).map((field) => [field, candidate[field]]));
 }
 
-function summarizeProductionQualifiedCandidates(decision) {
-  if (!isProductionRuleDecision(decision) || decision.action !== "QUALIFIED_PICK") return [];
-  const rawRows = [decision.primary, ...(Array.isArray(decision.qualified_candidates) ? decision.qualified_candidates : [])];
+function summarizeProductionQualifiedCandidates(decision, snapshot = null) {
+  if (!isProductionRuleDecision(decision, snapshot?.model_version) || decision.action !== "QUALIFIED_PICK") return [];
+  const contractVersion = productionRuleContractVersion(decision);
+  const validatedRows = contractVersion === 3 ? validatedV3QualifiedRows(snapshot, decision) : null;
+  if (contractVersion === 3 && !validatedRows) return [];
+  const rawRows = contractVersion === 3
+    ? validatedRows
+    : [decision.primary, ...(Array.isArray(decision.qualified_candidates) ? decision.qualified_candidates : [])];
   const result = [];
   const seen = new Set();
   for (const row of rawRows) {
@@ -464,11 +1000,18 @@ function summarizeProductionQualifiedCandidates(decision) {
   return result;
 }
 
+function productionDecisionForSnapshot(snapshot) {
+  const decision = snapshot?.production_decision;
+  if (!isProductionRuleDecision(decision, snapshot?.model_version)) return null;
+  if (productionRuleContractVersion(decision) !== 3) return decision;
+  return validatedV3DecisionRows(snapshot, decision) ? decision : null;
+}
+
 function summarizePick(pick) {
   const legacySummary = summarizeDecision(pick.decision || {});
   const globalDecision = isGlobalTenDayDecision(pick.global_decision) ? pick.global_decision : null;
-  const productionDecision = isProductionRuleDecision(pick.production_decision) ? pick.production_decision : null;
-  const qualifiedCandidates = productionDecision ? summarizeProductionQualifiedCandidates(productionDecision) : [];
+  const productionDecision = productionDecisionForSnapshot(pick);
+  const qualifiedCandidates = productionDecision ? summarizeProductionQualifiedCandidates(productionDecision, pick) : [];
   const isGlobal = Boolean(globalDecision);
   const action = isGlobal ? globalDecision.action || "NO_VALID_PICK" : "LEGACY_ONLY";
   const summary = {
@@ -861,6 +1404,7 @@ async function handleApi(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/api/status") {
     const latest = await latestPick(env);
+    const productionDecision = latest ? productionDecisionForSnapshot(latest) : null;
     const currentTime = nowCN();
     const current = new Date(currentTime);
     const freshness = snapshotFreshness(latest ? latest.generated_at : null, current);
@@ -899,8 +1443,8 @@ async function handleApi(request, env) {
       snapshot_as_of: latest ? latest.generated_at || null : null,
       next_refresh: nextScheduledRefresh(current),
       snapshot_key: latest ? latest.snapshot_key || null : null,
-      production_action: latest?.production_decision?.action || "NO_QUALIFIED_PICK",
-      qualification_id: latest?.production_decision?.primary?.qualification_id || null,
+      production_action: productionDecision?.action || "NO_QUALIFIED_PICK",
+      qualification_id: productionDecision?.primary?.qualification_id || null,
       calibrated_action: latest?.global_decision?.action || "NO_VALID_PICK",
       prediction_id: latest?.global_decision?.primary?.prediction_id || null,
       ...freshness,

@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+import production_rule_model
 from market_calendar import (
     CALENDAR_VERSION,
     calendar_id,
@@ -29,11 +30,15 @@ VALID_MODEL_STATUSES = {"available", "unavailable"}
 VALID_CANDIDATE_STATUSES = {"ranked", "rejected", "unavailable", "not_applicable"}
 VALID_EXECUTABLE_SCORE_KINDS = {"TEN_DAY_EXPECTED_NET_UTILITY"}
 PRODUCTION_CONTRACT_VERSION = "production-rule-10d-v1"
-PRODUCTION_RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v2"
+PRODUCTION_RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v3"
 PRODUCTION_SCORE_KIND = "RULE_QUALIFICATION_SCORE"
+PRODUCTION_RULE_ACTION_BASIS = "dual_track_candidate_qualification_v3"
+PRODUCTION_QUALIFICATION_TRACKS = ("event_catalyst", "quality_technical")
+PRODUCTION_RULE_INPUTS_CONTRACT_VERSION = "production-rule-inputs-v1"
 SUPPORTED_PRODUCTION_RULE_CONTRACTS = {
     ("strict_rule_qualification_v1", "ten-day-audited-rule-ensemble-v1"),
-    ("candidate_level_rule_qualification_v2", PRODUCTION_RULE_MODEL_ID),
+    ("candidate_level_rule_qualification_v2", "ten-day-audited-rule-ensemble-v2"),
+    (PRODUCTION_RULE_ACTION_BASIS, PRODUCTION_RULE_MODEL_ID),
 }
 STATE_SEVERITY = {"READY": 0, "DEGRADED": 1, "BLOCKED": 2}
 VALID_VOLUME_UNITS = {"lot", "share"}
@@ -85,8 +90,9 @@ EVIDENCE_LOOP_MODEL_VERSIONS = {
     "smart-selector-2026-08-23.3-evidence-loop",
     "smart-selector-2026-08-25.1-production-rule",
     "smart-selector-2026-08-26.1-candidate-rule",
+    "smart-selector-2026-08-26.2-dual-track-rule",
 }
-PRODUCTION_RULE_MODEL_VERSION = "smart-selector-2026-08-26.1-candidate-rule"
+PRODUCTION_RULE_MODEL_VERSION = "smart-selector-2026-08-26.2-dual-track-rule"
 PRIMARY_SCHEDULE_SLOTS = {(8, 17), (10, 17), (12, 17), (15, 17), (16, 17), (20, 17), (22, 47)}
 FALLBACK_SCHEDULE_MAP = {
     (8, 47): (8, 17),
@@ -172,12 +178,22 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
     if decision.get("decision_scope") != "global_10d_bounded_recall":
         errors.append("production_decision.decision_scope is invalid")
     rule_contract = (decision.get("action_basis"), decision.get("rule_model_id"))
+    exact_current_v3 = bool(
+        snapshot.get("model_version") == PRODUCTION_RULE_MODEL_VERSION
+        and rule_contract == (PRODUCTION_RULE_ACTION_BASIS, PRODUCTION_RULE_MODEL_ID)
+    )
     if rule_contract not in SUPPORTED_PRODUCTION_RULE_CONTRACTS:
         errors.append("production_decision rule contract is invalid")
-    if snapshot.get("model_version") == PRODUCTION_RULE_MODEL_VERSION and rule_contract != (
-        "candidate_level_rule_qualification_v2",
+    current_rule_contract = (
+        PRODUCTION_RULE_ACTION_BASIS,
         PRODUCTION_RULE_MODEL_ID,
-    ):
+    )
+    # The current model and the V3 rule contract are a versioned pair.  Keep
+    # V1/V2 snapshots readable, but fail closed if either half of the current
+    # pair is published without the other.
+    if (
+        snapshot.get("model_version") == PRODUCTION_RULE_MODEL_VERSION
+    ) != (rule_contract == current_rule_contract):
         errors.append("production_decision rule contract does not match model_version")
     if decision.get("score_kind") != PRODUCTION_SCORE_KIND:
         errors.append("production_decision.score_kind is invalid")
@@ -222,6 +238,34 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
         if not isinstance(row_blockers, list):
             errors.append(f"{prefix}.blocker_codes must be a list")
             row_blockers = []
+        v3_track_evaluations: dict[str, dict] | None = None
+        if rule_contract == (PRODUCTION_RULE_ACTION_BASIS, PRODUCTION_RULE_MODEL_ID):
+            raw_track_evaluations = row.get("track_evaluations")
+            valid_track_evaluations = bool(
+                isinstance(raw_track_evaluations, list)
+                and len(raw_track_evaluations) == len(PRODUCTION_QUALIFICATION_TRACKS)
+                and [item.get("track") for item in raw_track_evaluations if isinstance(item, dict)]
+                == list(PRODUCTION_QUALIFICATION_TRACKS)
+                and all(
+                    isinstance(item, dict)
+                    and item.get("status") in {"PASS", "FAIL"}
+                    and isinstance(item.get("blocker_codes"), list)
+                    for item in raw_track_evaluations
+                )
+            )
+            if not valid_track_evaluations:
+                errors.append(f"{prefix}.track_evaluations is invalid")
+            else:
+                v3_track_evaluations = {
+                    item["track"]: item for item in raw_track_evaluations
+                }
+                for track_name in PRODUCTION_QUALIFICATION_TRACKS:
+                    track_evaluation = v3_track_evaluations[track_name]
+                    track_blockers = track_evaluation["blocker_codes"]
+                    if track_evaluation["status"] == "PASS" and track_blockers:
+                        errors.append(f"{prefix}.track_evaluations {track_name} PASS cannot expose blocker codes")
+                    if track_evaluation["status"] == "FAIL" and not track_blockers:
+                        errors.append(f"{prefix}.track_evaluations {track_name} FAIL requires blocker codes")
         status = row.get("status")
         if status == "QUALIFIED":
             qualified.append(row)
@@ -229,7 +273,26 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
                 errors.append(f"{prefix} QUALIFIED row cannot expose blocker codes")
             if not isinstance(row.get("qualification_id"), str) or not re.fullmatch(r"qual_[0-9a-f]{24}", row["qualification_id"]):
                 errors.append(f"{prefix}.qualification_id is invalid")
-            if row.get("event_candidate_scanned") is not True or not row.get("verified_positive_event_ids"):
+            if rule_contract == (PRODUCTION_RULE_ACTION_BASIS, PRODUCTION_RULE_MODEL_ID):
+                qualification_track = row.get("qualification_track")
+                if qualification_track not in PRODUCTION_QUALIFICATION_TRACKS:
+                    errors.append(f"{prefix}.qualification_track is invalid")
+                matching_track = (
+                    v3_track_evaluations.get(qualification_track)
+                    if v3_track_evaluations is not None
+                    else None
+                )
+                if not isinstance(matching_track, dict) or matching_track.get("status") != "PASS":
+                    errors.append(f"{prefix} selected qualification track must PASS")
+                if row.get("event_candidate_scanned") is not True:
+                    errors.append(f"{prefix} requires event candidate scan")
+                event_ids = row.get("verified_positive_event_ids")
+                if not isinstance(event_ids, list):
+                    errors.append(f"{prefix}.verified_positive_event_ids must be a list")
+                    event_ids = []
+                if qualification_track == "event_catalyst" and not event_ids:
+                    errors.append(f"{prefix} event_catalyst requires verified positive event evidence")
+            elif row.get("event_candidate_scanned") is not True or not row.get("verified_positive_event_ids"):
                 errors.append(f"{prefix} requires verified positive event evidence")
             candidate = row.get("candidate_snapshot")
             if not isinstance(candidate, dict):
@@ -242,6 +305,13 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
         elif status == "REJECTED":
             if not row_blockers:
                 errors.append(f"{prefix} REJECTED row requires blocker codes")
+            if rule_contract == (PRODUCTION_RULE_ACTION_BASIS, PRODUCTION_RULE_MODEL_ID):
+                if "qualification_track" not in row or row.get("qualification_track") is not None:
+                    errors.append(f"{prefix} REJECTED row qualification_track must be null")
+                if v3_track_evaluations is not None and any(
+                    item.get("status") == "PASS" for item in v3_track_evaluations.values()
+                ):
+                    errors.append(f"{prefix} REJECTED row cannot contain a PASS track")
         else:
             errors.append(f"{prefix}.status is invalid")
 
@@ -255,6 +325,8 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
     published_qualified = decision.get("qualified_candidates")
     if not isinstance(published_qualified, list):
         errors.append("production_decision.qualified_candidates must be a list")
+    elif exact_current_v3 and published_qualified != qualified:
+        errors.append("production_decision.qualified_candidates must exactly match evaluated qualified rows")
     elif [row.get("qualification_id") for row in published_qualified if isinstance(row, dict)] != [
         row.get("qualification_id") for row in qualified
     ]:
@@ -265,6 +337,8 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
             errors.append("QUALIFIED_PICK cannot expose production blocker codes")
         if not isinstance(primary, dict):
             errors.append("QUALIFIED_PICK requires a production primary")
+        elif exact_current_v3 and (not qualified or primary != qualified[0]):
+            errors.append("production primary must exactly match the first qualified evaluated row")
         elif not any(row.get("qualification_id") == primary.get("qualification_id") for row in qualified):
             errors.append("production primary must match one qualified evaluated row")
     elif action == "NO_QUALIFIED_PICK":
@@ -274,6 +348,103 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
             errors.append("NO_QUALIFIED_PICK cannot retain qualified evaluated rows")
         if not blocker_codes:
             errors.append("NO_QUALIFIED_PICK requires at least one blocker code")
+
+    if exact_current_v3:
+        _append_current_v3_rule_input_errors(snapshot, decision, errors)
+
+
+def _append_current_v3_rule_input_errors(snapshot: dict, decision: dict, errors: list[str]) -> None:
+    inputs = snapshot.get("production_rule_inputs")
+    if not isinstance(inputs, dict):
+        errors.append("production_rule_inputs is required for current V3")
+        return
+    if inputs.get("contract_version") != PRODUCTION_RULE_INPUTS_CONTRACT_VERSION:
+        errors.append("production_rule_inputs.contract_version is invalid")
+    if inputs.get("action_basis") != PRODUCTION_RULE_ACTION_BASIS:
+        errors.append("production_rule_inputs.action_basis is invalid")
+    if inputs.get("rule_model_id") != PRODUCTION_RULE_MODEL_ID:
+        errors.append("production_rule_inputs.rule_model_id is invalid")
+
+    ledger_hash = inputs.get("ledger_sha256")
+    computed_hash = production_rule_model.production_rule_inputs_sha256(inputs)
+    if not isinstance(ledger_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", ledger_hash):
+        errors.append("production_rule_inputs.ledger_sha256 is invalid")
+    elif computed_hash != ledger_hash:
+        errors.append("production_rule_inputs.ledger_sha256 does not match its payload")
+
+    rows = inputs.get("rows")
+    if not isinstance(rows, list):
+        errors.append("production_rule_inputs.rows must be a list")
+        rows = []
+    global_decision = snapshot.get("global_decision")
+    global_decision = global_decision if isinstance(global_decision, dict) else {}
+    global_rows = global_decision.get("evaluated_candidates")
+    global_rows = global_rows if isinstance(global_rows, list) else []
+    if inputs.get("evaluated_candidate_count") != len(rows):
+        errors.append("production_rule_inputs.evaluated_candidate_count does not match rows")
+    if len(rows) != len(global_rows):
+        errors.append("production_rule_inputs rows must cover every global evaluated candidate")
+
+    identities: set[tuple[str, str]] = set()
+    for index, entry in enumerate(rows):
+        prefix = f"production_rule_inputs.rows[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        global_row = global_rows[index] if index < len(global_rows) and isinstance(global_rows[index], dict) else {}
+        expected_market = str(global_row.get("market") or "").strip() or None
+        expected_code = str(global_row.get("code") or global_row.get("symbol") or "").strip() or None
+        if type(entry.get("input_index")) is not int or entry.get("input_index") != index:
+            errors.append(f"{prefix}.input_index is inconsistent")
+        if entry.get("market") != expected_market or entry.get("code") != expected_code:
+            errors.append(f"{prefix} identity does not match global evaluated candidate")
+        expected_input = production_rule_model.freeze_production_rule_input_row(global_row, index)
+        actual_input = production_rule_model.freeze_production_rule_input_row(entry, index)
+        if actual_input != expected_input:
+            errors.append(f"{prefix} rule fields do not match global evaluated candidate")
+        identity = (str(entry.get("market") or ""), str(entry.get("code") or ""))
+        if identity in identities:
+            errors.append(f"{prefix} identity is duplicated")
+        identities.add(identity)
+        if type(entry.get("source_candidate_present")) is not bool:
+            errors.append(f"{prefix}.source_candidate_present must be a boolean")
+        quality_score = entry.get("source_data_quality_score")
+        if quality_score is not None and (not finite_number(quality_score) or not 0 <= quality_score <= 100):
+            errors.append(f"{prefix}.source_data_quality_score is invalid")
+        if entry.get("source_candidate_present") is False and quality_score is not None:
+            errors.append(f"{prefix} absent source candidate cannot expose data quality")
+        if "candidate_snapshot" in entry and not isinstance(entry.get("candidate_snapshot"), dict):
+            errors.append(f"{prefix}.candidate_snapshot must be an object")
+
+    if decision.get("source_rule_inputs_contract_version") != inputs.get("contract_version"):
+        errors.append("production_decision source rule-input contract is inconsistent")
+    if decision.get("source_rule_inputs_sha256") != ledger_hash:
+        errors.append("production_decision source rule-input hash is inconsistent")
+    if decision.get("source_rule_input_count") != len(rows):
+        errors.append("production_decision source rule-input count is inconsistent")
+
+    try:
+        rebuilt = production_rule_model.build_production_decision(snapshot)
+    except Exception as exc:  # pragma: no cover - defensive deployment boundary
+        errors.append(f"production_decision deterministic V3 rebuild failed: {type(exc).__name__}")
+        return
+    rebuilt_rows = rebuilt.get("evaluated_candidates") if isinstance(rebuilt, dict) else []
+    qualified_identities = {
+        (str(row.get("market") or ""), str(row.get("code") or ""))
+        for row in rebuilt_rows
+        if isinstance(row, dict) and row.get("status") == "QUALIFIED"
+    }
+    for index, entry in enumerate(rows):
+        if not isinstance(entry, dict):
+            continue
+        identity = (str(entry.get("market") or ""), str(entry.get("code") or ""))
+        has_snapshot = isinstance(entry.get("candidate_snapshot"), dict)
+        if identity in qualified_identities and not has_snapshot:
+            errors.append(f"production_rule_inputs.rows[{index}] qualified row requires candidate_snapshot")
+        if identity not in qualified_identities and "candidate_snapshot" in entry:
+            errors.append(f"production_rule_inputs.rows[{index}] rejected row must not retain candidate_snapshot")
+    if rebuilt != decision:
+        errors.append("production_decision does not match deterministic current V3 rebuild")
 
 
 def _append_evidence_loop_errors(snapshot: dict, errors: list[str]) -> None:
@@ -842,9 +1013,13 @@ def live_snapshot_candidates(snapshot: dict, market_key: str) -> list[tuple[str,
                 rows.append(candidate)
     production_decision = snapshot.get("production_decision")
     if isinstance(production_decision, dict):
-        candidate = production_decision.get("primary")
-        if isinstance(candidate, dict) and candidate.get("market") == market_key:
-            rows.append(candidate.get("candidate_snapshot") or candidate)
+        production_rows = [production_decision.get("primary")]
+        qualified_candidates = production_decision.get("qualified_candidates")
+        if isinstance(qualified_candidates, list):
+            production_rows.extend(qualified_candidates)
+        for candidate in production_rows:
+            if isinstance(candidate, dict) and candidate.get("market") == market_key:
+                rows.append(candidate.get("candidate_snapshot") or candidate)
 
     result: list[tuple[str, dict]] = []
     seen: set[str] = set()

@@ -10,10 +10,10 @@ XuanGu 是一个面向未来约两周（10 个交易日）的 A 股、港股、�
 
 - **三市场动态候选池**：A 股动态召回 300 只；港股、美股在每次定时或手动快照生成任务中重新读取公开市场横截面，并分别动态召回 200 / 300 只，不再使用仓库静态名单决定入池成员。
 - **A 股 300 只完整深评**：全部有效行情候选先完成基础评分和技术评分；技术 K 线完整、满足交易性过滤的候选最多 300 只继续运行 Legacy、V2、双低、Chan/CZSC、Serenity、UZI 与评审团深研，不再把第 97–300 只固定挡在深度评分之外。
-- **双轨生产输出**：`production_decision` 用可审计规则资格门禁产出 `QUALIFIED_PICK / NO_QUALIFIED_PICK`；`global_decision` 继续负责严格校准概率。规则资格分不等于上涨概率，Shadow 模型也不会因为规则轨有候选而被授权。
+- **双层生产输出**：`production_decision` V3 在共享安全门禁后分别运行“事件催化”和“质量趋势”两条规则资格通道，产出 `QUALIFIED_PICK / NO_QUALIFIED_PICK`；`global_decision` 继续负责独立的严格校准概率。规则资格分不等于上涨概率，Shadow 模型也不会因为规则轨有候选而被授权。
 - **纯云端自动更新**：GitHub Actions 在工作日多时点生成并校验不可变快照，Cloudflare Worker 负责发布；每日末次检查点、规则合格批次或正式可执行批次进入长期归档，不依赖 Render、OpenD 或个人电脑常开。
 
-页面提供今日答案、候选池、事件证据、历史检验、模型逻辑和数据健康六个 Tab。所有数字均来自已发布快照，浏览器只负责展示，不会在本地偷偷重算评分或把计划价冒充实时行情。
+页面提供今日答案、候选池、事件证据、历史检验、模型逻辑和数据健康六个 Tab。所有数字均来自已发布快照；浏览器会用快照内的冻结规则输入复算资格门禁以校验合同，但只展示服务端已经发布且校验一致的结果，不会自行补选或把计划价冒充实时行情。
 
 > 本项目仅用于研究辅助，不构成投资建议。任何预估区间、分数和历史结果都不是收益承诺。
 
@@ -26,7 +26,7 @@ XuanGu 是一个面向未来约两周（10 个交易日）的 A 股、港股、�
 | `Legacy` 市场级规则 | 当前旧因子体系在各市场更偏好谁 | 否 | 只产生市场级 `BUY_CANDIDATE / NO_TRADE` |
 | `V2` 与双低影子分析 | 结构质量、去重评分和低估值风格如何 | 否 | 否 |
 | `global_decision.research_priority` | 三市场全部候选中，谁最值得优先研究 | 否，`score_kind=RULE_PRIORITY` | 否，状态固定为 `RESEARCH_ONLY` |
-| `production_decision.primary` | 哪只股票通过当前数据、事件、风险收益和规则资格门禁 | 否，`score_kind=RULE_QUALIFICATION_SCORE` | 产生规则合格待复核项，但不声称概率 |
+| `production_decision.primary` | 哪只股票通过事件催化或质量趋势资格通道，以及通过哪条通道 | 否，`score_kind=RULE_QUALIFICATION_SCORE` | 产生规则合格待复核项，但不声称概率 |
 | `global_decision.primary` | 哪只股票通过完整生产门禁 | 只有校准模型上线后才可解释为概率 | 是，但当前缺条件时为空 |
 
 `RULE_PRIORITY` 和 `RULE_QUALIFICATION_SCORE` 都是确定性规则分，不是“未来 10 天上涨概率”，也不能解释为“80 分等于 80% 会涨”。规则资格轨固定发布 `probability_status=NOT_APPLICABLE`、`probability=null`、`calibrated=false`；校准概率轨未达标时继续发布 `probability_status=UNAVAILABLE`。
@@ -99,23 +99,39 @@ V2 根据 `trend_risk_on / range / risk_off / high_vol / unknown` 使用可解�
 
 ### 6. 10 交易日生产规则资格模型
 
-`ten-day-audited-rule-ensemble-v2` 是独立于概率模型的生产规则轨。它复用全市场 300 / 200 / 300 个候选的审计结果，但只忽略 `TEN_DAY_MODEL_NOT_READY` 与 `TEN_DAY_PREDICTION_MISSING` 两个“概率模型暂不可用”阻断；行情、候选池、完整深评、必需输入、客观门禁、官方事件、重大负面和任何未知阻断都继续失败关闭。
+`dual_track_candidate_qualification_v3` 与 `ten-day-audited-rule-ensemble-v3` 是当前配对的生产规则合同；前端仍兼容 V1/V2 历史快照，但不会用旧合同字段推导 V3 结论。V3 复用全市场 300 / 200 / 300 个候选的审计结果，只忽略 `TEN_DAY_MODEL_NOT_READY` 与 `TEN_DAY_PREDICTION_MISSING` 两个“概率模型暂不可用”阻断。两条资格通道都要求候选市场为 `READY`、行情和候选池完整、逐股评分与事件扫描完成、无重大负面、必需输入和风险收益合同完整；任何未知阻断都失败关闭。
 
-一只股票必须同时满足：候选所在市场自身为 `READY`、该股 A/港/美 Legacy 推荐度分别不低于 64 / 63 / 64、V2 排名前 20%、逐股官方事件已扫描且至少一条近 7 日正向证据、无重大负面、10 日情景上沿至少为 A/港 5% 或美股 6%、情景下行不超过 A/港 8% 或美股 10%，且上行/下行比不低于 1.20。Legacy 的市场级 `BUY_CANDIDATE / NO_TRADE` 只保留为溯源信息，不再代替逐股门禁，避免某市场的单一 Legacy 首选失败后误杀其他候选。
+| 生产资格通道 | Legacy 推荐度 A / 港 / 美 | V2 市场内排名 | 正向事件 | 数据质量 | 风险收益比 | 10 日情景区间 | 额外门槛 |
+|---|---:|---:|---:|---:|---:|---|---|
+| `event_catalyst` 事件催化 | ≥64 / ≥63 / ≥64 | Top 20% | 至少 1 条可审计 `event_id` | 共享数据门禁 | ≥1.20 | A/港上行 ≥5%、下行 ≤8%；美股上行 ≥6%、下行 ≤10% | 无重大负面 |
+| `quality_technical` 质量趋势 | ≥66 / ≥67 / ≥68 | Top 10% | 不要求；仍必须完成扫描 | ≥95 | ≥1.50 | A/港上行 ≥6%、下行 ≤6%；美股上行 ≥6.5%、下行 ≤7.5% | 资格分 ≥72 |
 
-资格分由 Legacy 30%、V2 排名强度 30%、数据质量 15%、官方事件 15% 和风险收益 10% 组成，只用于合格候选之间排序。输出固定为：
+质量趋势通道只豁免 `VERIFIED_POSITIVE_EVENT_MISSING`：它不能绕过事件扫描，也不能绕过重大负面、数据缺口、非正净效用或未知来源阻断。该通道没有正向事件时，页面明确显示“已完成事件扫描且未发现重大负面；本通道不要求正向催化”，不会声称候选绑定了不存在的事件。Legacy 的市场级 `BUY_CANDIDATE / NO_TRADE` 仍只保留为溯源信息，不代替逐股门禁。
+
+两条通道沿用同一资格分权重：Legacy 30%、V2 排名强度 30%、数据质量 15%、官方事件 15% 和风险收益 10%，因此分数可比较；质量趋势无正向事件时事件贡献为 0。服务端为每只候选保存两条 `track_evaluations`，并以 `qualification_track` 明确最终通过的通道。资格分只用于合格候选之间排序，**不是上涨概率、预期收益、胜率或收益承诺**。输出固定为：
 
 ```json
 {
   "action": "QUALIFIED_PICK",
+  "action_basis": "dual_track_candidate_qualification_v3",
+  "rule_model_id": "ten-day-audited-rule-ensemble-v3",
   "score_kind": "RULE_QUALIFICATION_SCORE",
   "probability_status": "NOT_APPLICABLE",
   "probability": null,
-  "calibrated": false
+  "calibrated": false,
+  "primary": {
+    "qualification_track": "quality_technical",
+    "track_evaluations": [
+      {"track": "event_catalyst", "status": "FAIL"},
+      {"track": "quality_technical", "status": "PASS"}
+    ]
+  }
 }
 ```
 
-事件扫描默认从每市场 8 只扩大到 16 只，并按 Legacy、V2、数据质量、风险收益和市场动作预排序；Shadow 概率不参与预排序。事件源按市场隔离：一个市场的官方源故障不会抹掉另一个市场已经核验的证据；但严格 `global_decision` 仍要求三市场事件管线全部完成。浏览器只展示服务端合同，不能自行把研究项升级为 `QUALIFIED_PICK`。
+每次 V3 快照还发布 `production_rule_inputs` 冻结账本：它按 `global_decision.evaluated_candidates` 的原始顺序保留规则实际读取的最小字段、来源候选存在性、数据质量与合格候选快照，并绑定 SHA-256、合同版本和行数。服务端、快照校验器、Cloudflare Worker 与浏览器分别从该账本复算；发布的 `primary`、`qualified_candidates` 或任一合格明细只要与复算结果不完全一致，就失败关闭而不进入实时接口或正式页面。
+
+事件扫描默认从每市场 8 只扩大到 16 只，并按 Legacy、V2、数据质量、风险收益和市场动作预排序；Shadow 概率不参与预排序。事件源按市场隔离：一个市场的官方源故障不会抹掉另一个市场已经核验的证据；但严格 `global_decision` 仍要求三市场事件管线全部完成。浏览器只展示服务端发布且复算一致的通道、资格分和证据合同，不能自行补选、切换通道或把研究项升级为 `QUALIFIED_PICK`。
 
 ### 7. 10 交易日影子概率模型
 
@@ -163,7 +179,7 @@ V2 根据 `trend_risk_on / range / risk_off / high_vol / unknown` 使用可解�
 - 手续费、税费、点差、滑点、汇兑与尾部风险未进入统一净收益口径；
 - 快照过期、关键来源不可用或其他生产合同字段不完整。
 
-“事件扫描结果为 0 条有效事件”是合法状态，不应伪造事件；但零条有效证据也不能被当作正面催化通过门禁。重大负面证据会直接阻断对应候选。只有全部条件通过，`global_decision.action` 才能从 `NO_VALID_PICK` 升级为 `REVIEW_EXECUTABLE_PICK`。
+“事件扫描结果为 0 条有效事件”是合法状态，不应伪造事件；但零条有效证据不能被当作正面催化通过事件催化通道或 `global_decision` 门禁。它只可能在无重大负面的前提下满足生产 V3 的质量趋势通道事件条件。重大负面证据会直接阻断对应候选。只有全部条件通过，`global_decision.action` 才能从 `NO_VALID_PICK` 升级为 `REVIEW_EXECUTABLE_PICK`。
 
 ## 事件证据管线
 
@@ -233,7 +249,7 @@ Shadow 的 PENDING/SETTLED、排除和冲突数量独立展示。旧的手动或
 - A 股龙虎榜数据来自东方财富数据中心公开接口。
 - 港股和美股候选边界来自本轮东方财富延迟普通股横截面；源不可用时切换新浪公开市场榜单。最终 200/300 只的价格、最近交易时段与日线由 Yahoo Finance chart 二次验证，公开源缺口或时效不合格会降级，不会回填静态策展池。
 - A 股公告只接受巨潮资讯、上交所或深交所官方原文；港股只接受 HKEXnews；美股只接受 SEC EDGAR。采集批次保存 run id、逐市场扫描标的、来源请求状态和原文 URL；自报 `official` 但 URL 不在官方域名白名单的记录不能进入门禁。
-- 事件、公告、新闻和人工待入库证据在快照中分类标记；只有保存来源 URL、发布/生效时间、精确证券映射并通过同批次合同校验的自动证据才能参与严格门禁。扫描成功但零事件是 `READY_EMPTY`，仍不能替代候选所需的官方正向证据。
+- 事件、公告、新闻和人工待入库证据在快照中分类标记；只有保存来源 URL、发布/生效时间、精确证券映射并通过同批次合同校验的自动证据才能作为正向催化参与严格门禁。扫描成功但零事件是 `READY_EMPTY`：它不能替代事件催化通道或 `global_decision` 所需的官方正向证据，但在无重大负面的质量趋势通道中是可审计的合法扫描结果。
 - XSHG / XHKG / XNYS 交易窗口由版本化 `exchange-calendars` 计算。
 
 这些是公开 best-effort 数据源，没有交易所级 SLA。页面显示的价格、涨跌和 K 线都属于已发布快照，不是浏览器盘中实时行情。顶栏的 `snapshot_as_of` 表示快照生成时间，`next_refresh` 表示下一个计划检查点，不是数据供应商或 GitHub 的准点保证。
@@ -288,7 +304,7 @@ GitHub scheduled workflow 不是精确计时器，可能因平台排队延后。
 | 部署后完整验收失败 | 自动回滚到部署前精确 Worker Version，核对旧快照摘要；验收窗口内新版可能短暂在线 |
 | 主跑快照缺失或数据源可恢复降级 | 30 分钟后健康补跑继续尝试；已有健康快照时跳过 |
 | 候选池或行情覆盖不足 | 保留研究数据，但门控正式动作并发布稳定 reason codes |
-| 自动事件管线无合格证据 | 发布真实 0 条状态，不伪造事件；正式门禁不通过 |
+| 自动事件管线完成但无正向证据 | 发布真实 0 条状态，不伪造事件；事件催化与 `global_decision` 不通过，质量趋势通道仍按更严格的非事件门槛独立评估 |
 | 概率模型未授权但规则门禁通过 | 页面可显示 `QUALIFIED_PICK` 与规则资格分，同时校准轨继续保持 `NO_VALID_PICK`；不显示伪概率 |
 | 正式概率模型未授权 | Shadow 有效时显示“影子 P10”与留出指标，但全局仍为 `probability_status=UNAVAILABLE`，只输出研究优先项 |
 | 指定历史日期不存在 | `/api/pick?date=` 返回 `404 PICK_NOT_FOUND`，不会静默回退 latest |
@@ -328,9 +344,9 @@ GET /api/live?market=us&code=PWR
 
 1. **今日答案**：展示 global 正式动作、研究优先项、市场状态、风险和 10 交易日窗口。
 2. **候选池**：展示三市场候选、Legacy/V2/双低边界、来源链、快照行情质量与单股详情。
-3. **事件证据**：区分自动证据、人工待入库与模型信号，并展示扫描状态。
-4. **历史检验**：区分 Legacy 历史、主动放弃、正式可执行预测和 `SHADOW_RESEARCH`；展示严格结算后的真实指标、样本门槛与排除原因，数据异常不会降级成 0 胜率。
-5. **模型逻辑**：解释候选召回、因子、去重评分、global 门禁、版本与约两周标签。
+3. **事件证据**：区分自动证据、人工待入库与模型信号，并明确规则候选属于事件催化还是质量趋势；质量趋势无正向事件时不伪造绑定关系。
+4. **历史检验**：记录每次规则资格的 `qualification_track`、资格分和事件审计说明，并与 Legacy 历史、主动放弃、正式可执行预测和 `SHADOW_RESEARCH` 隔离；数据异常不会降级成 0 胜率。
+5. **模型逻辑**：解释候选召回、因子、生产 V3 双通道阈值、global 门禁、版本与约两周标签。
 6. **数据健康**：分别监控云端调度、快照时效、市场覆盖、事件管线、数据源完整度与结论可用性。
 
 ## 本地开发

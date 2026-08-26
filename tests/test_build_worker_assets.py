@@ -83,6 +83,14 @@ class BuildWorkerAssetsTests(unittest.TestCase):
                 "score_kind": "RULE_QUALIFICATION_SCORE",
                 "probability": None,
                 "calibrated": False,
+                "rule_model_id": "ten-day-audited-rule-ensemble-v3",
+                "event_candidate_scanned": True,
+                "verified_positive_event_ids": ["event-1"],
+                "qualification_track": "event_catalyst",
+                "track_evaluations": [
+                    {"track": "event_catalyst", "status": "PASS", "blocker_codes": []},
+                    {"track": "quality_technical", "status": "PASS", "blocker_codes": []},
+                ],
                 "candidate_snapshot": {"code": f"Q{index:02d}", "kline": [{"close": index}]},
             }
             for index in range(25)
@@ -90,8 +98,9 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         decision = {
             "contract_version": "production-rule-10d-v1",
             "decision_scope": "global_10d_bounded_recall",
-            "action_basis": "strict_rule_qualification_v1",
+            "action_basis": "dual_track_candidate_qualification_v3",
             "action": "QUALIFIED_PICK",
+            "rule_model_id": "ten-day-audited-rule-ensemble-v3",
             "score_kind": "RULE_QUALIFICATION_SCORE",
             "probability": None,
             "calibrated": False,
@@ -100,7 +109,12 @@ class BuildWorkerAssetsTests(unittest.TestCase):
             "qualified_candidates": rows,
         }
 
-        summary = build_worker_assets.summarize_production_decision({"production_decision": decision})
+        summary = build_worker_assets.summarize_production_decision(
+            {
+                "model_version": build_worker_assets.CURRENT_PRODUCTION_MODEL_VERSION,
+                "production_decision": decision,
+            }
+        )
 
         self.assertEqual(
             len(summary["qualified_candidates"]),
@@ -108,8 +122,81 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         )
         self.assertEqual(summary["qualified_candidates"][0]["code"], "Q00")
         self.assertEqual(summary["qualified_candidates"][-1]["code"], "Q19")
+        self.assertEqual(summary["qualified_candidates"][0]["qualification_track"], "event_catalyst")
+        self.assertEqual(summary["qualified_candidates"][0]["track_evaluations"][0]["status"], "PASS")
         self.assertTrue(summary["qualified_candidates_truncated"])
         self.assertTrue(all("candidate_snapshot" not in row for row in summary["qualified_candidates"]))
+
+    def test_current_model_rejects_mismatched_rule_contract_from_history_and_status(self) -> None:
+        decision = {
+            "contract_version": "production-rule-10d-v1",
+            "decision_scope": "global_10d_bounded_recall",
+            "action_basis": "candidate_level_rule_qualification_v2",
+            "action": "QUALIFIED_PICK",
+            "rule_model_id": "ten-day-audited-rule-ensemble-v2",
+            "score_kind": "RULE_QUALIFICATION_SCORE",
+            "probability": None,
+            "calibrated": False,
+            "qualified_candidate_count": 1,
+            "primary": {
+                "qualification_id": "qual_0123456789abcdef01234567",
+                "status": "QUALIFIED",
+                "market": "us",
+                "code": "AAPL",
+                "rule_model_id": "ten-day-audited-rule-ensemble-v2",
+                "score_kind": "RULE_QUALIFICATION_SCORE",
+                "qualification_score": 80,
+                "probability": None,
+                "calibrated": False,
+            },
+        }
+        mismatched = {
+            "model_version": build_worker_assets.CURRENT_PRODUCTION_MODEL_VERSION,
+            "target_date": "2026-08-26",
+            "generated_at": "2026-08-26T22:47:00+08:00",
+            "production_decision": decision,
+        }
+        self.assertIsNone(build_worker_assets.summarize_production_decision(mismatched))
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "mismatched.json"
+            path.write_text(json.dumps(mismatched), encoding="utf-8")
+            summary = build_worker_assets.summarize_pick(path)
+        self.assertIsNone(summary["production_decision"])
+        self.assertEqual(summary["production_action"], "NO_QUALIFIED_PICK")
+        self.assertIsNone(summary["qualification_history_kind"])
+
+        archived = {**mismatched, "model_version": "smart-selector-2026-08-26.1-candidate-rule"}
+        archived_summary = build_worker_assets.summarize_production_decision(archived)
+        self.assertIsNotNone(archived_summary)
+        self.assertEqual(archived_summary["rule_model_id"], "ten-day-audited-rule-ensemble-v2")
+
+        v3_decision = {
+            **decision,
+            "action_basis": "dual_track_candidate_qualification_v3",
+            "rule_model_id": "ten-day-audited-rule-ensemble-v3",
+            "action": "NO_QUALIFIED_PICK",
+            "qualified_candidate_count": 0,
+            "primary": None,
+            "qualified_candidates": [],
+        }
+        current_v3 = {
+            **mismatched,
+            "production_decision": v3_decision,
+        }
+        self.assertIsNotNone(build_worker_assets.summarize_production_decision(current_v3))
+
+        archived_with_v3 = {
+            **current_v3,
+            "model_version": "smart-selector-2026-08-26.1-candidate-rule",
+        }
+        self.assertIsNone(build_worker_assets.summarize_production_decision(archived_with_v3))
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "archived-v3.json"
+            path.write_text(json.dumps(archived_with_v3), encoding="utf-8")
+            summary = build_worker_assets.summarize_pick(path)
+        self.assertIsNone(summary["production_decision"])
+        self.assertEqual(summary["production_action"], "NO_QUALIFIED_PICK")
+        self.assertIsNone(summary["qualification_history_kind"])
 
     def test_full_worker_snapshots_are_bounded_to_representative_decision_days(self) -> None:
         summaries = []
