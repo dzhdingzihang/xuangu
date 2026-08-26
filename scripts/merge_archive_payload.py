@@ -140,9 +140,14 @@ def merge_payload(payload_root: pathlib.Path, archive_tree: pathlib.Path) -> dic
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError(f"unsafe payload path: {relative}")
         target = archive_data / relative
-        if relative == pathlib.Path("picks/latest.json") and preserve_latest:
-            counters["preserved_newer"] += 1
-            continue
+        if relative == pathlib.Path("picks/latest.json"):
+            if preserve_latest:
+                counters["preserved_newer"] += 1
+                continue
+            if target.exists() and source.read_bytes() != target.read_bytes():
+                _copy_new(source, target)
+                counters["updated"] += 1
+                continue
         if not target.exists():
             _copy_new(source, target)
             counters["copied"] += 1

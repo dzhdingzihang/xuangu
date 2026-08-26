@@ -34,6 +34,24 @@ def scheduled_snapshot(
 
 
 class MergeArchivePayloadTests(unittest.TestCase):
+    def test_newer_snapshot_replaces_archive_latest_and_keeps_immutable_file(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            payload, archive = root / "payload", root / "archive"
+            old = snapshot("old.json", "2026-08-23T22:48:00+08:00")
+            new = snapshot("new.json", "2026-08-24T08:20:00+08:00")
+            write(payload / "data/picks/latest.json", new)
+            write(payload / "data/picks/new.json", new)
+            write(archive / "data/picks/latest.json", old)
+            write(archive / "data/picks/old.json", old)
+
+            result = merge_payload(payload, archive)
+
+            self.assertEqual(json.loads((archive / "data/picks/latest.json").read_text()), new)
+            self.assertEqual(json.loads((archive / "data/picks/new.json").read_text()), new)
+            self.assertEqual(result["updated"], 1)
+            self.assertEqual(result["copied"], 1)
+
     def test_older_retry_cannot_replace_newer_latest(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             root = pathlib.Path(root)
@@ -86,6 +104,31 @@ class MergeArchivePayloadTests(unittest.TestCase):
             self.assertEqual(json.loads((archive / "data/picks/latest.json").read_text()), fallback)
             self.assertTrue((archive / "data/picks/delayed-primary.json").is_file())
             self.assertEqual(result["preserved_newer"], 1)
+
+    def test_newer_logical_fallback_replaces_later_generated_primary(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            payload, archive = root / "payload", root / "archive"
+            fallback = scheduled_snapshot(
+                "fallback.json",
+                "2026-08-23T23:27:00+08:00",
+                invocation="2026-08-23T23:17:00+08:00",
+            )
+            delayed_primary = scheduled_snapshot(
+                "delayed-primary.json",
+                "2026-08-24T00:01:00+08:00",
+                invocation="2026-08-23T22:47:00+08:00",
+            )
+            write(payload / "data/picks/latest.json", fallback)
+            write(payload / "data/picks/fallback.json", fallback)
+            write(archive / "data/picks/latest.json", delayed_primary)
+            write(archive / "data/picks/delayed-primary.json", delayed_primary)
+
+            result = merge_payload(payload, archive)
+
+            self.assertEqual(json.loads((archive / "data/picks/latest.json").read_text()), fallback)
+            self.assertTrue((archive / "data/picks/fallback.json").is_file())
+            self.assertEqual(result["updated"], 1)
 
     def test_settled_outcome_is_not_downgraded_to_pending(self) -> None:
         with tempfile.TemporaryDirectory() as root:
