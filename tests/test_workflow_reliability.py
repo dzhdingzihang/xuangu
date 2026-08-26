@@ -212,6 +212,21 @@ class WorkflowReliabilityTests(unittest.TestCase):
                 self.assertNotIn(forbidden, production_configuration)
         self.assertFalse((WORKFLOW.parent / "configure-realtime-dns.yml").exists())
 
+    def test_workflow_actions_use_node24_runtime_generations(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        expected_counts = {
+            "actions/checkout@v7": 2,
+            "actions/setup-python@v7": 2,
+            "actions/setup-node@v7": 1,
+            "actions/cache/restore@v6": 3,
+            "actions/cache/save@v6": 3,
+            "actions/upload-artifact@v7": 1,
+            "actions/download-artifact@v8": 1,
+        }
+        for action, count in expected_counts.items():
+            with self.subTest(action=action):
+                self.assertEqual(workflow.count(action), count)
+
     def test_workflow_archives_verified_timestamp_and_optional_ledger_or_fails_red(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("recovery-manifest.json", workflow)
@@ -220,8 +235,8 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertIn("immutable archive snapshot sha256", workflow)
         self.assertIn('pathlib.Path("data/outcomes").rglob("*.json")', workflow)
         self.assertIn('rglob(pattern)', workflow)
-        self.assertIn("actions/upload-artifact@v4", workflow)
-        self.assertIn("actions/download-artifact@v4", workflow)
+        self.assertIn("actions/upload-artifact@v7", workflow)
+        self.assertIn("actions/download-artifact@v8", workflow)
         self.assertIn("Install archive validation dependencies", workflow)
         self.assertIn("git worktree add --detach", workflow)
         self.assertIn('rebase origin/main', workflow)

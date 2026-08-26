@@ -832,6 +832,167 @@ assert.equal(productionDecisionTruth().primary.code, "0300.HK", "secondary audit
 """
         )
 
+    def test_current_vz_pfe_snapshot_keeps_two_qualified_rows_and_vz_primary(self) -> None:
+        run_app_node(
+            r"""
+const clone = (value) => JSON.parse(JSON.stringify(value));
+const source = (code, name, legacy, rank, low, high, scanned = true, market = "us", universe = 299) => ({
+  market,
+  code,
+  name,
+  blocker_codes: [
+    ...(scanned ? [] : ["EVENT_CANDIDATE_NOT_SCANNED"]),
+    "VERIFIED_POSITIVE_EVENT_MISSING",
+    "TEN_DAY_MODEL_NOT_READY",
+    "TEN_DAY_PREDICTION_MISSING",
+  ],
+  legacy_signal: "BUY_CANDIDATE",
+  legacy_recommendation_degree: legacy,
+  v2_rank: rank,
+  v2_rank_universe_size: universe,
+  priority_components: { data_quality: 20 },
+  event_candidate_scanned: scanned,
+  verified_positive_event_ids: [],
+  estimated_10d_range: { low_pct: low, high_pct: high },
+});
+const sources = [
+  source("VZ", "威瑞森通讯(Verizon)", 71, 7, -4.2, 7.3),
+  source("PFE", "辉瑞", 70, 16, -4.6, 7.9),
+  source("3968.HK", "招商银行", 62, 22, -4, 5.7, true, "hk", 199),
+  source("DASH", "DoorDash Inc-A", 53, 5, -6.3, 8.9, false),
+  source("SHEL", "壳牌", 35, 91, -8, 7.4, false),
+];
+const inputs = sources.map((item, index) => ({
+  input_index: index,
+  market: item.market,
+  code: item.code,
+  name: item.name,
+  blocker_codes: clone(item.blocker_codes),
+  legacy_signal: item.legacy_signal,
+  legacy_recommendation_degree: item.legacy_recommendation_degree,
+  v2_rank: item.v2_rank,
+  v2_rank_universe_size: item.v2_rank_universe_size,
+  priority_components: clone(item.priority_components),
+  event_candidate_scanned: item.event_candidate_scanned,
+  verified_positive_event_ids: [],
+  estimated_10d_range: clone(item.estimated_10d_range),
+  source_candidate_present: true,
+  source_data_quality_score: 100,
+}));
+const publishedRow = (sourceRow, input, qualificationId) => {
+  const expected = expectedV3Qualification(sourceRow, input);
+  const row = {
+    market: expected.market,
+    code: expected.code,
+    name: expected.name,
+    status: expected.qualificationTrack ? "QUALIFIED" : "REJECTED",
+    qualification_track: expected.qualificationTrack,
+    track_evaluations: clone(expected.trackEvaluations),
+    rule_model_id: "ten-day-audited-rule-ensemble-v3",
+    score_kind: "RULE_QUALIFICATION_SCORE",
+    qualification_score: expected.score,
+    score_components: clone(expected.components),
+    probability: null,
+    probability_status: "NOT_APPLICABLE",
+    calibrated: false,
+    expected_net_utility: null,
+    legacy_signal: expected.legacySignal,
+    legacy_recommendation_degree: expected.legacy,
+    v2_rank: expected.rank,
+    v2_rank_universe_size: expected.universe,
+    v2_rank_fraction: expected.rankFraction,
+    data_quality_score: expected.dataQuality,
+    event_candidate_scanned: expected.eventScanned,
+    verified_positive_event_ids: clone(expected.eventIds),
+    estimated_10d_range: { low_pct: expected.low, high_pct: expected.high, horizon_trade_days: 10 },
+    risk_reward: { upside_pct: expected.high, downside_pct: expected.downside, ratio: expected.ratio },
+    blocker_codes: clone(expected.blockerCodes),
+  };
+  if (expected.qualificationTrack) {
+    row.qualification_id = qualificationId;
+    row.candidate_snapshot = { market: sourceRow.market, code: sourceRow.code, name: sourceRow.name };
+    input.candidate_snapshot = clone(row.candidate_snapshot);
+  }
+  return row;
+};
+const vz = publishedRow(sources[0], inputs[0], "qual_111111111111111111111111");
+const pfe = publishedRow(sources[1], inputs[1], "qual_222222222222222222222222");
+const cmb = publishedRow(sources[2], inputs[2]);
+const dash = publishedRow(sources[3], inputs[3]);
+const shell = publishedRow(sources[4], inputs[4]);
+// Python round(4.625, 2) uses ties-to-even while Math.round does not.  The
+// published ledger remains authoritative within the contract's 0.01 tolerance.
+shell.score_components.risk_reward_scenario = 4.62;
+shell.qualification_score = 51.09;
+cmb.score_components.risk_reward_scenario = 7.12;
+cmb.qualification_score = 67.55;
+const ledgerHash = "c".repeat(64);
+const decision = {
+  contract_version: "production-rule-10d-v1",
+  decision_scope: "global_10d_bounded_recall",
+  action_basis: "dual_track_candidate_qualification_v3",
+  rule_model_id: "ten-day-audited-rule-ensemble-v3",
+  action: "QUALIFIED_PICK",
+  score_kind: "RULE_QUALIFICATION_SCORE",
+  probability: null,
+  calibrated: false,
+  evaluated_candidate_count: 5,
+  qualified_candidate_count: 2,
+  rejected_candidate_count: 3,
+  primary: clone(vz),
+  qualified_candidates: [clone(vz), clone(pfe)],
+  evaluated_candidates: [clone(vz), clone(pfe), clone(dash), clone(cmb), clone(shell)],
+  source_rule_inputs_contract_version: "production-rule-inputs-v1",
+  source_rule_inputs_sha256: ledgerHash,
+  source_rule_input_count: 5,
+  blocker_codes: [],
+};
+const snapshot = {
+  model_version: "smart-selector-2026-08-26.2-dual-track-rule",
+  markets: { a_share: { decision: {} }, hk: { decision: {} }, us: { decision: {} } },
+  global_decision: { evaluated_candidates: sources },
+  production_rule_inputs: {
+    contract_version: "production-rule-inputs-v1",
+    action_basis: "dual_track_candidate_qualification_v3",
+    rule_model_id: "ten-day-audited-rule-ensemble-v3",
+    evaluated_candidate_count: 5,
+    rows: inputs,
+    ledger_sha256: ledgerHash,
+  },
+  production_decision: decision,
+};
+
+const rows = productionQualifiedRows(snapshot);
+const truth = productionDecisionTruth(snapshot);
+assert.deepEqual(
+  deterministicV3Order(v3RuleInputContext(snapshot, decision), decision.evaluated_candidates)
+    .map((row) => row.code),
+  ["VZ", "PFE", "DASH", "3968.HK", "SHEL"],
+  "published Python-rounded scores remain the deterministic order key",
+);
+assert.deepEqual(rows.map((row) => row.code), ["VZ", "PFE"]);
+assert.equal(truth.action, "QUALIFIED_PICK");
+assert.equal(truth.qualifiedCount, 2);
+assert.equal(truth.primary.code, "VZ");
+assert.equal(truth.qualified.candidate.code, "VZ");
+assert.deepEqual(truth.blockerCodes, []);
+
+const forged = clone(snapshot);
+forged.production_decision.primary.score_components.data_quality += 0.02;
+forged.production_decision.qualified_candidates[0].score_components.data_quality += 0.02;
+forged.production_decision.evaluated_candidates[0].score_components.data_quality += 0.02;
+assert.equal(productionQualifiedRows(forged).length, 0, "component changes beyond one cent still fail closed");
+
+assert.equal(normalizeCandidateCode("a_share", "SH.600000"), "600000");
+assert.equal(normalizeCandidateCode("a_share", "600000.SH"), "600000");
+assert.equal(normalizeCandidateCode("hk", "00700"), "0700.HK");
+assert.equal(normalizeCandidateCode("hk", "0700.HK"), "0700.HK");
+assert.equal(normalizeCandidateCode("us", "BRK.B"), "BRK-B");
+assert.equal(normalizeCandidateCode("us", "BRK_B"), "BRK-B");
+assert.equal(candidateId({ code: "BRK.B" }, "us"), candidateId({ symbol: "BRK_B" }, "us"));
+"""
+        )
+
     def test_manual_evidence_never_becomes_automatic_evidence(self) -> None:
         self.assertIn("MANUAL_RESEARCH_EVIDENCE", self.js)
         self.assertIn("manual_verified_pending_ingestion", self.js)

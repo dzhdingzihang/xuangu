@@ -322,17 +322,44 @@ function currentCandidate(decision) {
   return decision.primary || decision.blocked_candidate || (decision.watchlist || [])[0] || null;
 }
 
+function normalizeCandidateCode(market, value) {
+  const raw = String(value || "").trim().toUpperCase();
+  if (market === "a_share") {
+    const match = raw.match(/^(?:(?:SH|SZ)\.?)?(\d{6})(?:\.(?:SH|SZ))?$/);
+    return match ? match[1] : null;
+  }
+  if (market === "hk") {
+    const match = raw.match(/^0*(\d{1,5})(?:\.HK)?$/);
+    if (!match) return null;
+    const number = Number(match[1]);
+    return Number.isInteger(number) && number >= 1 && number <= 9999
+      ? `${String(number).padStart(4, "0")}.HK`
+      : null;
+  }
+  if (market === "us") {
+    const normalized = raw.replaceAll("_", "-").replaceAll(".", "-");
+    return /^[A-Z][A-Z0-9-]{0,14}$/.test(normalized) ? normalized : null;
+  }
+  return null;
+}
+
+function candidateIdentity(market, value) {
+  const code = normalizeCandidateCode(market, value);
+  return code ? `${market}:${code}` : null;
+}
+
 function candidateId(candidate, market) {
-  return `${market}:${candidate?.code || candidate?.symbol || candidate?.name || "unknown"}`;
+  return candidateIdentity(market, candidate?.code || candidate?.symbol)
+    || `${market}:${candidate?.name || "unknown"}`;
 }
 
 function researchCandidateSnapshot(snapshot, market) {
   const priority = snapshot?.global_decision?.research_priority;
   const candidate = priority?.candidate_snapshot;
   if (!priority || !candidate || typeof candidate !== "object" || priority.market !== market) return null;
-  const priorityCode = String(priority.code || priority.symbol || "").toLowerCase();
-  const candidateCode = String(candidate.code || candidate.symbol || "").toLowerCase();
-  return priorityCode && priorityCode === candidateCode ? candidate : null;
+  const priorityIdentity = candidateIdentity(market, priority.code || priority.symbol);
+  const candidateIdentityKey = candidateIdentity(market, candidate.code || candidate.symbol);
+  return priorityIdentity && priorityIdentity === candidateIdentityKey ? candidate : null;
 }
 
 function productionContractValid(decision, modelVersion = null) {
@@ -374,6 +401,21 @@ function roundRuleNumber(value, digits = 2) {
 
 function sameRuleNumber(actual, expected, tolerance = 0.011) {
   return finiteRuleNumber(actual) && Math.abs(actual - expected) <= tolerance;
+}
+
+// Python's round() uses ties-to-even while Math.round() rounds midpoint values
+// upward.  Keep the published component schema exact, but allow the contract's
+// existing one-cent numeric tolerance when the browser independently audits it.
+function sameRuleScoreComponents(actual, expected) {
+  if (!actual || !expected || typeof actual !== "object" || typeof expected !== "object"
+    || Array.isArray(actual) || Array.isArray(expected)) return false;
+  const actualKeys = Object.keys(actual).sort();
+  const expectedKeys = Object.keys(expected).sort();
+  return actualKeys.length === expectedKeys.length
+    && actualKeys.every((key, index) => (
+      key === expectedKeys[index]
+      && sameRuleNumber(actual[key], expected[key])
+    ));
 }
 
 function sameStringList(actual, expected) {
@@ -502,7 +544,8 @@ function v3RuleInputContext(snapshot, decision) {
     const input = inputRows[index];
     const market = ruleText(source?.market);
     const code = ruleText(source?.code || source?.symbol);
-    if (!market || !code
+    const identity = candidateIdentity(market, code);
+    if (!market || !code || !identity
       || !MARKET_ORDER.includes(market)
       || !frozenV3InputMatchesSource(source, input, index)
       || typeof input.source_candidate_present !== "boolean"
@@ -511,9 +554,8 @@ function v3RuleInputContext(snapshot, decision) {
           || input.source_data_quality_score < 0
           || input.source_data_quality_score > 100))
       || (input.source_candidate_present === false && input.source_data_quality_score !== null)) return null;
-    const key = `${market}:${code}`;
-    if (byIdentity.has(key)) return null;
-    byIdentity.set(key, { source, input });
+    if (byIdentity.has(identity)) return null;
+    byIdentity.set(identity, { source, input });
   }
   return { sources, inputRows, byIdentity };
 }
@@ -649,7 +691,8 @@ function validV3EvaluatedRow(row, decision, context) {
   if (!row || typeof row !== "object" || Array.isArray(row)) return false;
   const market = ruleText(row.market);
   const code = ruleText(row.code || row.symbol);
-  const sourceContext = context?.byIdentity.get(`${market}:${code}`);
+  const identity = candidateIdentity(market, code);
+  const sourceContext = identity ? context?.byIdentity.get(identity) : null;
   const expected = sourceContext ? expectedV3Qualification(sourceContext.source, sourceContext.input) : null;
   if (!expected
     || row.status !== (expected.qualificationTrack ? "QUALIFIED" : "REJECTED")
@@ -671,7 +714,7 @@ function validV3EvaluatedRow(row, decision, context) {
     || row.event_candidate_scanned !== expected.eventScanned
     || !normalizedFullJsonEqual(row.verified_positive_event_ids, expected.eventIds)
     || !sameRuleNumber(row.qualification_score, expected.score)
-    || !normalizedFullJsonEqual(row.score_components, expected.components)
+    || !sameRuleScoreComponents(row.score_components, expected.components)
     || !validV3TrackEvaluations(row.track_evaluations)
     || !normalizedFullJsonEqual(row.track_evaluations, expected.trackEvaluations)
     || row.qualification_track !== expected.qualificationTrack
@@ -689,12 +732,14 @@ function validV3EvaluatedRow(row, decision, context) {
   const qualityWaivesOnlyMissingEvent = expected.qualificationTrack !== "quality_technical"
     || (eventBlockers.length === 1 && eventBlockers[0] === "VERIFIED_POSITIVE_EVENT_MISSING");
   const candidateSnapshot = row.candidate_snapshot;
-  const candidateCode = ruleText(candidateSnapshot?.code || candidateSnapshot?.symbol);
+  const candidateCode = normalizeCandidateCode(market, candidateSnapshot?.code || candidateSnapshot?.symbol);
+  const evaluatedCode = normalizeCandidateCode(market, code);
   return qualityWaivesOnlyMissingEvent
     && typeof row.qualification_id === "string"
     && /^qual_[0-9a-f]{24}$/.test(row.qualification_id)
     && normalizedFullJsonEqual(candidateSnapshot, sourceContext.input.candidate_snapshot)
-    && candidateCode?.toLowerCase() === code.toLowerCase();
+    && candidateCode !== null
+    && candidateCode === evaluatedCode;
 }
 
 function validV3QualifiedRow(row, decision, snapshot, context = null) {
@@ -705,17 +750,27 @@ function validV3QualifiedRow(row, decision, snapshot, context = null) {
   return Boolean(ruleContext && row?.status === "QUALIFIED" && validV3EvaluatedRow(row, decision, ruleContext));
 }
 
-function deterministicV3Order(context) {
-  if (!context || !Array.isArray(context.sources) || !Array.isArray(context.inputRows)) return null;
-  const rows = context.sources.map((source, index) => {
-    const expected = expectedV3Qualification(source, context.inputRows[index]);
-    return expected ? {
-      market: expected.market,
-      code: expected.code,
-      qualificationScore: expected.score,
-    } : null;
+function deterministicV3Order(context, evaluated) {
+  if (!context || !Array.isArray(context.sources) || !Array.isArray(context.inputRows)
+    || !Array.isArray(evaluated) || evaluated.length !== context.sources.length) return null;
+  const seen = new Set();
+  const rows = evaluated.map((row) => {
+    const identity = candidateIdentity(row?.market, row?.code || row?.symbol);
+    const sourceContext = identity ? context.byIdentity.get(identity) : null;
+    const expected = sourceContext
+      ? expectedV3Qualification(sourceContext.source, sourceContext.input)
+      : null;
+    if (!identity || seen.has(identity) || !expected
+      || row.market !== expected.market || row.code !== expected.code
+      || !sameRuleNumber(row.qualification_score, expected.score)) return null;
+    seen.add(identity);
+    return {
+      market: row.market,
+      code: row.code,
+      qualificationScore: row.qualification_score,
+    };
   });
-  if (rows.some((row) => !row)) return null;
+  if (rows.some((row) => !row) || seen.size !== context.byIdentity.size) return null;
   return rows.sort((left, right) => {
     if (left.qualificationScore !== right.qualificationScore) {
       return right.qualificationScore - left.qualificationScore;
@@ -730,7 +785,10 @@ function v3QualifiedTruthRows(snapshot, decision) {
   const evaluated = decision?.evaluated_candidates;
   const mirrors = decision?.qualified_candidates;
   const context = v3RuleInputContext(snapshot, decision);
-  const expectedOrder = deterministicV3Order(context);
+  // The server sorts the already rounded, published qualification score.  Use
+  // that audited value here as well; recomputing a midpoint with Math.round()
+  // can differ from Python round() by 0.01 and invert adjacent equal-score rows.
+  const expectedOrder = deterministicV3Order(context, evaluated);
   if (!context
     || !expectedOrder
     || !Array.isArray(evaluated)
@@ -775,9 +833,9 @@ function productionQualifiedRows(snapshot = state.snapshot, market = null) {
       continue;
     }
     const rowMarket = String(primary.market || "");
-    const rowCode = String(primary.code || primary.symbol || "").toLowerCase();
+    const rowCode = normalizeCandidateCode(rowMarket, primary.code || primary.symbol);
     const embedded = primary.candidate_snapshot;
-    const embeddedCode = String(embedded?.code || embedded?.symbol || "").toLowerCase();
+    const embeddedCode = normalizeCandidateCode(rowMarket, embedded?.code || embedded?.symbol);
     const score = primary.qualification_score;
     const valid = MARKET_ORDER.includes(rowMarket)
       && rowCode
@@ -887,7 +945,7 @@ function productionDecisionTruth(snapshot = state.snapshot) {
   const serverAction = String(serverDecision?.action || "");
   const serverPrimary = serverDecision?.primary;
   const primaryMarket = String(serverPrimary?.market || "");
-  const primaryCode = String(serverPrimary?.code || serverPrimary?.symbol || "").toLowerCase();
+  const primaryCode = normalizeCandidateCode(primaryMarket, serverPrimary?.code || serverPrimary?.symbol);
   const qualifiedRows = productionQualifiedRows(snapshot);
   const qualifiedPrimary = qualifiedRows.find((row) => row.market === primaryMarket && row.code === primaryCode) || null;
   const qualificationScore = serverPrimary?.qualification_score;

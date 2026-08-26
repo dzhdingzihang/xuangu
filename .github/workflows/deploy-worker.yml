@@ -47,12 +47,12 @@ jobs:
       snapshot_key: ${{ steps.snapshot_bundle.outputs.snapshot_key }}
       snapshot_sha256: ${{ steps.snapshot_bundle.outputs.snapshot_sha256 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -66,7 +66,7 @@ jobs:
           SCHEDULE_GATE_STATUS_URL: https://xuangu.alixjd.com/api/latest
           SCHEDULE_GATE_CRON: ${{ github.event.schedule }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
         with:
           node-version: "22"
@@ -97,7 +97,7 @@ jobs:
 
       - name: Restore A-share daily K-line cache
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: data/runtime-cache/a_share_daily.json
           key: a-share-d1-v2-${{ github.run_id }}-${{ github.run_attempt }}
@@ -106,7 +106,7 @@ jobs:
 
       - name: Restore HK/US dynamic recall cache
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: data/runtime-cache/hk_us_dynamic_recall.json
           key: hk-us-dynamic-recall-v1-${{ github.run_id }}-${{ github.run_attempt }}
@@ -115,7 +115,7 @@ jobs:
 
       - name: Restore HK/US daily K-line cache
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: data/runtime-cache/hk_us_daily.json
           key: hk-us-d1-v2-${{ github.run_id }}-${{ github.run_attempt }}
@@ -174,21 +174,21 @@ jobs:
 
       - name: Save validated A-share daily K-line cache
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: data/runtime-cache/a_share_daily.json
           key: a-share-d1-v2-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save validated HK/US dynamic recall cache
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: data/runtime-cache/hk_us_dynamic_recall.json
           key: hk-us-dynamic-recall-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save validated HK/US daily K-line cache
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: data/runtime-cache/hk_us_daily.json
           key: hk-us-d1-v2-${{ github.run_id }}-${{ github.run_attempt }}
@@ -267,7 +267,7 @@ jobs:
 
       - name: Upload immutable snapshot recovery artifact
         if: steps.snapshot_bundle.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: snapshot-recovery-${{ github.run_id }}
           path: ${{ runner.temp }}/snapshot-recovery-${{ github.run_id }}
@@ -427,12 +427,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -440,7 +440,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Download verified recovery bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: snapshot-recovery-${{ github.run_id }}
           path: ${{ runner.temp }}/archive-payload
