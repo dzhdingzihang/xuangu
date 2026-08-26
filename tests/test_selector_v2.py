@@ -1711,6 +1711,51 @@ class SelectorV2Tests(unittest.TestCase):
         )
         self.assertIn("A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM", deep_degraded["reason_codes"])
 
+    def test_a_share_deep_eligibility_uses_98_percent_of_complete_technical_pool(self) -> None:
+        broad = [{"code": str(index)} for index in range(300)]
+        recall = {
+            "target_count": 300,
+            "selected_count": 300,
+            "board_coverage": dict(server.A_SHARE_BOARD_TARGETS),
+            "board_shortfalls": {},
+        }
+        healthy = server.a_share_pool_health(
+            broad,
+            quote_count=300,
+            technical_attempted_count=300,
+            technical_completed_count=297,
+            deep_eligible_count=295,
+            deep_attempted_count=295,
+            deep_completed_count=295,
+            merged_count=300,
+            recall_coverage=recall,
+        )
+        below_minimum = server.a_share_pool_health(
+            broad,
+            quote_count=300,
+            technical_attempted_count=300,
+            technical_completed_count=297,
+            deep_eligible_count=291,
+            deep_attempted_count=291,
+            deep_completed_count=291,
+            merged_count=300,
+            recall_coverage=recall,
+        )
+
+        self.assertEqual(healthy["status"], "healthy")
+        self.assertEqual(healthy["deep_eligibility_target_count"], 297)
+        self.assertEqual(healthy["deep_eligibility_coverage"], 0.9933)
+        self.assertEqual(healthy["expected_deep_attempted_count"], 295)
+        self.assertNotIn(
+            "A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM",
+            healthy["reason_codes"],
+        )
+        self.assertEqual(below_minimum["deep_eligibility_coverage"], 0.9798)
+        self.assertIn(
+            "A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM",
+            below_minimum["reason_codes"],
+        )
+
     def test_objectively_blocked_candidate_cannot_be_a_share_primary(self) -> None:
         blocked = decision_ready_candidate("600001")
         blocked["execution_state"] = "BLOCKED"

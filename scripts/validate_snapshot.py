@@ -75,6 +75,9 @@ HK_STANDARD_MIN_AMOUNT_HKD = 20_000_000
 HK_INTRADAY_MIN_AMOUNT_HKD = 2_000_000
 HK_INTRADAY_MIN_MARKET_CAP_HKD = 1_000_000_000
 A_SHARE_DEEP_SCORE_LIMIT = 300
+A_SHARE_MIN_TECHNICAL_SCORE_COVERAGE = 0.98
+A_SHARE_MIN_DEEP_SCORE_COVERAGE = 0.98
+A_SHARE_POOL_HEALTH_CONTRACT_VERSION = "a-share-pool-health-v2"
 YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
 TEN_DAY_SHADOW_MODEL_ID = "ten-day-technical-shadow-v1"
 TEN_DAY_SHADOW_LABEL_VERSION = "r10-net-total-return-v1"
@@ -1703,6 +1706,133 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                         or technical_kline_coverage != expected_technical_coverage
                     ):
                         errors.append("markets.a_share.stats.technical_kline_coverage is inconsistent")
+                    if snapshot.get("model_version") == PRODUCTION_RULE_MODEL_VERSION:
+                        pool_health = section.get("pool_health")
+                        if not isinstance(pool_health, dict):
+                            errors.append("markets.a_share.pool_health is required")
+                        elif (
+                            pool_health.get("contract_version")
+                            == A_SHARE_POOL_HEALTH_CONTRACT_VERSION
+                        ):
+                            required_health_fields = {
+                                "contract_version",
+                                "status",
+                                "reason_codes",
+                                "technical_attempted_count",
+                                "technical_completed_count",
+                                "technical_score_coverage",
+                                "min_technical_score_coverage",
+                                "deep_eligible_count",
+                                "deep_eligibility_target_count",
+                                "deep_eligibility_coverage",
+                                "min_deep_eligibility_coverage",
+                                "deep_attempted_count",
+                                "expected_deep_attempted_count",
+                                "deep_completed_count",
+                                "deep_score_coverage",
+                                "min_deep_score_coverage",
+                                "deep_score_limit",
+                            }
+                            missing_health_fields = sorted(required_health_fields - set(pool_health))
+                            if missing_health_fields:
+                                errors.append(
+                                    "markets.a_share.pool_health fields missing: "
+                                    + ",".join(missing_health_fields)
+                                )
+
+                            health_inputs_valid = all(
+                                isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                                for value in (
+                                    deep_limit_bound,
+                                    technical_attempted_size,
+                                    technical_kline_complete_size,
+                                    deep_eligible_size,
+                                    deep_attempted_size,
+                                    deep_scored_size,
+                                )
+                            )
+                            if health_inputs_valid:
+                                deep_eligibility_target = min(
+                                    deep_limit_bound, technical_kline_complete_size
+                                )
+                                deep_eligibility_coverage = (
+                                    round(deep_eligible_size / deep_eligibility_target, 4)
+                                    if deep_eligibility_target
+                                    else 0.0
+                                )
+                                expected_attempted = min(deep_limit_bound, deep_eligible_size)
+                                expected_health_fields = {
+                                    "contract_version": A_SHARE_POOL_HEALTH_CONTRACT_VERSION,
+                                    "technical_attempted_count": technical_attempted_size,
+                                    "technical_completed_count": technical_kline_complete_size,
+                                    "technical_score_coverage": expected_technical_coverage,
+                                    "min_technical_score_coverage": A_SHARE_MIN_TECHNICAL_SCORE_COVERAGE,
+                                    "deep_eligible_count": deep_eligible_size,
+                                    "deep_eligibility_target_count": deep_eligibility_target,
+                                    "deep_eligibility_coverage": deep_eligibility_coverage,
+                                    "min_deep_eligibility_coverage": A_SHARE_MIN_DEEP_SCORE_COVERAGE,
+                                    "deep_attempted_count": deep_attempted_size,
+                                    "expected_deep_attempted_count": expected_attempted,
+                                    "deep_completed_count": deep_scored_size,
+                                    "deep_score_coverage": expected_deep_coverage,
+                                    "min_deep_score_coverage": A_SHARE_MIN_DEEP_SCORE_COVERAGE,
+                                    "deep_score_limit": deep_limit_bound,
+                                }
+                                if any(
+                                    pool_health.get(field) != expected
+                                    for field, expected in expected_health_fields.items()
+                                ):
+                                    errors.append(
+                                        "markets.a_share.pool_health score funnel is inconsistent"
+                                    )
+
+                                published_reasons = pool_health.get("reason_codes")
+                                if not isinstance(published_reasons, list) or not all(
+                                    isinstance(reason, str) and reason
+                                    for reason in published_reasons
+                                ):
+                                    errors.append("markets.a_share.pool_health.reason_codes is invalid")
+                                else:
+                                    reason_set = set(published_reasons)
+                                    technical_degraded = bool(
+                                        technical_attempted_size == 0
+                                        or expected_technical_coverage
+                                        < A_SHARE_MIN_TECHNICAL_SCORE_COVERAGE
+                                    )
+                                    deep_degraded = bool(
+                                        deep_eligibility_target == 0
+                                        or deep_eligibility_coverage
+                                        < A_SHARE_MIN_DEEP_SCORE_COVERAGE
+                                        or deep_attempted_size != expected_attempted
+                                        or deep_attempted_size == 0
+                                        or expected_deep_coverage
+                                        < A_SHARE_MIN_DEEP_SCORE_COVERAGE
+                                    )
+                                    if technical_degraded != (
+                                        "A_SHARE_TECHNICAL_COVERAGE_BELOW_MINIMUM"
+                                        in reason_set
+                                    ):
+                                        errors.append(
+                                            "markets.a_share.pool_health technical reason is inconsistent"
+                                        )
+                                    if deep_degraded != (
+                                        "A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM"
+                                        in reason_set
+                                    ):
+                                        errors.append(
+                                            "markets.a_share.pool_health deep reason is inconsistent"
+                                        )
+                                    expected_health_status = (
+                                        "degraded" if published_reasons else "healthy"
+                                    )
+                                    if pool_health.get("status") != expected_health_status:
+                                        errors.append(
+                                            "markets.a_share.pool_health.status is inconsistent"
+                                        )
+                        elif pool_health.get("contract_version") is not None:
+                            errors.append(
+                                "markets.a_share.pool_health.contract_version is invalid"
+                            )
                 board_targets = stats.get("board_targets")
                 board_counts = stats.get("board_counts")
                 board_shortfalls = stats.get("board_shortfalls")

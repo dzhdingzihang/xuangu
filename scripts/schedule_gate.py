@@ -414,8 +414,22 @@ def snapshot_data_source_recovery_reasons(snapshot: dict) -> list[str]:
                 and 0 <= deep_completed <= deep_attempted
                 and deep_coverage == (round(deep_completed / deep_attempted, 4) if deep_attempted else 0.0)
             )
-            required_complete = math.ceil(deep_attempted * A_SHARE_MIN_DEEP_SCORE_COVERAGE) if isinstance(deep_attempted, int) and deep_attempted > 0 else 1
-            required_eligible = min(A_SHARE_DEEP_SCORE_LIMIT, technical_kline_complete) if isinstance(technical_kline_complete, int) else 1
+            required_complete = (
+                math.ceil(deep_attempted * A_SHARE_MIN_DEEP_SCORE_COVERAGE)
+                if isinstance(deep_attempted, int) and deep_attempted > 0
+                else 1
+            )
+            deep_eligibility_target = (
+                min(A_SHARE_DEEP_SCORE_LIMIT, technical_kline_complete)
+                if isinstance(technical_kline_complete, int)
+                and not isinstance(technical_kline_complete, bool)
+                else 0
+            )
+            required_eligible = (
+                math.ceil(deep_eligibility_target * A_SHARE_MIN_DEEP_SCORE_COVERAGE)
+                if deep_eligibility_target > 0
+                else 1
+            )
             if (
                 not deep_shape_known
                 or deep_eligible < required_eligible

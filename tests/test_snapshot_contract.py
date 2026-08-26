@@ -96,6 +96,26 @@ def snapshot_fixture() -> dict:
                 ),
             },
         }
+        if market_key == "a_share":
+            markets[market_key]["pool_health"] = {
+                "contract_version": server.A_SHARE_POOL_HEALTH_CONTRACT_VERSION,
+                "status": "healthy",
+                "reason_codes": [],
+                "technical_attempted_count": 300,
+                "technical_completed_count": 300,
+                "technical_score_coverage": 1.0,
+                "min_technical_score_coverage": 0.98,
+                "deep_eligible_count": 300,
+                "deep_eligibility_target_count": 300,
+                "deep_eligibility_coverage": 1.0,
+                "min_deep_eligibility_coverage": 0.98,
+                "deep_attempted_count": 300,
+                "expected_deep_attempted_count": 300,
+                "deep_completed_count": 300,
+                "deep_score_coverage": 1.0,
+                "min_deep_score_coverage": 0.98,
+                "deep_score_limit": 300,
+            }
     return {
         "model_version": "legacy-fixture",
         "generated_at": "2026-08-19T16:30:00+08:00",
@@ -1379,6 +1399,95 @@ class SnapshotContractTests(unittest.TestCase):
         stats["deep_attempted_size"] = 3
         errors = validate_snapshot(enriched)
         self.assertIn("markets.a_share.stats.deep_attempted_size is invalid", errors)
+
+    def test_a_share_pool_health_audits_deep_eligibility_coverage(self) -> None:
+        healthy = current_v3_snapshot()
+        stats = healthy["markets"]["a_share"]["stats"]
+        stats.update(
+            {
+                "technical_kline_complete_size": 297,
+                "technical_kline_coverage": 0.99,
+                "deep_eligible_size": 295,
+                "deep_attempted_size": 295,
+                "deep_scored_size": 295,
+                "deep_kline_coverage": 1.0,
+                "scored_size": 295,
+            }
+        )
+        pool_health = healthy["markets"]["a_share"]["pool_health"]
+        pool_health.update(
+            {
+                "status": "healthy",
+                "reason_codes": [],
+                "technical_completed_count": 297,
+                "technical_score_coverage": 0.99,
+                "deep_eligible_count": 295,
+                "deep_eligibility_target_count": 297,
+                "deep_eligibility_coverage": 0.9933,
+                "deep_attempted_count": 295,
+                "expected_deep_attempted_count": 295,
+                "deep_completed_count": 295,
+                "deep_score_coverage": 1.0,
+            }
+        )
+
+        healthy_errors = validate_snapshot(healthy)
+        self.assertFalse(
+            any(error.startswith("markets.a_share.pool_health") for error in healthy_errors),
+            healthy_errors,
+        )
+
+        below_minimum = copy.deepcopy(healthy)
+        below_stats = below_minimum["markets"]["a_share"]["stats"]
+        below_stats.update(
+            {
+                "deep_eligible_size": 291,
+                "deep_attempted_size": 291,
+                "deep_scored_size": 291,
+                "scored_size": 291,
+            }
+        )
+        below_pool = below_minimum["markets"]["a_share"]["pool_health"]
+        below_pool.update(
+            {
+                "deep_eligible_count": 291,
+                "deep_eligibility_coverage": 0.9798,
+                "deep_attempted_count": 291,
+                "expected_deep_attempted_count": 291,
+                "deep_completed_count": 291,
+            }
+        )
+        self.assertIn(
+            "markets.a_share.pool_health deep reason is inconsistent",
+            validate_snapshot(below_minimum),
+        )
+
+    def test_a_share_pool_health_accepts_legacy_unversioned_snapshot_only(self) -> None:
+        legacy = current_v3_snapshot()
+        legacy_pool = legacy["markets"]["a_share"]["pool_health"]
+        for field in (
+            "contract_version",
+            "deep_eligibility_target_count",
+            "deep_eligibility_coverage",
+            "min_deep_eligibility_coverage",
+            "expected_deep_attempted_count",
+        ):
+            legacy_pool.pop(field)
+
+        legacy_errors = validate_snapshot(legacy)
+        self.assertFalse(
+            any(error.startswith("markets.a_share.pool_health") for error in legacy_errors),
+            legacy_errors,
+        )
+
+        unknown_version = copy.deepcopy(legacy)
+        unknown_version["markets"]["a_share"]["pool_health"][
+            "contract_version"
+        ] = "a-share-pool-health-v1"
+        self.assertIn(
+            "markets.a_share.pool_health.contract_version is invalid",
+            validate_snapshot(unknown_version),
+        )
 
     def test_snapshot_validator_requires_global_ten_day_contract(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())

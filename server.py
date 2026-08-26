@@ -149,6 +149,7 @@ A_SHARE_MIN_QUOTE_COVERAGE = 0.98
 A_SHARE_DEEP_SCORE_LIMIT = 300
 A_SHARE_MIN_TECHNICAL_SCORE_COVERAGE = 0.98
 A_SHARE_MIN_DEEP_SCORE_COVERAGE = 0.98
+A_SHARE_POOL_HEALTH_CONTRACT_VERSION = "a-share-pool-health-v2"
 YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
 MARKET_SOURCE_TIMEZONES = {
     "a_share": ZoneInfo("Asia/Shanghai"),
@@ -8034,6 +8035,12 @@ def a_share_pool_health(
         if technical_attempted_count
         else 0.0
     )
+    deep_eligibility_target_count = min(deep_score_limit, technical_completed_count)
+    deep_eligibility_coverage = (
+        round(deep_eligible_count / deep_eligibility_target_count, 4)
+        if deep_eligibility_target_count
+        else 0.0
+    )
     reason_codes: list[str] = []
     recall_coverage = dict(recall_coverage or {})
     target_value = recall_coverage.get("target_count")
@@ -8062,13 +8069,15 @@ def a_share_pool_health(
         reason_codes.append("A_SHARE_TECHNICAL_COVERAGE_BELOW_MINIMUM")
     expected_deep_attempted = min(deep_score_limit, deep_eligible_count)
     if (
-        deep_eligible_count < min(deep_score_limit, technical_completed_count)
+        deep_eligibility_target_count == 0
+        or deep_eligibility_coverage < min_deep_score_coverage
         or deep_attempted_count != expected_deep_attempted
         or deep_attempted_count == 0
         or deep_score_coverage < min_deep_score_coverage
     ):
         reason_codes.append("A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM")
     return {
+        "contract_version": A_SHARE_POOL_HEALTH_CONTRACT_VERSION,
         "status": "degraded" if reason_codes else "healthy",
         "reason_codes": reason_codes,
         "broad_pool_count": broad_pool_count,
@@ -8082,7 +8091,11 @@ def a_share_pool_health(
         "technical_score_coverage": technical_score_coverage,
         "min_technical_score_coverage": min_technical_score_coverage,
         "deep_eligible_count": deep_eligible_count,
+        "deep_eligibility_target_count": deep_eligibility_target_count,
+        "deep_eligibility_coverage": deep_eligibility_coverage,
+        "min_deep_eligibility_coverage": min_deep_score_coverage,
         "deep_attempted_count": deep_attempted_count,
+        "expected_deep_attempted_count": expected_deep_attempted,
         "deep_completed_count": deep_completed_count,
         "deep_score_coverage": deep_score_coverage,
         "min_deep_score_coverage": min_deep_score_coverage,

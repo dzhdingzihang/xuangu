@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import importlib.util
 import io
@@ -408,6 +409,50 @@ class ScheduleGateTests(unittest.TestCase):
         self.assertIn(
             "A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM",
             self.module.snapshot_data_source_recovery_reasons(degraded),
+        )
+
+    def test_a_share_deep_eligibility_allows_two_filtered_rows_but_stays_fail_closed(self) -> None:
+        healthy = healthy_snapshot()
+        healthy["markets"]["a_share"]["stats"].update(
+            {
+                "technical_kline_complete_size": 297,
+                "technical_kline_coverage": 0.99,
+                "deep_eligible_size": 295,
+                "deep_attempted_size": 295,
+                "deep_scored_size": 295,
+                "scored_size": 295,
+                "deep_kline_coverage": 1.0,
+            }
+        )
+        below_minimum = copy.deepcopy(healthy)
+        below_minimum["markets"]["a_share"]["stats"].update(
+            {
+                "deep_eligible_size": 291,
+                "deep_attempted_size": 291,
+                "deep_scored_size": 291,
+                "scored_size": 291,
+            }
+        )
+        incomplete_attempts = copy.deepcopy(healthy)
+        incomplete_attempts["markets"]["a_share"]["stats"].update(
+            {
+                "deep_attempted_size": 294,
+                "deep_scored_size": 294,
+                "scored_size": 294,
+            }
+        )
+
+        self.assertNotIn(
+            "A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM",
+            self.module.snapshot_data_source_recovery_reasons(healthy),
+        )
+        self.assertIn(
+            "A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM",
+            self.module.snapshot_data_source_recovery_reasons(below_minimum),
+        )
+        self.assertIn(
+            "A_SHARE_DEEP_SCORE_COVERAGE_BELOW_MINIMUM",
+            self.module.snapshot_data_source_recovery_reasons(incomplete_attempts),
         )
 
     def test_a_share_technical_coverage_boundary_forces_recovery(self) -> None:
