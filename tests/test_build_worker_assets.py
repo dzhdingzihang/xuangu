@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import pathlib
 import tempfile
@@ -7,6 +9,173 @@ import unittest
 
 import server
 from scripts import build_worker_assets
+
+
+def runtime_quote_candidate(
+    code: str,
+    market: str,
+    *,
+    price: float = 10.0,
+    source_as_of: str = "2026-08-26T10:00:00+08:00",
+    volume_unit: str | None = None,
+) -> dict:
+    currency = {"a_share": "CNY", "hk": "HKD", "us": "USD"}[market]
+    if volume_unit is None:
+        volume_unit = "lot" if market == "a_share" else "share"
+    return {
+        "code": code,
+        "symbol": code,
+        "name": f"Candidate {code}",
+        "currency": currency,
+        "realtime": {
+            "price": price,
+            "source_as_of": source_as_of,
+            "fetched_at": "2026-08-26T10:00:10+08:00",
+            "volume_unit": volume_unit,
+        },
+        "kline": [{"date": "2026-08-25", "close": price}],
+        "large_unused_payload": ["do-not-publish"] * 20,
+    }
+
+
+def runtime_snapshot_fixture() -> dict:
+    a_share = runtime_quote_candidate("SH600000", "a_share")
+    hk = runtime_quote_candidate("00700.HK", "hk", price=580)
+    us = runtime_quote_candidate("BRK_B", "us", price=500)
+    msft = runtime_quote_candidate("MSFT", "us", price=510)
+    pfe = runtime_quote_candidate("PFE", "us", price=28)
+    return {
+        "schema_version": "selector-snapshot-v2",
+        "selector_mode": "fixture",
+        "model_version": build_worker_assets.CURRENT_PRODUCTION_MODEL_VERSION,
+        "weights_version": "weights-v1",
+        "universe_version": "universe-v1",
+        "calendar_version": "calendar-v1",
+        "snapshot_key": "2026-08-26_fixture.json",
+        "generated_at": "2026-08-26T10:01:00+08:00",
+        "target_date": "2026-08-26",
+        "signal_date": "2026-08-25",
+        "automation": {
+            "trigger": "schedule",
+            "scheduled_slot": "2026-08-26T10:17:00+08:00",
+            "scheduled_invocation_slot": "2026-08-26T10:17:00+08:00",
+            "generation_attempt": 1,
+            "run_id": "fixture:1",
+            "unused": "drop-me",
+        },
+        "markets": {
+            "a_share": {
+                "quote_health": {"status": "available", "requested_count": 300, "quote_count": 300},
+                "decision": {"primary": None, "blocked_candidate": a_share, "watchlist": [a_share]},
+            },
+            "hk": {
+                "quote_health": {"status": "available", "requested_count": 200, "quote_count": 200},
+                "decision": {"primary": hk, "watchlist": [hk]},
+            },
+            "us": {
+                "quote_health": {"status": "available", "requested_count": 300, "quote_count": 300},
+                "decision": {"primary": None, "watchlist": [us]},
+            },
+        },
+        "global_decision": {
+            "contract_version": "global-10d-v1",
+            "decision_scope": "global_10d",
+            "horizon_trade_days": 10,
+            "action": "NO_VALID_PICK",
+            "action_basis": "strict_cross_market_gate_v1",
+            "probability_status": "UNAVAILABLE",
+            "probability": None,
+            "calibrated": False,
+            "primary": {"market": "us", "code": "MSFT", "candidate_snapshot": msft},
+            "research_priority": {"market": "hk", "code": "0700.HK", "candidate_snapshot": hk},
+            "market_states": {"a_share": {"state": "BLOCKED"}, "hk": {"state": "READY"}, "us": {"state": "READY"}},
+            "evaluated_candidates": [{"candidate_snapshot": pfe}] * 798,
+            "blocker_codes": ["TEN_DAY_PROBABILITY_UNCALIBRATED"],
+        },
+        "production_rule_inputs": {"contract_version": "production-rule-inputs-v1", "rows": [{}] * 798},
+        "production_decision": {
+            "contract_version": "production-rule-10d-v1",
+            "decision_scope": "global_10d_bounded_recall",
+            "horizon_trade_days": 10,
+            "action": "QUALIFIED_PICK",
+            "action_basis": "dual_track_candidate_qualification_v3",
+            "rule_model_id": "ten-day-audited-rule-ensemble-v3",
+            "score_kind": "RULE_QUALIFICATION_SCORE",
+            "probability": None,
+            "calibrated": False,
+            "qualified_candidate_count": 1,
+            "rejected_candidate_count": 797,
+            "evaluated_candidate_count": 798,
+            "primary": {
+                "qualification_id": "qual_0123456789abcdef01234567",
+                "status": "QUALIFIED",
+                "market": "us",
+                "code": "PFE",
+                "name": "Pfizer",
+                "qualification_score": 75,
+                "score_kind": "RULE_QUALIFICATION_SCORE",
+                "probability": None,
+                "calibrated": False,
+                "candidate_snapshot": pfe,
+            },
+            "qualified_candidates": [
+                {
+                    "qualification_id": "qual_0123456789abcdef01234567",
+                    "status": "QUALIFIED",
+                    "market": "us",
+                    "code": "PFE",
+                    "name": "Pfizer",
+                    "qualification_score": 75,
+                    "score_kind": "RULE_QUALIFICATION_SCORE",
+                    "probability": None,
+                    "calibrated": False,
+                    "candidate_snapshot": pfe,
+                }
+            ],
+            "evaluated_candidates": [{"candidate_snapshot": pfe}] * 798,
+            "blocker_codes": [],
+        },
+        "events": [{"large": "drop-me"}] * 100,
+    }
+
+
+def bounded_live_snapshot(formal_count: int, visible_count: int = 0) -> dict:
+    snapshot = runtime_snapshot_fixture()
+    for section in snapshot["markets"].values():
+        section["decision"] = {"primary": None, "blocked_candidate": None, "watchlist": []}
+    snapshot["global_decision"]["primary"] = None
+    snapshot["global_decision"]["research_priority"] = None
+
+    qualified = []
+    for index in range(formal_count):
+        code = f"Q{index:03d}"
+        candidate = runtime_quote_candidate(code, "us", price=10 + index / 100)
+        qualified.append(
+            {
+                "qualification_id": f"qual_{index:024x}",
+                "status": "QUALIFIED",
+                "market": "us",
+                "code": code,
+                "name": candidate["name"],
+                "qualification_score": 90 - index / 100,
+                "score_kind": "RULE_QUALIFICATION_SCORE",
+                "probability": None,
+                "calibrated": False,
+                "candidate_snapshot": candidate,
+            }
+        )
+    decision = snapshot["production_decision"]
+    decision["action"] = "QUALIFIED_PICK" if qualified else "NO_QUALIFIED_PICK"
+    decision["qualified_candidate_count"] = len(qualified)
+    decision["primary"] = qualified[0] if qualified else None
+    decision["qualified_candidates"] = qualified
+    decision["evaluated_candidates"] = copy.deepcopy(qualified)
+
+    snapshot["markets"]["us"]["decision"]["watchlist"] = [
+        runtime_quote_candidate(f"V{index:03d}", "us", price=20 + index / 100)
+        for index in range(visible_count)
+    ]
+    return snapshot
 
 
 class BuildWorkerAssetsTests(unittest.TestCase):
@@ -760,6 +929,225 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         self.assertNotIn("shadow_predictions", result)
         self.assertNotIn("private_fold_rows", result["validation"])
         self.assertNotIn("coefficients", result["market_models"]["a_share"])
+
+    def test_worker_runtime_is_a_bounded_prevalidated_summary(self) -> None:
+        snapshot = runtime_snapshot_fixture()
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+        latest_summary = {
+            "snapshot_key": snapshot["snapshot_key"],
+            "generated_at": snapshot["generated_at"],
+            "global_decision": copy.deepcopy(snapshot["global_decision"]),
+            "production_decision": copy.deepcopy(snapshot["production_decision"]),
+            "events": snapshot["events"],
+        }
+
+        runtime = build_worker_assets.build_worker_runtime(
+            snapshot,
+            latest_summary,
+            source_bytes,
+        )
+
+        self.assertEqual(runtime["contract_version"], "worker-runtime-v1")
+        self.assertEqual(runtime["snapshot_key"], snapshot["snapshot_key"])
+        self.assertEqual(runtime["generated_at"], snapshot["generated_at"])
+        self.assertEqual(runtime["automation"]["scheduled_slot"], snapshot["automation"]["scheduled_slot"])
+        self.assertNotIn("unused", runtime["automation"])
+        self.assertEqual(runtime["quote_health_by_market"]["hk"]["requested_count"], 200)
+        self.assertEqual(runtime["global_decision"]["action"], "NO_VALID_PICK")
+        self.assertEqual(runtime["global_decision"]["primary"]["code"], "MSFT")
+        self.assertEqual(runtime["production_decision"]["primary"]["code"], "PFE")
+        self.assertEqual(runtime["production_decision"]["qualified_candidates"][0]["code"], "PFE")
+        self.assertEqual(runtime["source_snapshot"]["sha256"], hashlib.sha256(source_bytes).hexdigest())
+        self.assertEqual(runtime["source_snapshot"]["byte_size"], len(source_bytes))
+        encoded = json.dumps(runtime, ensure_ascii=False)
+        for forbidden in (
+            "candidate_snapshot",
+            "evaluated_candidates",
+            "production_rule_inputs",
+            '"events"',
+        ):
+            self.assertNotIn(forbidden, encoded)
+        self.assertLess(len(encoded.encode()), len(source_bytes) // 10)
+
+    def test_worker_live_index_collects_normalizes_and_deduplicates_visible_candidates(self) -> None:
+        snapshot = runtime_snapshot_fixture()
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+
+        live_index = build_worker_assets.build_worker_live_index(snapshot, source_bytes)
+
+        self.assertEqual(live_index["contract_version"], "worker-live-index-v1")
+        self.assertEqual(live_index["snapshot_key"], snapshot["snapshot_key"])
+        self.assertEqual(live_index["generated_at"], snapshot["generated_at"])
+        self.assertEqual(
+            live_index["source_snapshot"],
+            {
+                "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "byte_size": len(source_bytes),
+            },
+        )
+        self.assertEqual(
+            live_index["contract_metadata"],
+            {
+                "candidate_limit": 90,
+                "byte_size_limit": 512 * 1024,
+                "code_normalization": "worker-facing-live-code-v1",
+                "volume_units_by_market": {
+                    "a_share": ["lot", "share", "shares"],
+                    "hk": ["share", "shares"],
+                    "us": ["share", "shares"],
+                },
+            },
+        )
+        candidates = live_index["candidates"]
+        self.assertEqual(sorted(candidates), ["a_share", "hk", "us"])
+        self.assertIn("600000", candidates["a_share"])
+        self.assertIn("0700.HK", candidates["hk"])
+        self.assertIn("BRK-B", candidates["us"])
+        self.assertIn("MSFT", candidates["us"])
+        self.assertIn("PFE", candidates["us"])
+        self.assertEqual(live_index["candidate_count"], 5)
+        self.assertEqual(live_index["market_candidate_counts"], {"a_share": 1, "hk": 1, "us": 3})
+        hk = candidates["hk"]["0700.HK"]
+        self.assertEqual(hk["code"], "0700.HK")
+        self.assertEqual(hk["symbol"], "0700.HK")
+        self.assertEqual(hk["currency"], "HKD")
+        self.assertEqual(
+            set(hk),
+            set(build_worker_assets.LIVE_CANDIDATE_FIELDS),
+        )
+        self.assertNotIn("global_decision", live_index)
+        self.assertNotIn("large_unused_payload", json.dumps(live_index))
+
+    def test_worker_live_index_excludes_unsafe_quote_contracts(self) -> None:
+        mutations = {
+            "non_positive_price": ("price", 0),
+            "naive_source_time": ("source_as_of", "2026-08-26T10:00:00"),
+            "naive_fetch_time": ("fetched_at", "2026-08-26T10:00:10"),
+            "wrong_volume_unit": ("volume_unit", "contracts"),
+        }
+        for label, (field, value) in mutations.items():
+            with self.subTest(label=label):
+                snapshot = runtime_snapshot_fixture()
+                snapshot["markets"]["a_share"]["decision"]["blocked_candidate"]["realtime"][field] = value
+                source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+                live_index = build_worker_assets.build_worker_live_index(snapshot, source_bytes)
+                self.assertNotIn("600000", live_index["candidates"]["a_share"])
+                self.assertEqual(live_index["excluded_candidate_count"], 1)
+                self.assertEqual(live_index["excluded_candidates"][0]["identity"], "a_share:600000")
+                for market, rows in live_index["candidates"].items():
+                    for candidate in rows.values():
+                        build_worker_assets.validate_live_candidate(candidate, market)
+
+    def test_worker_live_code_normalization_matches_worker_facing_contract(self) -> None:
+        cases = (
+            ("a_share", "SH600000", "600000"),
+            ("a_share", "SH.600000", "600000"),
+            ("a_share", "600000.SH", "600000"),
+            ("a_share", "SZ000001", "000001"),
+            ("a_share", "SZ.000001", "000001"),
+            ("a_share", "000001.SZ", "000001"),
+            ("hk", "700.HK", "0700.HK"),
+            ("hk", "00700.HK", "0700.HK"),
+            ("us", "BRK_B", "BRK-B"),
+            ("us", "BRK.B", "BRK-B"),
+            ("us", "BRK-B", "BRK-B"),
+        )
+        for market, source, expected in cases:
+            with self.subTest(market=market, source=source):
+                self.assertEqual(build_worker_assets.normalize_live_code(source, market), expected)
+
+    def test_worker_live_volume_units_match_worker_and_verifier_contract(self) -> None:
+        expected = {
+            "a_share": {"lot", "share", "shares"},
+            "hk": {"share", "shares"},
+            "us": {"share", "shares"},
+        }
+        self.assertEqual(build_worker_assets.LIVE_MARKET_VOLUME_UNITS, expected)
+        for market, units in expected.items():
+            code = {"a_share": "600000", "hk": "0700.HK", "us": "BRK_B"}[market]
+            for unit in units:
+                with self.subTest(market=market, unit=unit):
+                    candidate = build_worker_assets.compact_live_candidate(
+                        runtime_quote_candidate(code, market, volume_unit=unit),
+                        market,
+                    )
+                    build_worker_assets.validate_live_candidate(candidate, market)
+            with self.subTest(market=market, unit="contracts"):
+                candidate = build_worker_assets.compact_live_candidate(
+                    runtime_quote_candidate(code, market, volume_unit="contracts"),
+                    market,
+                )
+                with self.assertRaisesRegex(ValueError, "volume_unit"):
+                    build_worker_assets.validate_live_candidate(candidate, market)
+
+    def test_worker_live_index_keeps_exact_candidate_boundary(self) -> None:
+        snapshot = bounded_live_snapshot(90)
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+
+        live_index = build_worker_assets.build_worker_live_index(snapshot, source_bytes)
+
+        self.assertEqual(live_index["candidate_count"], 90)
+        self.assertEqual(live_index["formal_qualified_candidate_count"], 90)
+        self.assertEqual(len(live_index["candidates"]["us"]), 90)
+        self.assertEqual(
+            sorted(live_index["candidates"]["us"]),
+            [f"Q{index:03d}" for index in range(90)],
+        )
+
+    def test_worker_live_index_rejects_more_than_90_formal_candidates(self) -> None:
+        snapshot = bounded_live_snapshot(91)
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+
+        with self.assertRaisesRegex(ValueError, "candidate limit.*91 > 90"):
+            build_worker_assets.build_worker_live_index(snapshot, source_bytes)
+
+    def test_worker_live_index_rejects_more_than_90_union_candidates(self) -> None:
+        snapshot = bounded_live_snapshot(89, visible_count=2)
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+
+        with self.assertRaisesRegex(ValueError, "candidate limit.*91 > 90"):
+            build_worker_assets.build_worker_live_index(snapshot, source_bytes)
+
+    def test_worker_live_index_never_silently_excludes_formal_qualified_candidate(self) -> None:
+        snapshot = bounded_live_snapshot(1)
+        snapshot["production_decision"]["qualified_candidates"][0]["candidate_snapshot"]["realtime"]["price"] = 0
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+
+        with self.assertRaisesRegex(ValueError, "formal qualified candidate.*positive realtime price"):
+            build_worker_assets.build_worker_live_index(snapshot, source_bytes)
+
+    def test_worker_live_index_rejects_payload_over_byte_ceiling(self) -> None:
+        snapshot = bounded_live_snapshot(1)
+        candidate = snapshot["production_decision"]["qualified_candidates"][0]["candidate_snapshot"]
+        candidate["kline"] = [
+            {"date": "2026-08-25", "close": 10, "padding": "x" * 1024}
+            for _ in range(600)
+        ]
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+
+        with self.assertRaisesRegex(ValueError, "byte-size limit"):
+            build_worker_assets.build_worker_live_index(snapshot, source_bytes)
+
+    def test_write_worker_runtime_assets_creates_both_bounded_documents(self) -> None:
+        snapshot = runtime_snapshot_fixture()
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+        latest_summary = {"snapshot_key": snapshot["snapshot_key"], "generated_at": snapshot["generated_at"]}
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory)
+            build_worker_assets.write_worker_runtime_assets(
+                snapshot,
+                latest_summary,
+                source_bytes,
+                output,
+            )
+            runtime = json.loads((output / "runtime.json").read_text(encoding="utf-8"))
+            live_index = json.loads((output / "live-index.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(runtime["snapshot_key"], snapshot["snapshot_key"])
+        self.assertEqual(live_index["snapshot_key"], snapshot["snapshot_key"])
+        self.assertEqual(live_index["source_snapshot"], runtime["source_snapshot"])
+        self.assertLess(len(json.dumps(runtime)), len(source_bytes) // 10)
+        self.assertLess(len(json.dumps(live_index)), len(source_bytes) // 2)
 
 
 if __name__ == "__main__":

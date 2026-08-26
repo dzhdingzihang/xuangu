@@ -35,6 +35,12 @@ const SCHEDULED_REFRESH_CHECKPOINTS = [...WEEKDAY_CHECKPOINTS, ...FALLBACK_CHECK
     leftHour * 60 + leftMinute - (rightHour * 60 + rightMinute));
 const LIVE_MARKETS = new Set(["a_share", "hk", "us"]);
 const LIVE_CACHE_TTL_MS = 10_000;
+const WORKER_RUNTIME_CONTRACT_VERSION = "worker-runtime-v1";
+const WORKER_LIVE_INDEX_CONTRACT_VERSION = "worker-live-index-v1";
+const WORKER_RUNTIME_PATH = "/data/picks/runtime.json";
+const WORKER_LIVE_INDEX_PATH = "/data/picks/live-index.json";
+const WORKER_LIVE_INDEX_CANDIDATE_LIMIT = 90;
+const WORKER_LIVE_INDEX_BYTE_SIZE_LIMIT = 524_288;
 const MAX_QUALIFIED_SUMMARY_CANDIDATES = 20;
 const CURRENT_PRODUCTION_MODEL_VERSION = "smart-selector-2026-08-26.2-dual-track-rule";
 const PRODUCTION_RULE_V3_ACTION_BASIS = "dual_track_candidate_qualification_v3";
@@ -252,14 +258,21 @@ export function snapshotFreshness(generatedAt, current = new Date()) {
 function normalizeLiveCode(market, value) {
   const raw = String(value || "").trim().toUpperCase();
   if (market === "a_share") {
-    const clean = raw.replace(/^(?:SH|SZ)\./, "");
-    return /^\d{6}$/.test(clean) ? clean : null;
+    const match = raw.match(/^(?:(?:SH|SZ)\.?)?(\d{6})(?:\.(?:SH|SZ))?$/);
+    return match ? match[1] : null;
   }
   if (market === "hk") {
-    const match = raw.match(/^(\d{1,5})\.HK$/);
-    return match ? `${match[1].padStart(4, "0")}.HK` : null;
+    const match = raw.match(/^0*(\d{1,5})(?:\.HK)?$/);
+    if (!match) return null;
+    const number = Number(match[1]);
+    return Number.isInteger(number) && number >= 1 && number <= 9999
+      ? `${String(number).padStart(4, "0")}.HK`
+      : null;
   }
-  if (market === "us") return /^[A-Z][A-Z0-9.-]{0,14}$/.test(raw) ? raw : null;
+  if (market === "us") {
+    const normalized = raw.replaceAll("_", "-").replaceAll(".", "-");
+    return /^[A-Z][A-Z0-9-]{0,14}$/.test(normalized) ? normalized : null;
+  }
   return null;
 }
 
@@ -448,9 +461,9 @@ function frozenV3SourceProjection(source, index) {
 }
 
 function v3RuleInputContext(snapshot) {
-  const sources = snapshot?.global_decision?.evaluated_candidates;
   const inputs = snapshot?.production_rule_inputs;
   const inputRows = inputs?.rows;
+  const sources = snapshot?.global_decision?.evaluated_candidates;
   if (
     !Array.isArray(sources)
     || !inputs || typeof inputs !== "object" || Array.isArray(inputs)
@@ -825,6 +838,13 @@ function snapshotCandidateCodes(snapshot, market) {
 }
 
 function snapshotCandidate(snapshot, market, code) {
+  if (snapshot?.contract_version === WORKER_LIVE_INDEX_CONTRACT_VERSION) {
+    const rows = snapshot?.candidates?.[market];
+    if (!rows || typeof rows !== "object" || Array.isArray(rows)) return null;
+    const candidate = rows[code];
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+    return normalizeLiveCode(market, candidate.code || candidate.symbol) === code ? candidate : null;
+  }
   return snapshotCandidateRows(snapshot, market).find(
     (row) => normalizeLiveCode(market, row.code || row.symbol) === code,
   ) || null;
@@ -895,6 +915,126 @@ async function readAssetJson(env, path) {
     throw new Error(`asset JSON is not an object: ${path}`);
   }
   return payload;
+}
+
+async function readOptionalAssetJson(env, path) {
+  const response = await env.ASSETS.fetch(`https://assets.local${path}`);
+  if (!response.ok) return null;
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  if (!contentType.includes("json")) return null;
+  const payload = await response.json();
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error(`optional asset JSON is not an object: ${path}`);
+  }
+  return payload;
+}
+
+async function readApiAsset(env, path) {
+  const response = await env.ASSETS.fetch(`https://assets.local${path}`);
+  if (!response.ok) return null;
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  if (!contentType.includes("json")) return null;
+  const headers = new Headers(response.headers);
+  headers.set("content-type", "application/json; charset=utf-8");
+  headers.set("cache-control", "no-store");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function validRuntimeIdentity(payload, contractVersion) {
+  return Boolean(
+    payload
+    && typeof payload === "object"
+    && !Array.isArray(payload)
+    && payload.contract_version === contractVersion
+    && typeof payload.generated_at === "string"
+    && awareIsoTimestamp(payload.generated_at)
+    && typeof payload.snapshot_key === "string"
+    && payload.snapshot_key.endsWith(".json")
+    && !payload.snapshot_key.includes("/")
+    && !payload.snapshot_key.includes("\\")
+  );
+}
+
+function validSourceSnapshotBinding(payload) {
+  const source = payload?.source_snapshot;
+  return Boolean(
+    source
+    && typeof source === "object"
+    && !Array.isArray(source)
+    && typeof source.sha256 === "string"
+    && /^[a-f0-9]{64}$/.test(source.sha256)
+    && Number.isInteger(source.byte_size)
+    && source.byte_size > 0
+  );
+}
+
+function legacyFullSnapshotFallbackEnabled(env) {
+  return String(env?.ALLOW_LEGACY_FULL_SNAPSHOT_FALLBACK || "") === "1";
+}
+
+function validLiveIndexContract(index) {
+  const metadata = index?.contract_metadata;
+  const candidates = index?.candidates;
+  if (
+    !metadata || typeof metadata !== "object" || Array.isArray(metadata)
+    || metadata.candidate_limit !== WORKER_LIVE_INDEX_CANDIDATE_LIMIT
+    || metadata.byte_size_limit !== WORKER_LIVE_INDEX_BYTE_SIZE_LIMIT
+    || metadata.code_normalization !== "worker-facing-live-code-v1"
+    || !candidates || typeof candidates !== "object" || Array.isArray(candidates)
+    || !Number.isInteger(index.candidate_count)
+    || index.candidate_count < 0
+    || index.candidate_count > WORKER_LIVE_INDEX_CANDIDATE_LIMIT
+  ) return false;
+  let actualCount = 0;
+  for (const market of ["a_share", "hk", "us"]) {
+    const rows = candidates[market];
+    if (!rows || typeof rows !== "object" || Array.isArray(rows)) return false;
+    actualCount += Object.keys(rows).length;
+  }
+  return actualCount === index.candidate_count;
+}
+
+async function latestRuntime(env) {
+  const runtime = await readOptionalAssetJson(env, WORKER_RUNTIME_PATH);
+  if (runtime) {
+    if (
+      legacyFullSnapshotFallbackEnabled(env)
+      && !Object.hasOwn(runtime, "contract_version")
+    ) return latestPick(env);
+    if (
+      !validRuntimeIdentity(runtime, WORKER_RUNTIME_CONTRACT_VERSION)
+      || !validSourceSnapshotBinding(runtime)
+    ) {
+      throw new Error("worker runtime identity is invalid");
+    }
+    return runtime;
+  }
+  if (legacyFullSnapshotFallbackEnabled(env)) return latestPick(env);
+  throw new Error("worker runtime asset is unavailable");
+}
+
+async function latestLiveIndex(env) {
+  const index = await readOptionalAssetJson(env, WORKER_LIVE_INDEX_PATH);
+  if (index) {
+    if (
+      legacyFullSnapshotFallbackEnabled(env)
+      && !Object.hasOwn(index, "contract_version")
+    ) return latestPick(env);
+    if (
+      !validRuntimeIdentity(index, WORKER_LIVE_INDEX_CONTRACT_VERSION)
+      || !validSourceSnapshotBinding(index)
+    ) {
+      throw new Error("worker live index identity is invalid");
+    }
+    if (!validLiveIndexContract(index)) throw new Error("worker live index candidates are invalid");
+    return index;
+  }
+  if (legacyFullSnapshotFallbackEnabled(env)) return latestPick(env);
+  throw new Error("worker live index asset is unavailable");
 }
 
 function summarizeDecision(decision) {
@@ -1005,6 +1145,26 @@ function productionDecisionForSnapshot(snapshot) {
   if (!isProductionRuleDecision(decision, snapshot?.model_version)) return null;
   if (productionRuleContractVersion(decision) !== 3) return decision;
   return validatedV3DecisionRows(snapshot, decision) ? decision : null;
+}
+
+function productionDecisionForRuntime(snapshot) {
+  if (snapshot?.contract_version !== WORKER_RUNTIME_CONTRACT_VERSION) {
+    return productionDecisionForSnapshot(snapshot);
+  }
+  const decision = snapshot?.production_decision;
+  if (!isProductionRuleDecision(decision, snapshot?.model_version)) return null;
+  const primary = decision.primary;
+  if (decision.action === "NO_QUALIFIED_PICK") {
+    return primary === null || primary === undefined ? decision : null;
+  }
+  if (
+    !primary || typeof primary !== "object" || Array.isArray(primary)
+    || primary.status !== "QUALIFIED"
+    || typeof primary.qualification_id !== "string"
+    || !/^qual_[a-f0-9]{24}$/.test(primary.qualification_id)
+    || !Number.isFinite(primary.qualification_score)
+  ) return null;
+  return decision;
 }
 
 function summarizePick(pick) {
@@ -1293,6 +1453,17 @@ async function pickForTarget(env, targetDate) {
   return null;
 }
 
+async function pickFileForTarget(env, targetDate) {
+  const manifest = await loadManifest(env);
+  if (!manifest) return null;
+  const summaries = Array.isArray(manifest.summaries) ? manifest.summaries : [];
+  const match = summaries
+    .filter((item) => item.target_date === targetDate && item.cache_key && item.full_snapshot_available !== false)
+    .sort((a, b) => `${b.generated_at || ""}`.localeCompare(`${a.generated_at || ""}`))[0];
+  const file = match?.cache_key;
+  return typeof file === "string" && !file.includes("/") && file.endsWith(".json") ? file : null;
+}
+
 function num(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -1358,6 +1529,13 @@ function snapshotLiveContract(snapshot, market, code, current = new Date()) {
 
   return {
     contract_version: "live-quote-v1",
+    source_index_contract_version: snapshot.contract_version === WORKER_LIVE_INDEX_CONTRACT_VERSION
+      ? snapshot.contract_version
+      : null,
+    source_snapshot_sha256: snapshot?.source_snapshot?.sha256 || null,
+    source_snapshot_byte_size: Number.isInteger(snapshot?.source_snapshot?.byte_size)
+      ? snapshot.source_snapshot.byte_size
+      : null,
     ok: true,
     data_mode: "SCHEDULED_SNAPSHOT",
     quote_mode: "SCHEDULED_SNAPSHOT",
@@ -1403,14 +1581,14 @@ function snapshotLiveContract(snapshot, market, code, current = new Date()) {
 async function handleApi(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/api/status") {
-    const latest = await latestPick(env);
-    const productionDecision = latest ? productionDecisionForSnapshot(latest) : null;
+    const latest = await latestRuntime(env);
+    const productionDecision = latest ? productionDecisionForRuntime(latest) : null;
     const currentTime = nowCN();
     const current = new Date(currentTime);
     const freshness = snapshotFreshness(latest ? latest.generated_at : null, current);
     const sourceStateByMarket = Object.fromEntries(["a_share", "hk", "us"].map((market) => {
       const section = latest?.markets?.[market] || {};
-      const health = section.quote_health || {};
+      const health = latest?.quote_health_by_market?.[market] || section.quote_health || {};
       return [market, {
         status: health.status || "unknown",
         quote_coverage: Number.isFinite(Number(health.quote_coverage)) ? Number(health.quote_coverage) : null,
@@ -1443,27 +1621,36 @@ async function handleApi(request, env) {
       snapshot_as_of: latest ? latest.generated_at || null : null,
       next_refresh: nextScheduledRefresh(current),
       snapshot_key: latest ? latest.snapshot_key || null : null,
+      runtime_contract_version: latest?.contract_version === WORKER_RUNTIME_CONTRACT_VERSION
+        ? latest.contract_version
+        : null,
+      source_snapshot_sha256: latest?.source_snapshot?.sha256 || null,
+      source_snapshot_byte_size: Number.isInteger(latest?.source_snapshot?.byte_size)
+        ? latest.source_snapshot.byte_size
+        : null,
       production_action: productionDecision?.action || "NO_QUALIFIED_PICK",
       qualification_id: productionDecision?.primary?.qualification_id || null,
-      calibrated_action: latest?.global_decision?.action || "NO_VALID_PICK",
-      prediction_id: latest?.global_decision?.primary?.prediction_id || null,
+      calibrated_action: latest?.global_decision?.action || latest?.calibrated_action || "NO_VALID_PICK",
+      prediction_id: latest?.global_decision?.primary?.prediction_id || latest?.prediction_id || null,
       ...freshness,
     });
   }
 
   if (url.pathname === "/api/latest") {
-    const latest = await latestPick(env);
+    const latest = await readApiAsset(env, "/data/picks/latest.json");
     if (!latest) return json({ error: "暂无历史决策缓存" }, 404);
-    return json(latest);
+    return latest;
   }
 
   if (url.pathname === "/api/latest-summary") {
-    const latest = await latestPick(env);
+    const latest = await latestRuntime(env);
     if (!latest) return json({ error: "暂无历史决策缓存" }, 404);
     return json({
       ok: true,
       time: nowCN(),
-      latest: summarizePick(latest),
+      latest: latest.contract_version === WORKER_RUNTIME_CONTRACT_VERSION
+        ? latest.latest_summary || null
+        : summarizePick(latest),
     });
   }
 
@@ -1479,11 +1666,15 @@ async function handleApi(request, env) {
     const days = latestDecisionDays(rows);
     const selectedRows = view === "raw" ? rows : days;
     const history = selectedRows.slice(0, limit);
-    const latest = await latestPick(env);
+    const latest = await latestRuntime(env);
     return json({
       ok: true,
       time: nowCN(),
-      latest: latest ? summarizePick(latest) : null,
+      latest: latest
+        ? latest.contract_version === WORKER_RUNTIME_CONTRACT_VERSION
+          ? latest.latest_summary || null
+          : summarizePick(latest)
+        : null,
       meta: historyMetadata(rows, days, view, history.length, manifest.history_evaluation),
       history_evaluation: manifest.history_evaluation || null,
       history,
@@ -1505,22 +1696,26 @@ async function handleApi(request, env) {
     }
     const snapshotKey = url.searchParams.get("snapshot");
     if (snapshotKey) {
-      const snapshot = await loadPickBySnapshot(env, snapshotKey);
+      if (snapshotKey.includes("/") || snapshotKey.includes("\\") || !snapshotKey.endsWith(".json")) {
+        return json({ error: "未找到指定历史快照" }, 404);
+      }
+      const snapshot = await readApiAsset(env, `/data/picks/${snapshotKey}`);
       if (!snapshot) return json({ error: "未找到指定历史快照" }, 404);
-      return json(snapshot);
+      return snapshot;
     }
     const targetDate = url.searchParams.get("date");
     if (targetDate && !validIsoDate(targetDate)) {
       return json({ error: "INVALID_DATE", message: "date 必须是有效的 YYYY-MM-DD 日期" }, 400);
     }
-    const pick = targetDate ? await pickForTarget(env, targetDate) : await latestPick(env);
-    if (!pick && targetDate) {
+    const pickFile = targetDate ? await pickFileForTarget(env, targetDate) : "latest.json";
+    if (!pickFile && targetDate) {
       return json({ error: "PICK_NOT_FOUND", message: `没有 ${targetDate} 的历史快照` }, 404);
     }
+    const pick = pickFile ? await readApiAsset(env, `/data/picks/${pickFile}`) : null;
     if (!pick) {
       return json({ error: "暂无选股快照。请等待每日任务生成后再查看。" }, 404);
     }
-    return json(pick);
+    return pick;
   }
 
   if (url.pathname === "/api/live") {
@@ -1553,7 +1748,7 @@ async function handleApi(request, env) {
     }
     let latest;
     try {
-      latest = await latestPick(env);
+      latest = await latestLiveIndex(env);
     } catch {
       return json(
         liveError("LATEST_SNAPSHOT_UNAVAILABLE", "无法读取当前候选池", market, code, {
@@ -1572,7 +1767,7 @@ async function handleApi(request, env) {
         503,
       );
     }
-    if (!snapshotCandidateCodes(latest, market).has(code)) {
+    if (!snapshotCandidate(latest, market, code)) {
       return json(
         liveError("LIVE_CODE_NOT_IN_CURRENT_SNAPSHOT", "仅允许查询当前快照候选股", market, code, {
           rate_limit_status: rateLimitStatus,

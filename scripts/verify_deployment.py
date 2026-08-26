@@ -52,6 +52,10 @@ SCHEDULED_REFRESH_CHECKPOINTS = (
     (23, 17),
 )
 ResponsePayload = tuple[int, Mapping[str, str], bytes]
+ERROR_BODY_PREVIEW_BYTES = 512
+LIVE_CONTRACT_REQUEST_BUDGET = 90
+WORKER_RUNTIME_CONTRACT_VERSION = "worker-runtime-v1"
+WORKER_LIVE_INDEX_CONTRACT_VERSION = "worker-live-index-v1"
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -86,20 +90,41 @@ def fetch_response(
 
 
 def fetch_json(url: str, *, timeout: float = 10) -> dict:
-    status, _headers, body = fetch_response(url, timeout=timeout)
+    status, headers, body = fetch_response(url, timeout=timeout)
     if not 200 <= status < 300:
-        raise OSError(f"{url} returned HTTP {status}")
+        details: list[str] = []
+        ray = _header(headers, "cf-ray")
+        if ray:
+            details.append(f"cf-ray={ray}")
+        preview = body[:ERROR_BODY_PREVIEW_BYTES].decode("utf-8", errors="replace")
+        preview = " ".join(preview.split())
+        if len(body) > ERROR_BODY_PREVIEW_BYTES:
+            preview = f"{preview}…"
+        if preview:
+            details.append(f"body={preview!r}")
+        suffix = f" ({'; '.join(details)})" if details else ""
+        raise OSError(f"{url} returned HTTP {status}{suffix}")
     payload = json.loads(body.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"{url} did not return a JSON object")
     return payload
 
 
-def read_snapshot(path: pathlib.Path) -> dict:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+def parse_snapshot_content(content: bytes) -> dict:
+    payload = json.loads(content.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("local latest snapshot must be a JSON object")
     return payload
+
+
+def read_snapshot(path: pathlib.Path) -> dict:
+    return parse_snapshot_content(path.read_bytes())
+
+
+def source_snapshot_identity(content: bytes) -> tuple[str, int]:
+    if not isinstance(content, bytes) or not content:
+        raise ValueError("local snapshot content must be non-empty bytes")
+    return hashlib.sha256(content).hexdigest(), len(content)
 
 
 def _normalize_json_numbers(value):
@@ -324,6 +349,79 @@ def deployment_mismatches(local: dict, status: dict, latest: dict) -> list[str]:
     return errors
 
 
+def status_identity_errors(local: dict, status: dict) -> list[str]:
+    """Validate the lightweight status identity without downloading latest.json."""
+    errors: list[str] = []
+    if not isinstance(local, dict):
+        return ["local payload is not an object"]
+    if not isinstance(status, dict):
+        status = {}
+        errors.append("status payload is not an object")
+    for field in IDENTITY_FIELDS + DECISION_IDENTITY_FIELDS:
+        if local.get(field) in (None, ""):
+            errors.append(f"local.{field} is missing")
+    for field in STATUS_REQUIRED_FIELDS:
+        expected = local.get(field)
+        actual = _remote_value(status, field)
+        if actual != expected:
+            errors.append(f"status.{field}: expected {expected!r}, got {actual!r}")
+    if status.get("ok") is not True:
+        errors.append(f"status.ok: expected true, got {status.get('ok')!r}")
+    if status.get("has_latest") is not True:
+        errors.append(f"status.has_latest: expected true, got {status.get('has_latest')!r}")
+
+    global_action = (local.get("global_decision") or {}).get("action")
+    if global_action not in ALLOWED_GLOBAL_ACTIONS:
+        errors.append(f"local.global_decision.action is invalid: {global_action!r}")
+    production = local.get("production_decision")
+    if isinstance(production, dict) and production.get("action") not in ALLOWED_PRODUCTION_ACTIONS:
+        errors.append(f"local.production_decision.action is invalid: {production.get('action')!r}")
+    return errors
+
+
+def runtime_status_errors(
+    status: dict,
+    *,
+    source_snapshot_sha256: str,
+    source_snapshot_byte_size: int,
+) -> list[str]:
+    if not re.fullmatch(r"[a-f0-9]{64}", source_snapshot_sha256):
+        raise ValueError("source_snapshot_sha256 must be a lowercase SHA-256 digest")
+    if (
+        not isinstance(source_snapshot_byte_size, int)
+        or isinstance(source_snapshot_byte_size, bool)
+        or source_snapshot_byte_size <= 0
+    ):
+        raise ValueError("source_snapshot_byte_size must be a positive integer")
+    expected = {
+        "runtime_contract_version": WORKER_RUNTIME_CONTRACT_VERSION,
+        "source_snapshot_sha256": source_snapshot_sha256,
+        "source_snapshot_byte_size": source_snapshot_byte_size,
+    }
+    return [
+        f"status.{field}: expected {value!r}, got {status.get(field)!r}"
+        for field, value in expected.items()
+        if status.get(field) != value
+    ]
+
+
+def status_deployment_errors(
+    local: dict,
+    status: dict,
+    *,
+    source_snapshot_sha256: str,
+    source_snapshot_byte_size: int,
+) -> list[str]:
+    errors = status_identity_errors(local, status)
+    errors.extend(scheduled_snapshot_status_errors(local, status))
+    errors.extend(runtime_status_errors(
+        status,
+        source_snapshot_sha256=source_snapshot_sha256,
+        source_snapshot_byte_size=source_snapshot_byte_size,
+    ))
+    return errors
+
+
 def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
     """Require the deployed Worker to advertise the device-free snapshot mode."""
     errors: list[str] = []
@@ -393,13 +491,17 @@ def _header(headers: Mapping[str, str], name: str) -> str:
 def _normalize_live_code(market: str, value: object) -> str | None:
     raw = str(value or "").strip().upper()
     if market == "a_share":
-        clean = re.sub(r"^(?:SH|SZ)\.", "", raw)
-        return clean if re.fullmatch(r"\d{6}", clean) else None
+        match = re.fullmatch(r"(?:(?:SH|SZ)\.?)?(\d{6})(?:\.(?:SH|SZ))?", raw)
+        return match.group(1) if match else None
     if market == "hk":
-        match = re.fullmatch(r"(\d{1,5})\.HK", raw)
-        return f"{match.group(1).zfill(4)}.HK" if match else None
+        match = re.fullmatch(r"0*(\d{1,5})(?:\.HK)?", raw)
+        if not match:
+            return None
+        number = int(match.group(1))
+        return f"{number:04d}.HK" if 1 <= number <= 9999 else None
     if market == "us":
-        return raw if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", raw) else None
+        normalized = raw.replace("_", "-").replace(".", "-")
+        return normalized if re.fullmatch(r"[A-Z][A-Z0-9-]{0,14}", normalized) else None
     return None
 
 
@@ -424,9 +526,14 @@ def _live_candidates(snapshot: dict, market: str) -> list[tuple[str, dict]]:
                 rows.append(candidate)
     production_decision = snapshot.get("production_decision")
     if isinstance(production_decision, dict):
-        candidate = production_decision.get("primary")
-        if isinstance(candidate, dict) and candidate.get("market") == market:
-            rows.append(candidate.get("candidate_snapshot") or candidate)
+        qualified = production_decision.get("qualified_candidates")
+        production_rows = [
+            production_decision.get("primary"),
+            *(qualified if isinstance(qualified, list) else []),
+        ]
+        for candidate in production_rows:
+            if isinstance(candidate, dict) and candidate.get("market") == market:
+                rows.append(candidate.get("candidate_snapshot") or candidate)
 
     result: list[tuple[str, dict]] = []
     seen: set[str] = set()
@@ -533,6 +640,8 @@ def live_contract_errors(
     *,
     base_url: str,
     fetcher: Callable[[str], dict],
+    source_snapshot_sha256: str,
+    source_snapshot_byte_size: int,
 ) -> list[str]:
     errors: list[str] = []
     expected_volume_units = {
@@ -576,6 +685,21 @@ def live_contract_errors(
             payload = fetcher(endpoint_url(base_url, f"/api/live?{query}"))
             if payload.get("contract_version") != "live-quote-v1":
                 errors.append(f"{prefix}.contract_version is not 'live-quote-v1'")
+            if payload.get("source_index_contract_version") != WORKER_LIVE_INDEX_CONTRACT_VERSION:
+                errors.append(
+                    f"{prefix}.source_index_contract_version is not "
+                    f"{WORKER_LIVE_INDEX_CONTRACT_VERSION!r}"
+                )
+            if payload.get("source_snapshot_sha256") != source_snapshot_sha256:
+                errors.append(
+                    f"{prefix}.source_snapshot_sha256: expected {source_snapshot_sha256!r}, "
+                    f"got {payload.get('source_snapshot_sha256')!r}"
+                )
+            if payload.get("source_snapshot_byte_size") != source_snapshot_byte_size:
+                errors.append(
+                    f"{prefix}.source_snapshot_byte_size: expected {source_snapshot_byte_size!r}, "
+                    f"got {payload.get('source_snapshot_byte_size')!r}"
+                )
             if payload.get("ok") is not True:
                 errors.append(f"{prefix}.ok is not true")
             if payload.get("market") != market:
@@ -666,11 +790,25 @@ def full_deployment_errors(
     base_url: str,
     json_fetcher: Callable[[str], dict],
     response_fetcher: Callable[[str, bool], ResponsePayload],
+    source_snapshot_sha256: str,
+    source_snapshot_byte_size: int,
 ) -> tuple[dict, list[str]]:
     status = json_fetcher(endpoint_url(base_url, "/api/status"))
+    errors = status_deployment_errors(
+        local,
+        status,
+        source_snapshot_sha256=source_snapshot_sha256,
+        source_snapshot_byte_size=source_snapshot_byte_size,
+    )
+    # Never fan out to immutable/history/static/live endpoints while an edge is
+    # still serving an old or internally inconsistent deployment identity.
+    if errors:
+        return {}, errors
+
     latest = json_fetcher(endpoint_url(base_url, "/api/latest"))
-    errors = deployment_mismatches(local, status, latest)
-    errors.extend(scheduled_snapshot_status_errors(local, status))
+    errors.extend(deployment_mismatches(local, status, latest))
+    if errors:
+        return latest, errors
 
     snapshot_key = _validate_snapshot_key(local.get("snapshot_key"))
     snapshot_query = urllib.parse.urlencode({"snapshot": snapshot_key})
@@ -684,7 +822,13 @@ def full_deployment_errors(
     history = json_fetcher(endpoint_url(base_url, "/api/history?view=raw&limit=1000"))
     errors.extend(history_contract_errors(local, history))
     errors.extend(static_contract_errors(base_url, response_fetcher))
-    errors.extend(live_contract_errors(local, base_url=base_url, fetcher=json_fetcher))
+    errors.extend(live_contract_errors(
+        local,
+        base_url=base_url,
+        fetcher=json_fetcher,
+        source_snapshot_sha256=source_snapshot_sha256,
+        source_snapshot_byte_size=source_snapshot_byte_size,
+    ))
     return latest, errors
 
 
@@ -694,29 +838,34 @@ def poll_deployment(
     base_url: str,
     attempts: int,
     delay_seconds: float,
+    source_snapshot_sha256: str,
+    source_snapshot_byte_size: int,
     fetcher: Callable[[str], dict] = fetch_json,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> dict:
-    """Poll deployed identity with injectable I/O for deterministic tests."""
+    """Poll the compact runtime status without repeatedly downloading latest.json."""
     if attempts < 1:
         raise ValueError("attempts must be at least 1")
     if delay_seconds < 0:
         raise ValueError("delay_seconds cannot be negative")
 
     status_url = endpoint_url(base_url, "/api/status")
-    latest_url = endpoint_url(base_url, "/api/latest")
     last_errors: list[str] = []
 
     for attempt in range(1, attempts + 1):
         try:
             status = fetcher(status_url)
-            latest = fetcher(latest_url)
-            last_errors = deployment_mismatches(local, status, latest)
+            last_errors = status_deployment_errors(
+                local,
+                status,
+                source_snapshot_sha256=source_snapshot_sha256,
+                source_snapshot_byte_size=source_snapshot_byte_size,
+            )
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             last_errors = [f"request error: {exc}"]
 
         if not last_errors:
-            return latest
+            return status
         if attempt < attempts:
             print(
                 f"Deployment identity not visible yet (attempt {attempt}/{attempts}): "
@@ -736,6 +885,8 @@ def poll_full_deployment(
     base_url: str,
     attempts: int,
     delay_seconds: float,
+    source_snapshot_sha256: str,
+    source_snapshot_byte_size: int,
     json_fetcher: Callable[[str], dict],
     response_fetcher: Callable[[str, bool], ResponsePayload],
     sleeper: Callable[[float], None] = time.sleep,
@@ -744,28 +895,58 @@ def poll_full_deployment(
         raise ValueError("attempts must be at least 1")
     if delay_seconds < 0:
         raise ValueError("delay_seconds cannot be negative")
+    live_candidate_count = sum(
+        len(_live_candidates(local, market))
+        for market in ("a_share", "hk", "us")
+    )
+    if live_candidate_count > LIVE_CONTRACT_REQUEST_BUDGET:
+        raise ValueError(
+            "live contract candidate count exceeds the per-verification request budget: "
+            f"{live_candidate_count} > {LIVE_CONTRACT_REQUEST_BUDGET}"
+        )
+    # Phase one is deliberately cheap.  Asset/route propagation can expose an
+    # old version for several polls, and those polls must not trigger the live
+    # contract fan-out.
+    poll_deployment(
+        local,
+        base_url=base_url,
+        attempts=attempts,
+        delay_seconds=delay_seconds,
+        source_snapshot_sha256=source_snapshot_sha256,
+        source_snapshot_byte_size=source_snapshot_byte_size,
+        fetcher=json_fetcher,
+        sleeper=sleeper,
+    )
+
+    final_attempts = attempts if live_candidate_count == 0 else min(
+        attempts,
+        max(1, LIVE_CONTRACT_REQUEST_BUDGET // live_candidate_count),
+    )
+
     latest: dict = {}
     last_errors: list[str] = []
-    for attempt in range(1, attempts + 1):
+    for attempt in range(1, final_attempts + 1):
         try:
             latest, last_errors = full_deployment_errors(
                 local,
                 base_url=base_url,
                 json_fetcher=json_fetcher,
                 response_fetcher=response_fetcher,
+                source_snapshot_sha256=source_snapshot_sha256,
+                source_snapshot_byte_size=source_snapshot_byte_size,
             )
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             last_errors = [f"request error: {exc}"]
         if not last_errors:
             return latest
-        if attempt < attempts:
+        if attempt < final_attempts:
             print(
-                f"Full deployment contract not ready (attempt {attempt}/{attempts}): "
+                f"Full deployment contract not ready (attempt {attempt}/{final_attempts}): "
                 + "; ".join(last_errors)
             )
             sleeper(delay_seconds)
     raise RuntimeError(
-        f"full deployment verification failed after {attempts} attempts: "
+        f"full deployment verification failed after {final_attempts} attempts: "
         + "; ".join(last_errors)
     )
 
@@ -805,12 +986,16 @@ def main() -> None:
         )
         return
 
-    local = read_snapshot(path)
+    source_content = path.read_bytes()
+    local = parse_snapshot_content(source_content)
+    source_snapshot_sha256, source_snapshot_byte_size = source_snapshot_identity(source_content)
     latest = poll_full_deployment(
         local,
         base_url=args.base_url,
         attempts=args.attempts,
         delay_seconds=args.delay_seconds,
+        source_snapshot_sha256=source_snapshot_sha256,
+        source_snapshot_byte_size=source_snapshot_byte_size,
         json_fetcher=json_fetcher,
         response_fetcher=lambda url, follow: fetch_response(
             url,

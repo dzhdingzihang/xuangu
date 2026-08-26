@@ -76,6 +76,7 @@ class WorkerApiContractTests(unittest.TestCase):
               global_decision: {{ action: "NO_VALID_PICK", primary: null }},
             }};
             const env = {{
+              ALLOW_LEGACY_FULL_SNAPSHOT_FALLBACK: "1",
               ASSETS: {{
                 async fetch(input) {{
                   const url = new URL(typeof input === "string" ? input : input.url);
@@ -144,6 +145,178 @@ class WorkerApiContractTests(unittest.TestCase):
             const page = await worker.fetch(new Request("https://xuangu.alixjd.com/"), env);
             assert.equal(page.status, 200);
             assert.equal(page.headers.get("referrer-policy"), "strict-origin-when-cross-origin");
+            """
+        )
+
+    def test_runtime_indexes_keep_status_and_live_off_the_full_snapshot(self) -> None:
+        run_node(
+            f"""
+            import assert from "node:assert/strict";
+            const worker = (await import({json.dumps(WORKER_URI)} + "?bounded-runtime-index")).default;
+            const generatedAt = "2026-08-26T11:16:53+08:00";
+            const snapshotKey = "2026-08-26_2026-08-25_111653.json";
+            const productionDecision = {{
+              contract_version: "production-rule-10d-v1",
+              decision_scope: "global_10d_bounded_recall",
+              action: "QUALIFIED_PICK",
+              action_basis: "dual_track_candidate_qualification_v3",
+              rule_model_id: "ten-day-audited-rule-ensemble-v3",
+              score_kind: "RULE_QUALIFICATION_SCORE",
+              probability: null,
+              calibrated: false,
+              primary: {{
+                status: "QUALIFIED",
+                market: "us",
+                code: "AAPL",
+                qualification_id: "qual_0123456789abcdef01234567",
+                qualification_score: 78.5,
+              }},
+              qualified_candidate_count: 1,
+              rejected_candidate_count: 799,
+              evaluated_candidate_count: 800,
+              blocker_codes: [],
+            }};
+            const runtime = {{
+              contract_version: "worker-runtime-v1",
+              generated_at: generatedAt,
+              snapshot_key: snapshotKey,
+              source_snapshot: {{ sha256: "a".repeat(64), byte_size: 7654321 }},
+              schema_version: "selector-snapshot-v2",
+              selector_mode: "legacy_active_v2_dual_low_shadow",
+              model_version: "smart-selector-2026-08-26.2-dual-track-rule",
+              weights_version: "weights-v2",
+              universe_version: "universe-v2",
+              global_decision: {{ action: "NO_VALID_PICK", primary: null }},
+              quote_health_by_market: {{
+                a_share: {{ status: "available", quote_coverage: 1 }},
+                hk: {{ status: "available", quote_coverage: 1 }},
+                us: {{ status: "available", quote_coverage: 1 }},
+              }},
+              production_decision: productionDecision,
+              latest_summary: {{ snapshot_key: snapshotKey, production_action: "QUALIFIED_PICK" }},
+            }};
+            const liveIndex = {{
+              contract_version: "worker-live-index-v1",
+              generated_at: generatedAt,
+              snapshot_key: snapshotKey,
+              source_snapshot: {{ sha256: "a".repeat(64), byte_size: 7654321 }},
+              candidate_count: 1,
+              excluded_candidate_count: 0,
+              contract_metadata: {{
+                candidate_limit: 90,
+                byte_size_limit: 524288,
+                code_normalization: "worker-facing-live-code-v1",
+                volume_units_by_market: {{
+                  a_share: ["lot", "share", "shares"],
+                  hk: ["share", "shares"],
+                  us: ["share", "shares"],
+                }},
+              }},
+              candidates: {{
+                a_share: {{}}, hk: {{}}, us: {{
+                  AAPL: {{
+                    code: "AAPL",
+                    name: "Apple",
+                    kline: [],
+                    realtime: {{
+                      price: 213,
+                      change_pct: 1.2,
+                      previous_close: 210,
+                      volume: 120000,
+                      volume_unit: "share",
+                      session: "closed",
+                      source: "Scheduled quote",
+                      source_as_of: "2026-08-26T08:00:00+08:00",
+                      fetched_at: generatedAt,
+                    }},
+                  }},
+                }},
+              }},
+            }};
+            const full = {{ generated_at: generatedAt, snapshot_key: snapshotKey, full_marker: true }};
+            const calls = [];
+            const jsonResponse = (payload) => new Response(JSON.stringify(payload), {{
+              headers: {{ "content-type": "application/json" }},
+            }});
+            const streamOnlyResponse = (payload) => {{
+              const response = jsonResponse(payload);
+              response.json = async () => {{ throw new Error("full snapshot must be streamed"); }};
+              return response;
+            }};
+            const env = {{ ASSETS: {{ async fetch(input) {{
+              const url = new URL(typeof input === "string" ? input : input.url);
+              calls.push(url.pathname);
+              if (url.pathname === "/data/picks/runtime.json") return jsonResponse(runtime);
+              if (url.pathname === "/data/picks/live-index.json") return jsonResponse(liveIndex);
+              if (url.pathname === "/data/picks/latest.json") return streamOnlyResponse(full);
+              if (url.pathname === `/data/picks/${{snapshotKey}}`) return streamOnlyResponse(full);
+              return new Response("missing", {{ status: 404 }});
+            }} }} }};
+
+            calls.length = 0;
+            const status = await (await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/status"), env,
+            )).json();
+            assert.equal(status.production_action, "QUALIFIED_PICK");
+            assert.equal(status.qualification_id, "qual_0123456789abcdef01234567");
+            assert.equal(status.runtime_contract_version, "worker-runtime-v1");
+            assert.equal(status.source_snapshot_sha256, "a".repeat(64));
+            assert.equal(status.source_snapshot_byte_size, 7654321);
+            assert.deepEqual(calls, ["/data/picks/runtime.json"]);
+
+            calls.length = 0;
+            const live = await (await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"), env,
+            )).json();
+            assert.equal(live.ok, true);
+            assert.equal(live.price, 213);
+            assert.equal(live.source_index_contract_version, "worker-live-index-v1");
+            assert.equal(live.source_snapshot_sha256, "a".repeat(64));
+            assert.equal(live.source_snapshot_byte_size, 7654321);
+            assert.deepEqual(calls, ["/data/picks/live-index.json"]);
+
+            calls.length = 0;
+            const latestResponse = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/latest"), env,
+            );
+            assert.equal((await latestResponse.json()).full_marker, true);
+            assert.equal(latestResponse.headers.get("cache-control"), "no-store");
+            assert.deepEqual(calls, ["/data/picks/latest.json"]);
+
+            calls.length = 0;
+            const immutable = await worker.fetch(
+              new Request(`https://xuangu.alixjd.com/api/pick?snapshot=${{snapshotKey}}`), env,
+            );
+            assert.equal((await immutable.json()).full_marker, true);
+            assert.deepEqual(calls, [`/data/picks/${{snapshotKey}}`]);
+
+            calls.length = 0;
+            const summary = await (await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/latest-summary"), env,
+            )).json();
+            assert.equal(summary.latest.production_action, "QUALIFIED_PICK");
+            assert.deepEqual(calls, ["/data/picks/runtime.json"]);
+
+            const failClosedCalls = [];
+            const failClosedEnv = {{ ASSETS: {{ async fetch(input) {{
+              const url = new URL(typeof input === "string" ? input : input.url);
+              failClosedCalls.push(url.pathname);
+              if (url.pathname === "/data/picks/latest.json") {{
+                throw new Error("full snapshot fallback must not be attempted");
+              }}
+              return new Response("missing", {{ status: 404 }});
+            }} }} }};
+            const missingRuntime = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/status"), failClosedEnv,
+            );
+            assert.equal(missingRuntime.status, 503);
+            assert.deepEqual(failClosedCalls, ["/data/picks/runtime.json"]);
+            failClosedCalls.length = 0;
+            const missingLiveIndex = await worker.fetch(
+              new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"), failClosedEnv,
+            );
+            assert.equal(missingLiveIndex.status, 503);
+            assert.deepEqual(failClosedCalls, ["/data/picks/live-index.json"]);
             """
         )
 
@@ -301,11 +474,14 @@ class WorkerApiContractTests(unittest.TestCase):
               status: 200,
               headers: {{ "content-type": "application/json" }},
             }});
-            const envFor = (payload) => ({{ ASSETS: {{ fetch: async (input) => {{
-              const url = new URL(typeof input === "string" ? input : input.url);
-              if (url.pathname === "/data/picks/latest.json") return responseFor(payload);
-              return new Response("missing", {{ status: 404 }});
-            }} }} }});
+            const envFor = (payload) => ({{
+              ALLOW_LEGACY_FULL_SNAPSHOT_FALLBACK: "1",
+              ASSETS: {{ fetch: async (input) => {{
+                const url = new URL(typeof input === "string" ? input : input.url);
+                if (url.pathname === "/data/picks/latest.json") return responseFor(payload);
+                return new Response("missing", {{ status: 404 }});
+              }} }},
+            }});
 
             const secondaryResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/live?market=us&code=MSFT"),
@@ -500,6 +676,74 @@ class WorkerApiContractTests(unittest.TestCase):
             """
         )
 
+    def test_live_index_code_and_volume_contract_is_normalized_consistently(self) -> None:
+        run_node(
+            f"""
+            import assert from "node:assert/strict";
+            const worker = (await import({json.dumps(WORKER_URI)} + "?live-index-normalization")).default;
+            const generatedAt = "2026-08-26T11:16:53+08:00";
+            const quote = (price, volumeUnit) => ({{
+              price,
+              volume: 100,
+              volume_unit: volumeUnit,
+              session: "closed",
+              source_as_of: "2026-08-26T08:00:00+08:00",
+              fetched_at: generatedAt,
+            }});
+            const candidate = (code, price, volumeUnit) => ({{
+              code, symbol: code, name: code, kline: [], realtime: quote(price, volumeUnit),
+            }});
+            const liveIndex = {{
+              contract_version: "worker-live-index-v1",
+              generated_at: generatedAt,
+              snapshot_key: "2026-08-26_2026-08-25_111653.json",
+              source_snapshot: {{ sha256: "b".repeat(64), byte_size: 7654321 }},
+              candidate_count: 3,
+              excluded_candidate_count: 0,
+              contract_metadata: {{
+                candidate_limit: 90,
+                byte_size_limit: 524288,
+                code_normalization: "worker-facing-live-code-v1",
+                volume_units_by_market: {{
+                  a_share: ["lot", "share", "shares"],
+                  hk: ["share", "shares"],
+                  us: ["share", "shares"],
+                }},
+              }},
+              candidates: {{
+                a_share: {{ "600000": candidate("600000", 12.3, "share") }},
+                hk: {{ "0700.HK": candidate("0700.HK", 380.2, "shares") }},
+                us: {{ "BRK-B": candidate("BRK-B", 500, "share") }},
+              }},
+            }};
+            const env = {{ ASSETS: {{ async fetch(input) {{
+              const url = new URL(typeof input === "string" ? input : input.url);
+              return url.pathname === "/data/picks/live-index.json"
+                ? new Response(JSON.stringify(liveIndex), {{ headers: {{ "content-type": "application/json" }} }})
+                : new Response("missing", {{ status: 404 }});
+            }} }} }};
+            const cases = [
+              ["a_share", "SH600000", "600000", "share"],
+              ["a_share", "SZ.600000", "600000", "share"],
+              ["a_share", "600000.SZ", "600000", "share"],
+              ["hk", "700", "0700.HK", "shares"],
+              ["hk", "00700.HK", "0700.HK", "shares"],
+              ["us", "BRK.B", "BRK-B", "share"],
+              ["us", "BRK_B", "BRK-B", "share"],
+            ];
+            for (const [market, inputCode, expectedCode, expectedUnit] of cases) {{
+              const response = await worker.fetch(new Request(
+                `https://xuangu.alixjd.com/api/live?market=${{market}}&code=${{encodeURIComponent(inputCode)}}`,
+              ), env);
+              assert.equal(response.status, 200, `${{market}}:${{inputCode}}`);
+              const payload = await response.json();
+              assert.equal(payload.code, expectedCode);
+              assert.equal(payload.volume_unit, expectedUnit);
+              assert.equal(payload.source_index_contract_version, "worker-live-index-v1");
+            }}
+            """
+        )
+
     def test_live_quotes_are_served_only_from_the_published_snapshot(self) -> None:
         run_node(
             f"""
@@ -574,11 +818,14 @@ class WorkerApiContractTests(unittest.TestCase):
               upstreamCalls += 1;
               throw new Error("Worker must not fetch a request-time quote upstream");
             }};
-            const env = {{ ASSETS: {{ fetch: async (input) => {{
-              const url = new URL(typeof input === "string" ? input : input.url);
-              if (url.pathname === "/data/picks/latest.json") return jsonResponse(latest);
-              return new Response("missing", {{ status: 404 }});
-            }} }} }};
+            const env = {{
+              ALLOW_LEGACY_FULL_SNAPSHOT_FALLBACK: "1",
+              ASSETS: {{ fetch: async (input) => {{
+                const url = new URL(typeof input === "string" ? input : input.url);
+                if (url.pathname === "/data/picks/latest.json") return jsonResponse(latest);
+                return new Response("missing", {{ status: 404 }});
+              }} }},
+            }};
 
             const aResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/live?market=a_share&code=603228"),
@@ -670,11 +917,14 @@ class WorkerApiContractTests(unittest.TestCase):
               upstreamCalls += 1;
               throw new Error("Worker must not fetch a request-time quote upstream");
             }};
-            const env = {{ ASSETS: {{ fetch: async (input) => {{
-              const url = new URL(typeof input === "string" ? input : input.url);
-              if (url.pathname === "/data/picks/latest.json") return jsonResponse(latest);
-              return new Response("missing", {{ status: 404 }});
-            }} }} }};
+            const env = {{
+              ALLOW_LEGACY_FULL_SNAPSHOT_FALLBACK: "1",
+              ASSETS: {{ fetch: async (input) => {{
+                const url = new URL(typeof input === "string" ? input : input.url);
+                if (url.pathname === "/data/picks/latest.json") return jsonResponse(latest);
+                return new Response("missing", {{ status: 404 }});
+              }} }},
+            }};
 
             const invalidMarket = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/live?market=crypto&code=AAPL"), env,
@@ -769,12 +1019,15 @@ class WorkerApiContractTests(unittest.TestCase):
             }};
             let upstreamCalls = 0;
             globalThis.fetch = async () => {{ upstreamCalls += 1; throw new Error("unexpected upstream"); }};
-            const env = {{ ASSETS: {{ async fetch(input) {{
-              const url = new URL(typeof input === "string" ? input : input.url);
-              return url.pathname === "/data/picks/latest.json"
-                ? new Response(JSON.stringify(latest), {{ headers: {{ "content-type": "application/json" }} }})
-                : new Response("missing", {{ status: 404 }});
-            }} }} }};
+            const env = {{
+              ALLOW_LEGACY_FULL_SNAPSHOT_FALLBACK: "1",
+              ASSETS: {{ async fetch(input) {{
+                const url = new URL(typeof input === "string" ? input : input.url);
+                return url.pathname === "/data/picks/latest.json"
+                  ? new Response(JSON.stringify(latest), {{ headers: {{ "content-type": "application/json" }} }})
+                  : new Response("missing", {{ status: 404 }});
+              }} }},
+            }};
 
             for (const code of ["AAPL", "MSFT", "GOOG", "AMZN"]) {{
               const response = await worker.fetch(
@@ -824,6 +1077,7 @@ class WorkerApiContractTests(unittest.TestCase):
             const limiterFailure = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/live?market=us&code=AAPL"),
               {{
+                ALLOW_LEGACY_FULL_SNAPSHOT_FALLBACK: "1",
                 ASSETS: validAssets,
                 LIVE_RATE_LIMITER: {{ async limit() {{ throw new Error("binding unavailable"); }} }},
               }},
@@ -909,6 +1163,7 @@ class WorkerApiContractTests(unittest.TestCase):
             }};
             const manifest = {{ summaries: [legacyOld, contractNoPick, legacyLatest, laterLegacySameDay] }};
             const env = {{
+              ALLOW_LEGACY_FULL_SNAPSHOT_FALLBACK: "1",
               ASSETS: {{
                 async fetch(input) {{
                   const url = new URL(typeof input === "string" ? input : input.url);

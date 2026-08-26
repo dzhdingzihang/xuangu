@@ -129,7 +129,7 @@ V2 根据 `trend_risk_on / range / risk_off / high_vol / unknown` 使用可解�
 }
 ```
 
-每次 V3 快照还发布 `production_rule_inputs` 冻结账本：它按 `global_decision.evaluated_candidates` 的原始顺序保留规则实际读取的最小字段、来源候选存在性、数据质量与合格候选快照，并绑定 SHA-256、合同版本和行数。服务端、快照校验器、Cloudflare Worker 与浏览器分别从该账本复算；发布的 `primary`、`qualified_candidates` 或任一合格明细只要与复算结果不完全一致，就失败关闭而不进入实时接口或正式页面。
+每次 V3 快照还发布 `production_rule_inputs` 冻结账本：它按 `global_decision.evaluated_candidates` 的原始顺序保留规则实际读取的最小字段、来源候选存在性、数据质量与合格候选快照，并绑定 SHA-256、合同版本和行数。Python 生成器、独立快照校验器和浏览器会从该账本复算；发布的 `primary`、`qualified_candidates` 或任一合格明细只要与复算结果不完全一致，就失败关闭。Cloudflare 不在每个 HTTP 请求里重放 798/800 行决策，而是只发布由已验证完整快照派生、并与 `snapshot_key`、SHA-256 及原始字节数绑定的轻量运行索引。运行索引缺失或合同不匹配时 API 直接失败关闭，不会回退解析数 MB 的完整快照。
 
 事件扫描默认从每市场 8 只扩大到 16 只，并按 Legacy、V2、数据质量、风险收益和市场动作预排序；Shadow 概率不参与预排序。事件源按市场隔离：一个市场的官方源故障不会抹掉另一个市场已经核验的证据；但严格 `global_decision` 仍要求三市场事件管线全部完成。浏览器只展示服务端发布且复算一致的通道、资格分和证据合同，不能自行补选、切换通道或把研究项升级为 `QUALIFIED_PICK`。
 
@@ -270,8 +270,8 @@ GitHub Actions（定时 / 手动）
   → 按归档策略将每日检查点、规则合格或正式可执行快照与 ledger 写回 main
 
 Cloudflare Worker（请求时）
-  → 提供页面、快照、历史与状态 API
-  → 只读 GitHub Actions 已生成并经验证的静态 assets
+  → 完整快照以静态流式响应交给页面与审计接口
+  → 状态 API 只读已验证摘要，`/api/live` 只读有界候选行情索引
   → 不在请求时获取行情，也不重算选股
 ```
 
@@ -288,7 +288,7 @@ Python 选股程序不会在 Worker 或浏览器请求中重算。页面只读 `
 
 七个主跑分别覆盖盘前与隔夜收盘、A/H 早盘、亚洲午间、A 股收盘、港股收盘、美股盘前和美股开盘。`22:47` 兼顾美股夏令时与冬令时，都会落在常规交易开始之后。每个主跑后 30 分钟有一次健康补跑。每个 cron 保持独立表达式，快照同时记录主检查点和实际 cron 调用点；发布前按“调用点 + 生成时间”做单调校验，因此 GitHub 排队不会再让迟到的旧任务覆盖较新补跑。`schedule_gate.py` 只用线上完整 `/api/latest` 作为“已成功发布”证据：对应主跑已发布健康快照时跳过补跑；线上不可达、主跑缺失/失败，或行情/候选池处于可恢复降级时，补跑继续尝试。门禁会硬校验 A/港/美实际召回是否分别达到 `300 / 200 / 300`；任一市场差 1 只也不会把该快照当作健康主跑。港美还必须具备本轮动态来源、完整请求页、最低发现宽度、唯一 manifest，以及行情与完整深评至少 98%；使用上次动态池缓存也会保持降级并继续补跑。同时校验 A 股基础评分覆盖全部有效行情、技术评分至少完成 98%，以及最多 300 只深研至少完成 98%（满池即至少 294 只）。仓库里的 `latest.json` 不能单独抑制补跑，因为它不证明 Cloudflare 已经切换成功。
 
-一次生成与 outcome 结算各最多尝试 3 次。部署前执行单元测试、JavaScript 语法检查、snapshot schema 校验和 immutable 快照一致性检查；部署后验证线上 `generated_at`、`snapshot_as_of`、`next_refresh`、`snapshot_key`、schema、模型版本、历史和不可变快照。生成、测试或部署前校验失败时不会切换生产版。部署前还会记录当前唯一 100% 生效的 Cloudflare Worker Version 和快照摘要；若部署后完整验收失败，Workflow 会标红并自动回滚到该精确版本，再核对旧快照身份与摘要。这是自动恢复，不是零暴露发布：新版在部署后验证窗口内可能短暂在线；回滚本身若失败也会继续标红，需要人工处理。
+一次生成与 outcome 结算各最多尝试 3 次。部署前执行单元测试、JavaScript 语法检查、snapshot schema 校验和 immutable 快照一致性检查；部署后先轻量轮询 `generated_at` / `snapshot_key` 直到新版本收敛，再验证完整快照摘要、历史、不可变快照、页面合同和所有可见候选行情，避免在边缘版本传播期每轮重复执行整套探针。生成、测试或部署前校验失败时不会切换生产版。部署前还会记录当前唯一 100% 生效的 Cloudflare Worker Version 和快照摘要；若部署后完整验收失败，Workflow 会标红并自动回滚到该精确版本，再核对旧快照身份与摘要。这是自动恢复，不是零暴露发布：新版在部署后验证窗口内可能短暂在线；回滚本身若失败也会继续标红，需要人工处理。
 
 每次定时或手动生成都会上传一个保留 30 天的 GitHub Actions 恢复包。为避免约 4–5 MiB 的全量快照在 Git 和 Worker 中无限增长，长期 Git 归档保存每日 `22:47` 检查点、产生生产规则合格候选的批次，以及确实产生正式可执行候选的批次；Worker 只携带最近 30 个决策日的完整交互快照。更早的已归档决策日继续保留轻量摘要和三轨账本，因此历史统计仍可审计，但页面不会再下载其完整候选明细。归档冲突重试采用单调合并：较旧任务可以补充自己的不可变快照，但不能覆盖较新的 `latest.json`、把 `SETTLED` 降级成 `PENDING`，或丢失观察轨 revision。被发布顺序门禁拦下的倒序任务只保留 Actions 恢复包，不能借归档提交间接发布。
 
@@ -330,12 +330,12 @@ GET /api/live?market=us&code=PWR
 
 契约要点：
 
-- `/api/status` 返回快照版本、新鲜度、`snapshot_as_of`、`next_refresh`、主跑/健康补跑检查点、`data_mode=scheduled_snapshot` 和 `device_dependency=false`。
-- `/api/latest` 返回完整快照；`/api/latest-summary` 返回轻量摘要。
+- `/api/status` 从与完整快照同批生成的轻量运行摘要返回快照版本、新鲜度、`snapshot_as_of`、`next_refresh`、主跑/健康补跑检查点、`data_mode=scheduled_snapshot` 和 `device_dependency=false`；它不在请求内重放全部候选计算，并公开运行索引合同及源快照摘要供部署验收。
+- `/api/latest` 流式返回完整快照，避免 Worker 内再次解析与序列化；`/api/latest-summary` 返回轻量摘要。
 - `/api/history` 默认 `view=daily`，按 `target_date` 合并盘中重复运行，同类保留最后一次；`view=raw` 返回不可变原始运行。`meta.performance`、`meta.executable_ledger` 和 `meta.shadow_ledger` 始终基于完整账本计算，不受页面 limit 或 daily 合并影响。
 - `/api/pick?snapshot=` 是最精确的历史寻址方式；同一天可能有多次快照。
 - `/api/pick?date=` 只返回该日期匹配项；非法日期 400、不存在 404，绝不静默返回 latest。
-- `/api/live` 只是保留 URL 的 scheduled-snapshot 兼容接口，浏览器不调用它。它只返回当前已发布快照中同时保存了正价格、`source_as_of`、`fetched_at` 和成交量单位的可追溯行情；缺少这些来源字段时返回 `SNAPSHOT_QUOTE_UNAVAILABLE`，不会把计划价或 K 线收盘价冒充行情。成功响应固定发布 `data_mode=SCHEDULED_SNAPSHOT`、`provider_class=SCHEDULED_SNAPSHOT`、`is_realtime=false` 和 `realtime_guaranteed=false`；接口名中的 `live` 不代表盘中实时。
+- `/api/live` 只是保留 URL 的 scheduled-snapshot 兼容接口，浏览器不调用它。它从完整快照派生、最多 90 只且编码体积不超过 512 KiB 的候选行情索引中，只返回同时保存了正价格、`source_as_of`、`fetched_at` 和成交量单位的可追溯行情；全部正式合格候选必须完整保留，超过边界时构建在部署前失败，不能静默截断。缺少来源字段时返回 `SNAPSHOT_QUOTE_UNAVAILABLE`，不会把计划价或 K 线收盘价冒充行情。成功响应固定发布 `data_mode=SCHEDULED_SNAPSHOT`、`provider_class=SCHEDULED_SNAPSHOT`、`is_realtime=false` 和 `realtime_guaranteed=false`；接口名中的 `live` 不代表盘中实时。
 - API JSON 使用 `Cache-Control: no-store`；静态资产由 Cloudflare 边缘提供。
 - `signal_date` 是信号形成日，`generated_at` 是快照生成时间；每个市场的 `entry_trade_date` 和 `forecast_end_trade_date` 由真实交易日历生成。
 - `NO_VALID_PICK` 是主动放弃，不是一笔买入预测，也不能记成亏损样本。

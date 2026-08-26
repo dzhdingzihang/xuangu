@@ -194,12 +194,15 @@ class WorkerFreshnessTests(unittest.TestCase):
               schema_version: "selector-snapshot-v2",
               snapshot_key: "2026-08-24_2026-08-21_090000.json",
             }};
-            const env = {{ ASSETS: {{ async fetch(input) {{
-              const url = new URL(typeof input === "string" ? input : input.url);
-              return url.pathname === "/data/picks/latest.json"
-                ? new Response(JSON.stringify(latest), {{ headers: {{ "content-type": "application/json" }} }})
-                : new Response("not found", {{ status: 404 }});
-            }} }} }};
+            const env = {{
+              ALLOW_LEGACY_FULL_SNAPSHOT_FALLBACK: "1",
+              ASSETS: {{ async fetch(input) {{
+                const url = new URL(typeof input === "string" ? input : input.url);
+                return url.pathname === "/data/picks/latest.json"
+                  ? new Response(JSON.stringify(latest), {{ headers: {{ "content-type": "application/json" }} }})
+                  : new Response("not found", {{ status: 404 }});
+              }} }},
+            }};
             const response = await module.default.fetch(
               new Request("https://xuangu.alixjd.com/api/status"),
               env,
