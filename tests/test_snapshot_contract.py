@@ -11,7 +11,11 @@ from unittest import mock
 
 import production_rule_model
 import server
-from scripts.validate_snapshot import validate_snapshot, validate_snapshot_file
+from scripts.validate_snapshot import (
+    dynamic_manifest_source_freshness,
+    validate_snapshot,
+    validate_snapshot_file,
+)
 from tests.test_selector_v2 import fixture_candidate
 
 
@@ -159,6 +163,7 @@ def dynamic_hk_us_snapshot_fixture() -> dict:
     """Build a complete v2.5 fixture with auditable HK/US dynamic manifests."""
 
     snapshot = snapshot_fixture()
+    snapshot["model_version"] = "smart-selector-2026-08-23.2-dynamic-hk-us"
     snapshot["universe_version"] = server.UNIVERSE_VERSION
     for market_key, primary_symbol in (("hk", "0700.HK"), ("us", "NVDA")):
         target = {"hk": server.HK_RECALL_TARGET, "us": server.US_RECALL_TARGET}[market_key]
@@ -193,9 +198,29 @@ def dynamic_hk_us_snapshot_fixture() -> dict:
                 "recall_metrics": {
                     "price": 10 + rank / 100,
                     "amount": 100_000_000 + rank,
+                    "amount_currency": "HKD" if market_key == "hk" else "USD",
                     "volume": 1_000_000 + rank,
                     "change_pct": 1.0,
                     "source_timestamp": source_timestamp,
+                    **(
+                        {
+                            "liquidity_admission": "observed_amount",
+                            "liquidity_policy_version": server.HK_INTRADAY_LIQUIDITY_POLICY_VERSION,
+                            "liquidity_standard_amount_threshold": server.HK_STANDARD_MIN_AMOUNT_HKD,
+                        }
+                        if market_key == "hk"
+                        else {}
+                    ),
+                    **(
+                        {
+                            "market_cap": 5_000_000_000,
+                            "market_cap_currency": "HKD",
+                            "market_cap_kind": "total",
+                            "market_cap_source_field": "f20",
+                        }
+                        if market_key == "hk"
+                        else {}
+                    ),
                 },
             }
             for rank, symbol in enumerate(symbols, 1)
@@ -210,7 +235,17 @@ def dynamic_hk_us_snapshot_fixture() -> dict:
                 "discovery_source": "Eastmoney delayed common-equity cross-section",
                 "discovery_retrieved_at": "2026-08-19T16:10:00+08:00",
                 "discovery_freshness_as_of": "2026-08-19T16:10:00+08:00",
+                "discovery_freshness_reference_at": (
+                    "2026-08-19T16:10:00+08:00"
+                    if market_key == "hk"
+                    else "2026-08-19T04:10:00-04:00"
+                ),
                 "discovery_source_as_of": source_as_of,
+                "discovery_source_effective_as_of": (
+                    "2026-08-19T15:59:00+08:00"
+                    if market_key == "hk"
+                    else source_as_of
+                ),
                 "discovery_expected_session": "2026-08-19" if market_key == "hk" else "2026-08-18",
                 "discovery_session_phase": "post" if market_key == "hk" else "pre",
                 "selected_source_time_count": target,
@@ -258,10 +293,112 @@ def dynamic_hk_us_snapshot_fixture() -> dict:
             "deep_score_coverage": 1.0,
             "min_score_coverage": server.DYNAMIC_MARKET_MIN_SCORE_COVERAGE,
         }
-        snapshot["markets"][market_key]["decision"]["primary"]["candidate_lineage"] = {
+        primary = snapshot["markets"][market_key]["decision"]["primary"]
+        primary["candidate_lineage"] = {
             "universe_origin": server.DYNAMIC_MARKET_ORIGIN,
         }
+        primary_manifest = manifest[0]
+        primary["observed_at"] = primary_manifest["observed_at"]
+        primary["recall_routes"] = copy.deepcopy(primary_manifest["recall_routes"])
+        primary["recall_metrics"] = copy.deepcopy(primary_manifest["recall_metrics"])
     return server.enrich_snapshot_v2(snapshot)
+
+
+def current_hk_intraday_snapshot_fixture() -> dict:
+    """Publish one valid 09:40 XHKG scaled-liquidity row in both mirrors."""
+
+    snapshot = dynamic_hk_us_snapshot_fixture()
+    observed_at = "2026-08-19T09:40:00+08:00"
+    source_timestamp = int(dt.datetime.fromisoformat("2026-08-19T09:25:00+08:00").timestamp())
+    progress = round(10 / 330, 6)
+    metrics = {
+        "price": 10.01,
+        "amount": 2_500_000,
+        "amount_currency": "HKD",
+        "volume": 1_000_001,
+        "change_pct": 1.0,
+        "market_cap": 5_000_000_000,
+        "market_cap_currency": "HKD",
+        "market_cap_kind": "total",
+        "market_cap_source_field": "f20",
+        "source_timestamp": source_timestamp,
+        "liquidity_policy_version": server.HK_INTRADAY_LIQUIDITY_POLICY_VERSION,
+        "liquidity_standard_amount_threshold": server.HK_STANDARD_MIN_AMOUNT_HKD,
+        "liquidity_amount_threshold": server.HK_INTRADAY_MIN_AMOUNT_HKD,
+        "liquidity_session_progress": progress,
+        "liquidity_gate_progress": progress,
+        "liquidity_data_progress": 0.0,
+        "liquidity_gate_elapsed_minutes": 10.0,
+        "liquidity_data_elapsed_minutes": 0.0,
+        "liquidity_session_total_minutes": 330.0,
+        "liquidity_reference_at": observed_at,
+        "liquidity_freshness_reference_at": observed_at,
+        "liquidity_source_effective_at": "2026-08-19T09:25:00+08:00",
+        "liquidity_source_age_seconds": 900.0,
+        "liquidity_source_age_minutes": 15.0,
+        "liquidity_source_wall_age_minutes": 15.0,
+        "liquidity_source_phase": "pre",
+        "liquidity_gate_phase": "regular",
+        "liquidity_session_open_at": "2026-08-19T09:30:00+08:00",
+        "liquidity_session_break_start_at": "2026-08-19T12:00:00+08:00",
+        "liquidity_session_break_end_at": "2026-08-19T13:00:00+08:00",
+        "liquidity_session_close_at": "2026-08-19T16:00:00+08:00",
+        "liquidity_intraday_scaling_eligible": True,
+        "liquidity_admission": "intraday_scaled",
+        "liquidity_projection_basis": "pre_no_linear_projection",
+        "projected_full_session_amount": None,
+    }
+    manifest_row = snapshot["markets"]["hk"]["stats"]["recall_manifest"][0]
+    candidate = snapshot["markets"]["hk"]["decision"]["primary"]
+    for row in (manifest_row, candidate):
+        row["observed_at"] = observed_at
+        row["recall_metrics"] = copy.deepcopy(metrics)
+        routes = list(row.get("recall_routes") or [])
+        if "intraday_liquidity_completion" not in routes:
+            routes.append("intraday_liquidity_completion")
+        row["recall_routes"] = routes
+    return snapshot
+
+
+def install_generated_hk_intraday_row(
+    snapshot: dict,
+    *,
+    observed_at: str,
+    source_at: str,
+    amount: float,
+) -> dict:
+    """Install generator output so validator parity can be tested at odd clocks."""
+
+    generated, reason = server._dynamic_hk_candidate(
+        {
+            "symbol": "0700",
+            "name": "腾讯控股",
+            "lasttrade": 580,
+            "volume": 1_000_000,
+            "amount": amount,
+            "market_cap": 5_000_000_000,
+            "changepercent": 1,
+            "ticktime": int(dt.datetime.fromisoformat(source_at).timestamp()),
+        },
+        "liquidity",
+        observed_at,
+    )
+    if reason is not None or generated is None:
+        raise AssertionError(f"HK fixture was not admitted: {reason}")
+    generated["recall_metrics"].update(
+        {
+            "market_cap_currency": "HKD",
+            "market_cap_kind": "total",
+            "market_cap_source_field": "f20",
+        }
+    )
+    manifest_row = snapshot["markets"]["hk"]["stats"]["recall_manifest"][0]
+    candidate = snapshot["markets"]["hk"]["decision"]["primary"]
+    for row in (manifest_row, candidate):
+        row["observed_at"] = generated["observed_at"]
+        row["recall_routes"] = copy.deepcopy(generated["recall_routes"])
+        row["recall_metrics"] = copy.deepcopy(generated["recall_metrics"])
+    return snapshot
 
 
 class SnapshotContractTests(unittest.TestCase):
@@ -419,6 +556,254 @@ class SnapshotContractTests(unittest.TestCase):
             "markets.us candidate is not present in dynamic recall_manifest",
             validate_snapshot(injected_candidate),
         )
+
+    def test_current_hk_intraday_liquidity_is_rebuilt_from_xhkg_evidence(self) -> None:
+        valid = current_hk_intraday_snapshot_fixture()
+        self.assertEqual(
+            validate_snapshot(valid),
+            ["production_decision rule contract does not match model_version"],
+        )
+
+        attacks = {
+            "currency": ("amount_currency", "USD"),
+            "f20_kind": ("market_cap_kind", "float"),
+            "f20_source": ("market_cap_source_field", "f21"),
+            "threshold": ("liquidity_amount_threshold", 1),
+            "progress": ("liquidity_session_progress", 0.9),
+            "gate_progress": ("liquidity_gate_progress", 0.9),
+            "data_progress": ("liquidity_data_progress", 0.5),
+            "source_phase": ("liquidity_source_phase", "regular"),
+            "source_effective": (
+                "liquidity_source_effective_at",
+                "2026-08-19T09:26:00+08:00",
+            ),
+            "pre_projection": ("projected_full_session_amount", 99_000_000),
+            "policy": ("liquidity_policy_version", "forged-policy"),
+            "floor": ("amount", 1_999_999),
+            "market_cap": ("market_cap", 999_999_999),
+            "prior_session": (
+                "source_timestamp",
+                int(dt.datetime.fromisoformat("2026-08-18T16:00:00+08:00").timestamp()),
+            ),
+            "stale": (
+                "source_timestamp",
+                int(dt.datetime.fromisoformat("2026-08-19T08:54:59+08:00").timestamp()),
+            ),
+            "future": (
+                "source_timestamp",
+                int(dt.datetime.fromisoformat("2026-08-19T09:45:01+08:00").timestamp()),
+            ),
+        }
+        for label, (field, value) in attacks.items():
+            with self.subTest(label=label):
+                forged = current_hk_intraday_snapshot_fixture()
+                forged["markets"]["hk"]["stats"]["recall_manifest"][0]["recall_metrics"][field] = value
+                errors = validate_snapshot(forged)
+                self.assertTrue(
+                    any(
+                        "markets.hk.stats.recall_manifest[0]" in error
+                        and (
+                            "deterministic XHKG policy" in error
+                            or "not eligible for intraday_scaled" in error
+                            or "amount_currency must be HKD" in error
+                            or "market_cap_" in error
+                        )
+                        for error in errors
+                    ),
+                    errors,
+                )
+
+        pre_open = current_hk_intraday_snapshot_fixture()
+        pre_open["markets"]["hk"]["stats"]["recall_manifest"][0]["observed_at"] = (
+            "2026-08-19T09:00:00+08:00"
+        )
+        self.assertTrue(
+            any(
+                "markets.hk.stats.recall_manifest[0] is not eligible for intraday_scaled" in error
+                for error in validate_snapshot(pre_open)
+            )
+        )
+
+    def test_current_hk_liquidity_audits_candidate_and_standard_admission(self) -> None:
+        candidate_attack = current_hk_intraday_snapshot_fixture()
+        candidate_attack["markets"]["hk"]["decision"]["primary"]["recall_metrics"][
+            "market_cap"
+        ] = 999_999_999
+        self.assertTrue(
+            any(
+                "markets.hk.candidate[0700.HK] is not eligible for intraday_scaled" in error
+                for error in validate_snapshot(candidate_attack)
+            )
+        )
+
+        standard_attack = dynamic_hk_us_snapshot_fixture()
+        standard_attack["markets"]["hk"]["stats"]["recall_manifest"][1]["recall_metrics"][
+            "liquidity_admission"
+        ] = "intraday_scaled"
+        self.assertIn(
+            "markets.hk.stats.recall_manifest[1] standard HK amount requires observed_amount admission",
+            validate_snapshot(standard_attack),
+        )
+
+        policy_attack = dynamic_hk_us_snapshot_fixture()
+        policy_attack["markets"]["hk"]["stats"]["recall_manifest"][1]["recall_metrics"][
+            "liquidity_policy_version"
+        ] = "forged-policy"
+        self.assertIn(
+            "markets.hk.stats.recall_manifest[1].recall_metrics.liquidity_policy_version is invalid",
+            validate_snapshot(policy_attack),
+        )
+
+    def test_current_hk_liquidity_uses_break_clock_and_half_day_xhkg_schedule(self) -> None:
+        break_snapshot = install_generated_hk_intraday_row(
+            dynamic_hk_us_snapshot_fixture(),
+            observed_at="2026-08-26T12:30:00+08:00",
+            source_at="2026-08-26T11:14:00+08:00",
+            amount=10_000_000,
+        )
+        break_metrics = break_snapshot["markets"]["hk"]["stats"]["recall_manifest"][0][
+            "recall_metrics"
+        ]
+        self.assertEqual(break_metrics["liquidity_freshness_reference_at"], "2026-08-26T11:59:00+08:00")
+        self.assertEqual(break_metrics["liquidity_source_age_seconds"], 45 * 60)
+        break_errors = validate_snapshot(break_snapshot)
+        self.assertFalse(
+            any(
+                "markets.hk.stats.recall_manifest[0]" in error
+                and ("deterministic XHKG policy" in error or "not eligible" in error)
+                for error in break_errors
+            ),
+            break_errors,
+        )
+
+        break_stale = copy.deepcopy(break_snapshot)
+        break_stale["markets"]["hk"]["stats"]["recall_manifest"][0]["recall_metrics"][
+            "source_timestamp"
+        ] = int(dt.datetime.fromisoformat("2026-08-26T11:13:59+08:00").timestamp())
+        self.assertTrue(
+            any(
+                "markets.hk.stats.recall_manifest[0] is not eligible for intraday_scaled" in error
+                for error in validate_snapshot(break_stale)
+            )
+        )
+
+        lunch_source = install_generated_hk_intraday_row(
+            dynamic_hk_us_snapshot_fixture(),
+            observed_at="2026-08-26T12:47:00+08:00",
+            source_at="2026-08-26T12:05:00+08:00",
+            amount=10_000_000,
+        )
+        lunch_metrics = lunch_source["markets"]["hk"]["stats"]["recall_manifest"][0][
+            "recall_metrics"
+        ]
+        self.assertEqual(lunch_metrics["liquidity_source_phase"], "break")
+        self.assertEqual(lunch_metrics["liquidity_source_effective_at"], "2026-08-26T11:59:00+08:00")
+        self.assertEqual(lunch_metrics["liquidity_source_age_seconds"], 0)
+        self.assertEqual(lunch_metrics["liquidity_source_wall_age_minutes"], 42)
+        lunch_errors = validate_snapshot(lunch_source)
+        self.assertFalse(
+            any(
+                "markets.hk.stats.recall_manifest[0]" in error
+                and ("deterministic XHKG policy" in error or "not eligible" in error)
+                for error in lunch_errors
+            ),
+            lunch_errors,
+        )
+        lunch_stale = copy.deepcopy(lunch_source)
+        lunch_stale["markets"]["hk"]["stats"]["recall_manifest"][0]["recall_metrics"][
+            "source_timestamp"
+        ] = int(dt.datetime.fromisoformat("2026-08-26T09:30:00+08:00").timestamp())
+        self.assertTrue(
+            any(
+                "markets.hk.stats.recall_manifest[0] is not eligible for intraday_scaled" in error
+                for error in validate_snapshot(lunch_stale)
+            )
+        )
+        lunch_future = copy.deepcopy(lunch_source)
+        lunch_future["markets"]["hk"]["stats"]["recall_manifest"][0]["recall_metrics"][
+            "source_timestamp"
+        ] = int(dt.datetime.fromisoformat("2026-08-26T12:59:00+08:00").timestamp())
+        self.assertTrue(
+            any(
+                "markets.hk.stats.recall_manifest[0] is not eligible for intraday_scaled" in error
+                for error in validate_snapshot(lunch_future)
+            )
+        )
+
+        half_day = install_generated_hk_intraday_row(
+            dynamic_hk_us_snapshot_fixture(),
+            observed_at="2026-12-24T10:45:00+08:00",
+            source_at="2026-12-24T10:30:00+08:00",
+            amount=10_000_000,
+        )
+        half_day_metrics = half_day["markets"]["hk"]["stats"]["recall_manifest"][0][
+            "recall_metrics"
+        ]
+        self.assertEqual(half_day_metrics["liquidity_session_total_minutes"], 150)
+        self.assertEqual(half_day_metrics["liquidity_gate_progress"], 0.5)
+        self.assertEqual(half_day_metrics["liquidity_data_progress"], 0.4)
+        half_day_errors = validate_snapshot(half_day)
+        self.assertFalse(
+            any(
+                "markets.hk.stats.recall_manifest[0]" in error
+                and ("deterministic XHKG policy" in error or "not eligible" in error)
+                for error in half_day_errors
+            ),
+            half_day_errors,
+        )
+
+    def test_hk_break_freshness_uses_effective_trading_minutes(self) -> None:
+        timestamp = lambda value: int(dt.datetime.fromisoformat(value).timestamp())
+        freshness = dynamic_manifest_source_freshness(
+            [
+                {
+                    "recall_metrics": {
+                        "source_timestamp": timestamp("2026-08-26T12:05:00+08:00")
+                    }
+                },
+                {
+                    "recall_metrics": {
+                        "source_timestamp": timestamp("2026-08-26T09:30:00+08:00")
+                    }
+                },
+                {
+                    "recall_metrics": {
+                        "source_timestamp": timestamp("2026-08-26T12:59:00+08:00")
+                    }
+                },
+            ],
+            "hk",
+            "2026-08-26T12:47:00+08:00",
+        )
+
+        self.assertEqual(freshness["freshness_reference_at"], "2026-08-26T11:59:00+08:00")
+        self.assertEqual(freshness["source_effective_as_of"], "2026-08-26T11:59:00+08:00")
+        self.assertEqual(freshness["time_count"], 3)
+        self.assertEqual(freshness["fresh_count"], 1)
+
+    def test_archived_hk_dynamic_policy_v1_remains_compatible(self) -> None:
+        archived = dynamic_hk_us_snapshot_fixture()
+        archived["model_version"] = "smart-selector-2026-08-26.1-candidate-rule"
+        for market_key in ("hk", "us"):
+            archived["markets"][market_key]["stats"]["recall_policy_version"] = (
+                "hk-us-cross-section-v1"
+            )
+        for row in archived["markets"]["hk"]["stats"]["recall_manifest"]:
+            row["recall_metrics"].pop("liquidity_admission", None)
+        archived["markets"]["hk"]["decision"]["primary"]["recall_metrics"].pop(
+            "liquidity_admission", None
+        )
+
+        errors = validate_snapshot(archived)
+
+        self.assertFalse(any("recall_policy_version is invalid" in error for error in errors), errors)
+        self.assertFalse(any("HK amount requires" in error for error in errors), errors)
+
+        unknown = copy.deepcopy(archived)
+        unknown["model_version"] = "smart-selector-forged-unknown"
+        unknown.pop("production_decision", None)
+        unknown_errors = validate_snapshot(unknown)
+        self.assertIn("markets.hk.stats.recall_policy_version is invalid", unknown_errors)
 
     def test_dynamic_hk_us_version_keeps_a_share_full_score_contract(self) -> None:
         enriched = dynamic_hk_us_snapshot_fixture()

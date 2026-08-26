@@ -162,6 +162,43 @@ def tencent_quote_payload(code: str = "600000", name: str = "浦发银行") -> b
     return f'v_sh{code}="{"~".join(values)}";'.encode("gbk")
 
 
+def eastmoney_hk_fixture_row(
+    number: int,
+    source_timestamp,
+    *,
+    amount: float = 30_000_000,
+    symbol_number: int | None = None,
+) -> dict:
+    symbol_number = number if symbol_number is None else symbol_number
+    return {
+        "f2": 10,
+        "f3": 1.2,
+        "f5": 1_000_000,
+        "f6": amount,
+        "f8": 2,
+        "f9": 12,
+        "f10": 1.5,
+        "f12": f"{symbol_number:05d}",
+        "f13": 128,
+        "f14": f"HK{symbol_number:04d}",
+        "f20": 5_000_000_000,
+        "f21": 4_000_000_000,
+        "f23": 2,
+        "f24": 3,
+        "f25": 5,
+        "f26": "20200101",
+        "f62": 1_000_000,
+        "f115": 12,
+        "f124": source_timestamp,
+    }
+
+
+def eastmoney_page_response(rows: list[dict], total: int = 2914):
+    response = mock.Mock()
+    response.json.return_value = {"data": {"total": total, "diff": rows}}
+    return response
+
+
 class SelectorV2Tests(unittest.TestCase):
     def test_recall_targets_and_a_share_board_classification(self) -> None:
         self.assertEqual(server.A_SHARE_RECALL_TARGET, 300)
@@ -459,6 +496,385 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertIsNone(closed_end_fund)
         self.assertEqual(closed_end_reason, "security_type")
         self.assertEqual(hk_main["market_segment"], "main_board")
+
+    def test_hk_intraday_liquidity_completion_scales_the_daily_amount_gate(self) -> None:
+        source_time = dt.datetime.fromisoformat("2026-08-26T09:25:00+08:00")
+        observed_at = "2026-08-26T09:40:00+08:00"
+        base = {
+            "symbol": "0700",
+            "name": "腾讯控股",
+            "lasttrade": 580,
+            "volume": 100_000,
+            "amount": 2_500_000,
+            "market_cap": 5_000_000_000,
+            "changepercent": 1.2,
+            "ticktime": int(source_time.timestamp()),
+        }
+
+        candidate, reason = server._dynamic_hk_candidate(base, "liquidity", observed_at)
+
+        self.assertIsNone(reason)
+        self.assertIsNotNone(candidate)
+        metrics = candidate["recall_metrics"]
+        self.assertEqual(metrics["liquidity_policy_version"], server.HK_INTRADAY_LIQUIDITY_POLICY_VERSION)
+        self.assertEqual(metrics["liquidity_admission"], "intraday_scaled")
+        self.assertEqual(metrics["liquidity_amount_threshold"], 2_000_000)
+        self.assertEqual(metrics["liquidity_standard_amount_threshold"], 20_000_000)
+        self.assertEqual(metrics["liquidity_source_phase"], "pre")
+        self.assertGreater(metrics["liquidity_gate_progress"], 0)
+        self.assertEqual(metrics["liquidity_data_progress"], 0)
+        self.assertIsNone(metrics["projected_full_session_amount"])
+        self.assertEqual(metrics["liquidity_projection_basis"], "pre_no_linear_projection")
+        self.assertIn("intraday_liquidity_completion", candidate["recall_routes"])
+
+        regular_source, regular_source_reason = server._dynamic_hk_candidate(
+            {
+                **base,
+                "symbol": "0705",
+                "ticktime": int(dt.datetime.fromisoformat("2026-08-26T09:35:00+08:00").timestamp()),
+            },
+            "liquidity",
+            observed_at,
+        )
+        self.assertIsNone(regular_source_reason)
+        self.assertEqual(regular_source["recall_metrics"]["liquidity_source_phase"], "regular")
+        self.assertGreater(regular_source["recall_metrics"]["liquidity_data_progress"], 0)
+        self.assertGreater(regular_source["recall_metrics"]["projected_full_session_amount"], 20_000_000)
+
+        below_floor, below_floor_reason = server._dynamic_hk_candidate(
+            {**base, "symbol": "0701", "amount": 1_999_999}, "liquidity", observed_at
+        )
+        small_cap, small_cap_reason = server._dynamic_hk_candidate(
+            {**base, "symbol": "0702", "market_cap": 999_999_999}, "liquidity", observed_at
+        )
+        after_close, after_close_reason = server._dynamic_hk_candidate(
+            {
+                **base,
+                "symbol": "0703",
+                "ticktime": int(dt.datetime.fromisoformat("2026-08-26T16:00:00+08:00").timestamp()),
+            },
+            "liquidity",
+            "2026-08-26T16:20:00+08:00",
+        )
+        stale_same_session, stale_same_session_reason = server._dynamic_hk_candidate(
+            {
+                **base,
+                "symbol": "0704",
+                "ticktime": int(dt.datetime.fromisoformat("2026-08-26T08:50:00+08:00").timestamp()),
+            },
+            "liquidity",
+            observed_at,
+        )
+        prior_session, prior_session_reason = server._dynamic_hk_candidate(
+            {
+                **base,
+                "symbol": "0705",
+                "ticktime": int(dt.datetime.fromisoformat("2026-08-25T16:00:00+08:00").timestamp()),
+            },
+            "liquidity",
+            observed_at,
+        )
+        future_source, future_source_reason = server._dynamic_hk_candidate(
+            {
+                **base,
+                "symbol": "0706",
+                "ticktime": int(dt.datetime.fromisoformat("2026-08-26T09:50:01+08:00").timestamp()),
+            },
+            "liquidity",
+            observed_at,
+        )
+        stale_prior_session, stale_prior_session_reason = server._dynamic_hk_candidate(
+            {
+                **base,
+                "symbol": "0704",
+                "ticktime": int(dt.datetime.fromisoformat("2026-08-25T09:25:00+08:00").timestamp()),
+            },
+            "liquidity",
+            observed_at,
+        )
+
+        self.assertIsNone(below_floor)
+        self.assertEqual(below_floor_reason, "liquidity")
+        self.assertIsNone(small_cap)
+        self.assertEqual(small_cap_reason, "liquidity")
+        self.assertIsNone(after_close)
+        self.assertEqual(after_close_reason, "liquidity")
+        self.assertIsNone(stale_same_session)
+        self.assertEqual(stale_same_session_reason, "liquidity")
+        self.assertIsNone(prior_session)
+        self.assertEqual(prior_session_reason, "liquidity")
+        self.assertIsNone(future_source)
+        self.assertEqual(future_source_reason, "liquidity")
+        self.assertIsNone(stale_prior_session)
+        self.assertEqual(stale_prior_session_reason, "liquidity")
+
+    def test_hk_liquidity_clock_uses_half_day_and_strict_break_freshness_boundaries(self) -> None:
+        half_day_source = dt.datetime.fromisoformat("2026-12-24T10:30:00+08:00")
+        half_day, half_day_reason = server._dynamic_hk_candidate(
+            {
+                "symbol": "0005",
+                "name": "汇丰控股",
+                "lasttrade": 120,
+                "volume": 100_000,
+                "amount": 10_000_000,
+                "market_cap": 5_000_000_000,
+                "changepercent": 1,
+                "ticktime": int(half_day_source.timestamp()),
+            },
+            "liquidity",
+            "2026-12-24T10:45:00+08:00",
+        )
+
+        self.assertIsNone(half_day_reason)
+        half_day_metrics = half_day["recall_metrics"]
+        self.assertEqual(half_day_metrics["liquidity_session_total_minutes"], 150)
+        self.assertEqual(half_day_metrics["liquidity_gate_elapsed_minutes"], 75)
+        self.assertEqual(half_day_metrics["liquidity_gate_progress"], 0.5)
+        self.assertEqual(half_day_metrics["liquidity_data_progress"], 0.4)
+        self.assertIsNone(half_day_metrics["liquidity_session_break_start_at"])
+        self.assertEqual(half_day_metrics["liquidity_amount_threshold"], 10_000_000)
+
+        base = {
+            "name": "边界测试",
+            "lasttrade": 10,
+            "volume": 1_000_000,
+            "amount": 10_000_000,
+            "market_cap": 5_000_000_000,
+            "changepercent": 1,
+        }
+        observed_at = "2026-08-26T12:30:00+08:00"
+
+        def candidate_at(symbol: str, source_time: str):
+            timestamp = int(dt.datetime.fromisoformat(source_time).timestamp())
+            return server._dynamic_hk_candidate(
+                {**base, "symbol": symbol, "ticktime": timestamp}, "liquidity", observed_at
+            )
+
+        age_45, age_45_reason = candidate_at("0701", "2026-08-26T11:14:00+08:00")
+        age_45_01, age_45_01_reason = candidate_at("0702", "2026-08-26T11:13:59+08:00")
+        lunch_source, lunch_source_reason = server._dynamic_hk_candidate(
+            {
+                **base,
+                "symbol": "0703",
+                "ticktime": int(dt.datetime.fromisoformat("2026-08-26T12:05:00+08:00").timestamp()),
+            },
+            "liquidity",
+            "2026-08-26T12:47:00+08:00",
+        )
+        lunch_future, lunch_future_reason = server._dynamic_hk_candidate(
+            {
+                **base,
+                "symbol": "0707",
+                "ticktime": int(dt.datetime.fromisoformat("2026-08-26T12:59:00+08:00").timestamp()),
+            },
+            "liquidity",
+            "2026-08-26T12:01:00+08:00",
+        )
+        stale_open, stale_open_reason = server._dynamic_hk_candidate(
+            {
+                **base,
+                "symbol": "0704",
+                "ticktime": int(dt.datetime.fromisoformat("2026-08-26T09:30:00+08:00").timestamp()),
+            },
+            "liquidity",
+            "2026-08-26T12:47:00+08:00",
+        )
+
+        def regular_candidate_at(symbol: str, source_time: str):
+            return server._dynamic_hk_candidate(
+                {
+                    **base,
+                    "symbol": symbol,
+                    "ticktime": int(dt.datetime.fromisoformat(source_time).timestamp()),
+                },
+                "liquidity",
+                "2026-08-26T10:00:00+08:00",
+            )
+
+        future_5, future_5_reason = regular_candidate_at("0705", "2026-08-26T10:05:00+08:00")
+        future_5_01, future_5_01_reason = regular_candidate_at("0706", "2026-08-26T10:05:01+08:00")
+
+        self.assertIsNone(age_45_reason)
+        self.assertEqual(age_45["recall_metrics"]["liquidity_source_age_seconds"], 45 * 60)
+        self.assertEqual(age_45["recall_metrics"]["liquidity_freshness_reference_at"], "2026-08-26T11:59:00+08:00")
+        self.assertIsNone(age_45_01)
+        self.assertEqual(age_45_01_reason, "liquidity")
+        self.assertIsNone(lunch_source_reason)
+        self.assertEqual(lunch_source["recall_metrics"]["liquidity_source_age_seconds"], 0)
+        self.assertEqual(lunch_source["recall_metrics"]["liquidity_source_effective_at"], "2026-08-26T11:59:00+08:00")
+        self.assertIsNone(lunch_future)
+        self.assertEqual(lunch_future_reason, "liquidity")
+        self.assertIsNone(stale_open)
+        self.assertEqual(stale_open_reason, "liquidity")
+        self.assertIsNone(future_5_reason)
+        self.assertEqual(future_5["recall_metrics"]["liquidity_source_age_seconds"], -5 * 60)
+        self.assertIsNone(future_5_01)
+        self.assertEqual(future_5_01_reason, "liquidity")
+
+    def test_hk_source_coverage_maps_both_lunch_clocks_to_previous_trading_minute(self) -> None:
+        observed = dt.datetime.fromisoformat("2026-08-26T12:47:00+08:00")
+
+        def row(symbol: str, source_time: str) -> dict:
+            return {
+                "symbol": symbol,
+                "recall_metrics": {
+                    "source_timestamp": int(dt.datetime.fromisoformat(source_time).timestamp())
+                },
+            }
+
+        lunch = server._dynamic_source_time_coverage(
+            [row("0700.HK", "2026-08-26T12:05:00+08:00")], "hk", as_of=observed
+        )
+        stale_open = server._dynamic_source_time_coverage(
+            [row("0005.HK", "2026-08-26T09:30:00+08:00")], "hk", as_of=observed
+        )
+        future_lunch = server._dynamic_source_time_coverage(
+            [row("0707.HK", "2026-08-26T12:59:00+08:00")],
+            "hk",
+            as_of=dt.datetime.fromisoformat("2026-08-26T12:01:00+08:00"),
+        )
+
+        self.assertEqual(lunch["discovery_freshness_reference_at"], "2026-08-26T11:59:00+08:00")
+        self.assertEqual(lunch["discovery_source_effective_as_of"], "2026-08-26T11:59:00+08:00")
+        self.assertEqual(lunch["selected_source_fresh_coverage"], 1.0)
+        self.assertEqual(stale_open["selected_source_fresh_coverage"], 0.0)
+        self.assertEqual(stale_open["selected_source_stale_symbols"], ["0005.HK"])
+        self.assertEqual(future_lunch["selected_source_fresh_coverage"], 0.0)
+        self.assertEqual(future_lunch["selected_source_stale_symbols"], ["0707.HK"])
+
+    def test_eastmoney_hk_discovery_adaptively_fetches_more_liquidity_pages(self) -> None:
+        observed = dt.datetime.fromisoformat("2026-08-26T09:40:00+08:00")
+        source_timestamp = int(dt.datetime.fromisoformat("2026-08-26T09:25:00+08:00").timestamp())
+        calls: list[tuple[int, str]] = []
+
+        def market_response(*_args, **kwargs):
+            params = kwargs["params"]
+            page = int(params["pn"])
+            field = str(params["fid"])
+            calls.append((page, field))
+            first = (page - 1) * 100 + 1
+            rows = [
+                eastmoney_hk_fixture_row(
+                    number,
+                    source_timestamp,
+                    amount=30_000_000 if page <= 2 else 3_000_000,
+                )
+                for number in range(first, first + 100)
+            ]
+            return eastmoney_page_response(rows)
+
+        with (
+            mock.patch.object(server, "now_cn", return_value=observed),
+            mock.patch.object(server, "market_data_get_with_retry", side_effect=market_response),
+        ):
+            rows, discovery = server._fetch_eastmoney_dynamic_rows("hk")
+        selected, coverage = server.select_dynamic_market_pool(rows, "hk")
+
+        self.assertEqual(len(selected), 200)
+        self.assertGreaterEqual(coverage["eligible_discovery_size"], server.DYNAMIC_MARKET_MIN_ELIGIBLE["hk"])
+        self.assertEqual(discovery["discovery_base_requested_pages"], 10)
+        self.assertEqual(discovery["discovery_adaptive_requested_pages"], 1)
+        self.assertEqual(discovery["discovery_adaptive_completed_pages"], 1)
+        self.assertEqual(discovery["discovery_adaptive_stop_reason"], "minimum_eligible_met")
+        self.assertTrue(discovery["discovery_pagination_complete"])
+        self.assertGreater(discovery["adaptive_liquidity_unique_candidates"], 0)
+        self.assertEqual(selected[0]["recall_metrics"]["market_cap_currency"], "HKD")
+        self.assertEqual(selected[0]["recall_metrics"]["market_cap_kind"], "total")
+        self.assertEqual(selected[0]["recall_metrics"]["market_cap_source_field"], "f20")
+        self.assertEqual([call for call in calls if call[0] == 3], [(3, "f6")])
+        self.assertFalse(any(page > 3 for page, _field in calls))
+
+    def test_eastmoney_bad_f124_excludes_only_the_bad_row(self) -> None:
+        observed = dt.datetime.fromisoformat("2026-08-26T09:40:00+08:00")
+        source_timestamp = int(dt.datetime.fromisoformat("2026-08-26T09:25:00+08:00").timestamp())
+
+        def market_response(*_args, **kwargs):
+            page = int(kwargs["params"]["pn"])
+            first = (page - 1) * 100 + 1
+            rows = [
+                eastmoney_hk_fixture_row(
+                    number,
+                    "bad-f124" if page == 1 and number == 1 else source_timestamp,
+                    amount=30_000_000 if page <= 2 else 3_000_000,
+                )
+                for number in range(first, first + 100)
+            ]
+            return eastmoney_page_response(rows)
+
+        with (
+            mock.patch.object(server, "now_cn", return_value=observed),
+            mock.patch.object(server, "market_data_get_with_retry", side_effect=market_response),
+        ):
+            rows, discovery = server._fetch_eastmoney_dynamic_rows("hk")
+        selected, coverage = server.select_dynamic_market_pool(rows, "hk")
+
+        self.assertEqual(len(selected), 200)
+        self.assertGreaterEqual(coverage["eligible_discovery_size"], 210)
+        self.assertNotIn("0001.HK", {row["symbol"] for row in rows})
+        self.assertGreaterEqual(discovery["excluded_counts"]["invalid_source_timestamp"], 1)
+        self.assertTrue(discovery["discovery_pagination_complete"])
+
+    def test_hk_adaptive_pages_fail_closed_on_failure_duplicate_and_max_shortfall(self) -> None:
+        observed = dt.datetime.fromisoformat("2026-08-26T09:40:00+08:00")
+        source_timestamp = int(dt.datetime.fromisoformat("2026-08-26T09:25:00+08:00").timestamp())
+
+        for scenario in ("page_failure", "duplicate_page", "max_shortfall"):
+            with self.subTest(scenario=scenario):
+                calls: list[int] = []
+
+                def market_response(*_args, **kwargs):
+                    page = int(kwargs["params"]["pn"])
+                    calls.append(page)
+                    if scenario == "page_failure" and page == 3:
+                        raise requests.ConnectionError("fixture page failure")
+                    first = (page - 1) * 100 + 1
+                    rows = []
+                    for number in range(first, first + 100):
+                        symbol_number = number
+                        if page >= 3:
+                            if scenario == "max_shortfall":
+                                symbol_number = 101 + ((number - first) % 100)
+                            else:
+                                symbol_number = number - 100
+                        rows.append(
+                            eastmoney_hk_fixture_row(
+                                number,
+                                source_timestamp,
+                                amount=30_000_000 if page <= 2 else 3_000_000,
+                                symbol_number=symbol_number,
+                            )
+                        )
+                    return eastmoney_page_response(rows)
+
+                with (
+                    mock.patch.object(server, "now_cn", return_value=observed),
+                    mock.patch.object(server, "market_data_get_with_retry", side_effect=market_response),
+                ):
+                    rows, discovery = server._fetch_eastmoney_dynamic_rows("hk")
+                selected, coverage = server.select_dynamic_market_pool(rows, "hk")
+                coverage = server._complete_dynamic_market_coverage(
+                    selected, coverage, discovery, "hk", as_of=observed
+                )
+
+                self.assertFalse(server._dynamic_market_discovery_is_live_complete(coverage, "hk"))
+                if scenario == "page_failure":
+                    self.assertEqual(discovery["discovery_adaptive_requested_pages"], 2)
+                    self.assertEqual(discovery["discovery_adaptive_completed_pages"], 1)
+                    self.assertEqual(discovery["discovery_adaptive_stop_reason"], "minimum_eligible_met")
+                    self.assertFalse(discovery["discovery_pagination_complete"])
+                elif scenario == "duplicate_page":
+                    self.assertEqual(discovery["discovery_adaptive_requested_pages"], 2)
+                    self.assertFalse(discovery["discovery_page_signatures_unique"])
+                    self.assertFalse(discovery["discovery_pagination_complete"])
+                else:
+                    self.assertEqual(
+                        discovery["discovery_adaptive_requested_pages"],
+                        server.HK_ADAPTIVE_LIQUIDITY_MAX_PAGE - 2,
+                    )
+                    self.assertEqual(discovery["discovery_adaptive_stop_reason"], "max_pages_reached")
+                    self.assertEqual(coverage["eligible_discovery_size"], 200)
+                    self.assertLess(coverage["eligible_discovery_size"], server.DYNAMIC_MARKET_MIN_ELIGIBLE["hk"])
+                    self.assertIn(server.HK_ADAPTIVE_LIQUIDITY_MAX_PAGE, calls)
 
     def test_dynamic_pool_health_uses_exact_98_percent_boundary(self) -> None:
         as_of = dt.datetime.fromisoformat("2026-08-23T10:00:00+08:00")

@@ -11,6 +11,8 @@ import re
 import sys
 from zoneinfo import ZoneInfo
 
+import exchange_calendars as xcals
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -53,7 +55,8 @@ FULL_A_SHARE_SCORE_UNIVERSE_VERSIONS = {
 }
 DYNAMIC_MARKET_ORIGIN = "dynamic_market_snapshot"
 DYNAMIC_MARKET_CACHE_ORIGIN = "dynamic_market_snapshot_cache"
-DYNAMIC_MARKET_RECALL_POLICY_VERSION = "hk-us-cross-section-v1"
+DYNAMIC_MARKET_RECALL_POLICY_VERSION = "hk-us-cross-section-v2-hk-intraday-audited"
+DYNAMIC_MARKET_LEGACY_RECALL_POLICY_VERSIONS = {"hk-us-cross-section-v1"}
 DYNAMIC_MARKET_ROUTE_TARGETS = {
     "hk": {"momentum": 45, "pullback": 35, "activity": 35, "quality": 30, "liquidity": 55},
     "us": {"momentum": 70, "pullback": 50, "activity": 45, "quality": 45, "liquidity": 90},
@@ -63,9 +66,14 @@ DYNAMIC_MARKET_SOURCE_TIMEZONES = {
     "hk": ZoneInfo("Asia/Hong_Kong"),
     "us": ZoneInfo("America/New_York"),
 }
+DYNAMIC_MARKET_REPORT_TIMEZONE = ZoneInfo("Asia/Shanghai")
 DYNAMIC_DISCOVERY_MAX_GENERATION_LAG = dt.timedelta(hours=6)
 DYNAMIC_DISCOVERY_MAX_REGULAR_SOURCE_AGE = dt.timedelta(minutes=45)
 DYNAMIC_DISCOVERY_MAX_SOURCE_FUTURE_SKEW = dt.timedelta(minutes=5)
+HK_INTRADAY_LIQUIDITY_POLICY_VERSION = "hk-intraday-scaled-amount-v1"
+HK_STANDARD_MIN_AMOUNT_HKD = 20_000_000
+HK_INTRADAY_MIN_AMOUNT_HKD = 2_000_000
+HK_INTRADAY_MIN_MARKET_CAP_HKD = 1_000_000_000
 A_SHARE_DEEP_SCORE_LIMIT = 300
 YAHOO_QUOTE_FRESHNESS_POLICY = "latest_exchange_session_v1"
 TEN_DAY_SHADOW_MODEL_ID = "ten-day-technical-shadow-v1"
@@ -91,6 +99,10 @@ EVIDENCE_LOOP_MODEL_VERSIONS = {
     "smart-selector-2026-08-25.1-production-rule",
     "smart-selector-2026-08-26.1-candidate-rule",
     "smart-selector-2026-08-26.2-dual-track-rule",
+}
+DYNAMIC_MARKET_MODEL_VERSIONS = {
+    "smart-selector-2026-08-23.2-dynamic-hk-us",
+    *EVIDENCE_LOOP_MODEL_VERSIONS,
 }
 PRODUCTION_RULE_MODEL_VERSION = "smart-selector-2026-08-26.2-dual-track-rule"
 PRIMARY_SCHEDULE_SLOTS = {(8, 17), (10, 17), (12, 17), (15, 17), (16, 17), (20, 17), (22, 47)}
@@ -926,16 +938,269 @@ def parse_aware_datetime(value) -> dt.datetime | None:
     return dt.datetime.fromisoformat(text)
 
 
+_XHKG_CALENDAR = xcals.get_calendar("XHKG")
+
+
+def _exchange_calendar_datetime(value) -> dt.datetime | None:
+    """Convert an exchange-calendars timestamp without treating NaT as time."""
+
+    if value is None or str(value) == "NaT":
+        return None
+    try:
+        parsed = value.to_pydatetime()
+    except AttributeError:
+        parsed = value
+    if not isinstance(parsed, dt.datetime) or parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _xhkg_exchange_clock(reference: dt.datetime) -> dict | None:
+    """Return actual XHKG intervals and progress for one exchange clock.
+
+    The schedule is read from exchange-calendars for the observed date, so a
+    half-day session is not silently evaluated against a hard-coded 330-minute
+    full day. Lunch is excluded from both elapsed and total trading seconds.
+    """
+
+    local_reference = reference.astimezone(DYNAMIC_MARKET_SOURCE_TIMEZONES["hk"])
+    session_date = local_reference.date()
+    session_label = session_date.isoformat()
+    if not _XHKG_CALENDAR.is_session(session_label):
+        return None
+    phase = quote_session_phase("hk", reference)
+    session_open = _exchange_calendar_datetime(_XHKG_CALENDAR.session_open(session_label))
+    session_close = _exchange_calendar_datetime(_XHKG_CALENDAR.session_close(session_label))
+    break_start = _exchange_calendar_datetime(_XHKG_CALENDAR.session_break_start(session_label))
+    break_end = _exchange_calendar_datetime(_XHKG_CALENDAR.session_break_end(session_label))
+    if session_open is None or session_close is None or session_close <= session_open:
+        return None
+    if break_start is not None and break_end is not None and session_open < break_start < break_end < session_close:
+        intervals = ((session_open, break_start), (break_end, session_close))
+    else:
+        intervals = ((session_open, session_close),)
+    total_seconds = sum((end - start).total_seconds() for start, end in intervals)
+    if total_seconds <= 0:
+        return None
+    anchor = reference.astimezone(dt.timezone.utc)
+    elapsed_seconds = sum(
+        max(0.0, (min(anchor, end) - start).total_seconds())
+        for start, end in intervals
+        if anchor > start
+    )
+    progress = min(1.0, max(0.0, elapsed_seconds / total_seconds))
+    freshness_reference = anchor
+    if phase == "break":
+        freshness_reference = _exchange_calendar_datetime(
+            _XHKG_CALENDAR.previous_minute(anchor)
+        )
+        if freshness_reference is None:
+            return None
+    return {
+        "session_date": session_date,
+        "phase": phase,
+        "session_open": session_open,
+        "break_start": break_start,
+        "break_end": break_end,
+        "session_close": session_close,
+        "total_seconds": total_seconds,
+        "elapsed_seconds": elapsed_seconds,
+        "progress": progress,
+        "freshness_reference": freshness_reference,
+    }
+
+
+def _iso_in_hk(value: dt.datetime | None) -> str | None:
+    return (
+        value.astimezone(DYNAMIC_MARKET_SOURCE_TIMEZONES["hk"]).isoformat(timespec="seconds")
+        if value is not None
+        else None
+    )
+
+
+def _append_current_hk_liquidity_row_errors(row: dict, prefix: str, errors: list[str]) -> None:
+    """Rebuild one current-policy HK liquidity admission from raw evidence."""
+
+    metrics = row.get("recall_metrics")
+    if not isinstance(metrics, dict):
+        errors.append(f"{prefix}.recall_metrics is required by current HK recall policy")
+        return
+    if metrics.get("amount_currency") != "HKD":
+        errors.append(f"{prefix}.recall_metrics.amount_currency must be HKD")
+    if metrics.get("liquidity_policy_version") != HK_INTRADAY_LIQUIDITY_POLICY_VERSION:
+        errors.append(f"{prefix}.recall_metrics.liquidity_policy_version is invalid")
+    if metrics.get("liquidity_standard_amount_threshold") != HK_STANDARD_MIN_AMOUNT_HKD:
+        errors.append(f"{prefix}.recall_metrics.liquidity_standard_amount_threshold is invalid")
+    for field, expected in (
+        ("market_cap_currency", "HKD"),
+        ("market_cap_kind", "total"),
+        ("market_cap_source_field", "f20"),
+    ):
+        if metrics.get(field) != expected:
+            errors.append(f"{prefix}.recall_metrics.{field} must be {expected}")
+    amount = metrics.get("amount")
+    if not finite_number(amount) or amount < 0:
+        errors.append(f"{prefix}.recall_metrics.amount is invalid")
+        return
+    admission = metrics.get("liquidity_admission")
+    if amount >= HK_STANDARD_MIN_AMOUNT_HKD:
+        if admission != "observed_amount":
+            errors.append(f"{prefix} standard HK amount requires observed_amount admission")
+        return
+
+    observed_at = row.get("observed_at")
+    reference = parse_aware_datetime(observed_at)
+    source_timestamp = metrics.get("source_timestamp")
+    source = None
+    if finite_number(source_timestamp) and source_timestamp > 0:
+        try:
+            source = dt.datetime.fromtimestamp(source_timestamp, dt.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            source = None
+    gate_clock = _xhkg_exchange_clock(reference) if reference is not None else None
+    source_clock = _xhkg_exchange_clock(source) if source is not None else None
+    expected_policy = {
+        "liquidity_policy_version": HK_INTRADAY_LIQUIDITY_POLICY_VERSION,
+        "liquidity_standard_amount_threshold": HK_STANDARD_MIN_AMOUNT_HKD,
+        "liquidity_amount_threshold": HK_STANDARD_MIN_AMOUNT_HKD,
+        "liquidity_session_progress": None,
+        "liquidity_gate_progress": None,
+        "liquidity_data_progress": None,
+        "liquidity_gate_elapsed_minutes": None,
+        "liquidity_data_elapsed_minutes": None,
+        "liquidity_session_total_minutes": None,
+        "liquidity_reference_at": observed_at,
+        "liquidity_freshness_reference_at": None,
+        "liquidity_source_effective_at": None,
+        "liquidity_source_age_seconds": None,
+        "liquidity_source_age_minutes": None,
+        "liquidity_source_wall_age_minutes": None,
+        "liquidity_source_phase": "unknown",
+        "liquidity_gate_phase": "unknown",
+        "liquidity_session_open_at": None,
+        "liquidity_session_break_start_at": None,
+        "liquidity_session_break_end_at": None,
+        "liquidity_session_close_at": None,
+        "liquidity_intraday_scaling_eligible": False,
+    }
+    if reference is not None and source is not None and gate_clock is not None:
+        gate_progress = round(float(gate_clock["progress"]), 6)
+        data_progress = (
+            round(float(source_clock["progress"]), 6) if source_clock is not None else None
+        )
+        freshness_reference = gate_clock["freshness_reference"]
+        source_freshness_reference = (
+            source_clock["freshness_reference"]
+            if source_clock is not None
+            else source.astimezone(dt.timezone.utc)
+        )
+        age = freshness_reference - source_freshness_reference
+        wall_age = reference.astimezone(dt.timezone.utc) - source.astimezone(dt.timezone.utc)
+        threshold = max(
+            HK_INTRADAY_MIN_AMOUNT_HKD,
+            round(HK_STANDARD_MIN_AMOUNT_HKD * gate_progress),
+        )
+        source_local_date = source.astimezone(DYNAMIC_MARKET_SOURCE_TIMEZONES["hk"]).date()
+        source_phase = str((source_clock or {}).get("phase") or "closed")
+        policy_eligible = bool(
+            gate_clock["phase"] in {"regular", "break"}
+            and source_phase in {"pre", "regular", "break"}
+            and expected_quote_session("hk", reference) == gate_clock["session_date"]
+            and source_local_date == gate_clock["session_date"]
+            and wall_age >= -DYNAMIC_DISCOVERY_MAX_SOURCE_FUTURE_SKEW
+            and age >= -DYNAMIC_DISCOVERY_MAX_SOURCE_FUTURE_SKEW
+            and age <= DYNAMIC_DISCOVERY_MAX_REGULAR_SOURCE_AGE
+            and threshold < HK_STANDARD_MIN_AMOUNT_HKD
+        )
+        expected_policy.update(
+            {
+                "liquidity_amount_threshold": threshold,
+                "liquidity_session_progress": gate_progress,
+                "liquidity_gate_progress": gate_progress,
+                "liquidity_data_progress": data_progress,
+                "liquidity_gate_elapsed_minutes": round(gate_clock["elapsed_seconds"] / 60, 6),
+                "liquidity_data_elapsed_minutes": (
+                    round(source_clock["elapsed_seconds"] / 60, 6)
+                    if source_clock is not None
+                    else None
+                ),
+                "liquidity_session_total_minutes": round(gate_clock["total_seconds"] / 60, 6),
+                "liquidity_freshness_reference_at": _iso_in_hk(freshness_reference),
+                "liquidity_source_effective_at": _iso_in_hk(source_freshness_reference),
+                "liquidity_source_age_seconds": round(age.total_seconds(), 6),
+                "liquidity_source_age_minutes": round(age.total_seconds() / 60, 2),
+                "liquidity_source_wall_age_minutes": round(wall_age.total_seconds() / 60, 2),
+                "liquidity_source_phase": source_phase,
+                "liquidity_gate_phase": gate_clock["phase"],
+                "liquidity_session_open_at": _iso_in_hk(gate_clock["session_open"]),
+                "liquidity_session_break_start_at": _iso_in_hk(gate_clock["break_start"]),
+                "liquidity_session_break_end_at": _iso_in_hk(gate_clock["break_end"]),
+                "liquidity_session_close_at": _iso_in_hk(gate_clock["session_close"]),
+                "liquidity_intraday_scaling_eligible": policy_eligible,
+            }
+        )
+    policy_eligible = expected_policy["liquidity_intraday_scaling_eligible"] is True
+    expected_threshold = expected_policy["liquidity_amount_threshold"]
+    eligible = bool(
+        policy_eligible
+        and amount >= HK_INTRADAY_MIN_AMOUNT_HKD
+        and amount >= expected_threshold
+        and finite_number(metrics.get("market_cap"))
+        and metrics.get("market_cap") >= HK_INTRADAY_MIN_MARKET_CAP_HKD
+    )
+
+    data_progress = expected_policy["liquidity_data_progress"]
+    source_phase = expected_policy["liquidity_source_phase"]
+    projection_allowed = bool(
+        policy_eligible
+        and source_phase in {"regular", "break"}
+        and finite_number(data_progress)
+        and data_progress > 0
+    )
+    expected_policy["liquidity_projection_basis"] = (
+        "source_trading_progress"
+        if projection_allowed
+        else "pre_no_linear_projection"
+        if source_phase == "pre"
+        else "unavailable"
+    )
+    expected_policy["projected_full_session_amount"] = (
+        round(amount / data_progress, 2) if projection_allowed else None
+    )
+    for field, expected in expected_policy.items():
+        if metrics.get(field) != expected:
+            errors.append(f"{prefix}.recall_metrics.{field} does not match deterministic XHKG policy")
+    if admission != "intraday_scaled":
+        errors.append(f"{prefix} sub-standard HK amount requires intraday_scaled admission")
+    if not eligible:
+        errors.append(f"{prefix} is not eligible for intraday_scaled HK liquidity admission")
+    routes = row.get("recall_routes")
+    if not isinstance(routes, list) or "intraday_liquidity_completion" not in routes:
+        errors.append(f"{prefix} intraday_scaled admission requires intraday_liquidity_completion route")
+
+
 def dynamic_manifest_source_freshness(
     manifest: list[dict], market_key: str, anchor_value
 ) -> dict:
     anchor = parse_aware_datetime(anchor_value)
     if anchor is None:
-        return {"time_count": 0, "fresh_count": 0, "expected_session": None}
+        return {
+            "time_count": 0,
+            "fresh_count": 0,
+            "expected_session": None,
+            "freshness_reference_at": None,
+            "source_effective_as_of": None,
+        }
     expected_session = expected_quote_session(market_key, anchor)
     phase = quote_session_phase(market_key, anchor)
+    gate_effective = anchor.astimezone(dt.timezone.utc)
+    if market_key == "hk":
+        gate_clock = _xhkg_exchange_clock(anchor)
+        if gate_clock is not None:
+            gate_effective = gate_clock["freshness_reference"]
     time_count = 0
     fresh_count = 0
+    source_effective_timestamps: list[int] = []
     for row in manifest:
         if not isinstance(row, dict):
             continue
@@ -943,11 +1208,28 @@ def dynamic_manifest_source_freshness(
         if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool) or timestamp <= 0:
             continue
         time_count += 1
-        source_moment = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc)
+        try:
+            source_moment = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            continue
         source_session = source_moment.astimezone(DYNAMIC_MARKET_SOURCE_TIMEZONES[market_key]).date()
-        age = anchor.astimezone(dt.timezone.utc) - source_moment
-        clock_fresh = age >= -DYNAMIC_DISCOVERY_MAX_SOURCE_FUTURE_SKEW
-        if phase == "regular":
+        source_effective = source_moment
+        source_phase_fresh = True
+        if market_key == "hk":
+            source_clock = _xhkg_exchange_clock(source_moment)
+            if source_clock is not None:
+                source_effective = source_clock["freshness_reference"]
+                if phase in {"regular", "break"}:
+                    source_phase_fresh = source_clock["phase"] in {"pre", "regular", "break"}
+        source_effective_timestamps.append(int(source_effective.timestamp()))
+        age = gate_effective - source_effective
+        wall_age = anchor.astimezone(dt.timezone.utc) - source_moment
+        clock_fresh = bool(
+            source_phase_fresh
+            and wall_age >= -DYNAMIC_DISCOVERY_MAX_SOURCE_FUTURE_SKEW
+            and age >= -DYNAMIC_DISCOVERY_MAX_SOURCE_FUTURE_SKEW
+        )
+        if phase in {"regular", "break"}:
             clock_fresh = clock_fresh and age <= DYNAMIC_DISCOVERY_MAX_REGULAR_SOURCE_AGE
         if source_session == expected_session and clock_fresh:
             fresh_count += 1
@@ -956,6 +1238,16 @@ def dynamic_manifest_source_freshness(
         "fresh_count": fresh_count,
         "expected_session": expected_session.isoformat(),
         "phase": phase,
+        "freshness_reference_at": gate_effective.astimezone(
+            DYNAMIC_MARKET_SOURCE_TIMEZONES[market_key]
+        ).isoformat(timespec="seconds"),
+        "source_effective_as_of": (
+            dt.datetime.fromtimestamp(max(source_effective_timestamps), dt.timezone.utc)
+            .astimezone(DYNAMIC_MARKET_REPORT_TIMEZONE)
+            .isoformat(timespec="seconds")
+            if source_effective_timestamps
+            else None
+        ),
     }
 
 
@@ -1494,6 +1786,7 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                 if not finite_number(realtime_coverage) or realtime_coverage != expected_realtime_coverage:
                     errors.append(f"markets.{market_key}.quote_health.realtime_coverage is inconsistent")
             if dynamic_market_contract:
+                dynamic_policy_version = stats.get("recall_policy_version")
                 required_dynamic_fields = {
                     "universe_origin",
                     "universe_scope",
@@ -1523,6 +1816,13 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                     "excluded_counts",
                     "recall_manifest",
                 }
+                if dynamic_policy_version == DYNAMIC_MARKET_RECALL_POLICY_VERSION:
+                    required_dynamic_fields.update(
+                        {
+                            "discovery_freshness_reference_at",
+                            "discovery_source_effective_as_of",
+                        }
+                    )
                 missing_dynamic = sorted(required_dynamic_fields - set(stats))
                 if missing_dynamic:
                     errors.append(
@@ -1536,8 +1836,22 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                     errors.append(f"markets.{market_key}.stats.universe_scope is invalid")
                 if stats.get("coverage_claim") != "bounded_dynamic_scan":
                     errors.append(f"markets.{market_key}.stats.coverage_claim is invalid")
-                if stats.get("recall_policy_version") != DYNAMIC_MARKET_RECALL_POLICY_VERSION:
+                model_version = snapshot.get("model_version")
+                current_policy_required = model_version == PRODUCTION_RULE_MODEL_VERSION
+                if current_policy_required:
+                    if dynamic_policy_version != DYNAMIC_MARKET_RECALL_POLICY_VERSION:
+                        errors.append(f"markets.{market_key}.stats.recall_policy_version is invalid")
+                elif model_version in DYNAMIC_MARKET_MODEL_VERSIONS and dynamic_policy_version not in {
+                    DYNAMIC_MARKET_RECALL_POLICY_VERSION,
+                    *DYNAMIC_MARKET_LEGACY_RECALL_POLICY_VERSIONS,
+                }:
                     errors.append(f"markets.{market_key}.stats.recall_policy_version is invalid")
+                elif model_version not in DYNAMIC_MARKET_MODEL_VERSIONS:
+                    errors.append(f"markets.{market_key}.stats.recall_policy_version is invalid")
+                audit_current_hk_liquidity = bool(
+                    market_key == "hk"
+                    and dynamic_policy_version == DYNAMIC_MARKET_RECALL_POLICY_VERSION
+                )
                 if not isinstance(stats.get("discovery_source"), str) or not stats.get("discovery_source", "").strip():
                     errors.append(f"markets.{market_key}.stats.discovery_source is invalid")
                 retrieved_at = parse_aware_datetime(stats.get("discovery_retrieved_at"))
@@ -1650,6 +1964,9 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                 else:
                     manifest_symbols = []
                     manifest_scores = []
+                    allowed_manifest_routes = set(expected_routes)
+                    if audit_current_hk_liquidity:
+                        allowed_manifest_routes.add("intraday_liquidity_completion")
                     for index, row in enumerate(manifest, 1):
                         if not isinstance(row, dict):
                             errors.append(f"markets.{market_key}.stats.recall_manifest[{index - 1}] is invalid")
@@ -1667,13 +1984,22 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                             or not isinstance(row.get("recall_routes"), list)
                             or not row.get("recall_routes")
                             or row.get("primary_route") not in row.get("recall_routes", [])
-                            or any(route not in expected_routes for route in row.get("recall_routes", []))
+                            or any(route not in allowed_manifest_routes for route in row.get("recall_routes", []))
                             or not row.get("source")
                             or not timezone_aware_iso_datetime(row.get("observed_at"))
                             or not isinstance(row.get("recall_metrics"), dict)
                         ):
                             errors.append(f"markets.{market_key}.stats.recall_manifest[{index - 1}] is invalid")
                             manifest_contract_valid = False
+                        if audit_current_hk_liquidity:
+                            row_error_count = len(errors)
+                            _append_current_hk_liquidity_row_errors(
+                                row,
+                                f"markets.hk.stats.recall_manifest[{index - 1}]",
+                                errors,
+                            )
+                            if len(errors) != row_error_count:
+                                manifest_contract_valid = False
                     if None in manifest_symbols or len(set(manifest_symbols)) != len(manifest_symbols):
                         errors.append(f"markets.{market_key}.stats.recall_manifest symbols are invalid")
                         manifest_contract_valid = False
@@ -1707,6 +2033,21 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                 freshness = dynamic_manifest_source_freshness(
                     manifest if isinstance(manifest, list) else [], market_key, freshness_anchor
                 )
+                if dynamic_policy_version == DYNAMIC_MARKET_RECALL_POLICY_VERSION:
+                    if (
+                        stats.get("discovery_freshness_reference_at")
+                        != freshness.get("freshness_reference_at")
+                    ):
+                        errors.append(
+                            f"markets.{market_key}.stats.discovery_freshness_reference_at is inconsistent"
+                        )
+                    if (
+                        stats.get("discovery_source_effective_as_of")
+                        != freshness.get("source_effective_as_of")
+                    ):
+                        errors.append(
+                            f"markets.{market_key}.stats.discovery_source_effective_as_of is inconsistent"
+                        )
                 manifest_source_timestamps = [
                     (row.get("recall_metrics") or {}).get("source_timestamp")
                     for row in (manifest if isinstance(manifest, list) else [])
@@ -1851,6 +2192,12 @@ def validate_snapshot(snapshot: dict) -> list[str]:
                     if candidate_code not in manifest_symbol_set:
                         errors.append(
                             f"markets.{market_key} candidate is not present in dynamic recall_manifest"
+                        )
+                    if audit_current_hk_liquidity:
+                        _append_current_hk_liquidity_row_errors(
+                            candidate,
+                            f"markets.hk.candidate[{candidate_code or 'invalid'}]",
+                            errors,
                         )
         trade_window = section.get("trade_window") or {}
         if trade_window.get("calendar_id") != calendar_id(market_key):

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime as dt
+import functools
 import hashlib
 import http.server
 import json
@@ -29,6 +30,7 @@ from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 import requests
+import exchange_calendars as xcals
 
 import history_evaluation
 import model_observation_ledger
@@ -107,7 +109,7 @@ NETWORK_RETRY_MAX_DELAY_SECONDS = 1.0
 A_SHARE_RECALL_TARGET = 300
 HK_RECALL_TARGET = 200
 US_RECALL_TARGET = 300
-DYNAMIC_MARKET_RECALL_POLICY_VERSION = "hk-us-cross-section-v1"
+DYNAMIC_MARKET_RECALL_POLICY_VERSION = "hk-us-cross-section-v2-hk-intraday-audited"
 DYNAMIC_MARKET_ROUTE_TARGETS = {
     "hk": {"momentum": 45, "pullback": 35, "activity": 35, "quality": 30, "liquidity": 55},
     "us": {"momentum": 70, "pullback": 50, "activity": 45, "quality": 45, "liquidity": 90},
@@ -116,6 +118,11 @@ DYNAMIC_MARKET_MIN_ELIGIBLE = {"hk": 210, "us": 315}
 DYNAMIC_MARKET_MIN_SCORE_COVERAGE = 0.98
 DYNAMIC_MARKET_MAX_REGULAR_SOURCE_AGE = dt.timedelta(minutes=45)
 DYNAMIC_MARKET_MAX_SOURCE_FUTURE_SKEW = dt.timedelta(minutes=5)
+HK_INTRADAY_LIQUIDITY_POLICY_VERSION = "hk-intraday-scaled-amount-v1"
+HK_STANDARD_MIN_AMOUNT_HKD = 20_000_000
+HK_INTRADAY_MIN_AMOUNT_HKD = 2_000_000
+HK_INTRADAY_MIN_MARKET_CAP_HKD = 1_000_000_000
+HK_ADAPTIVE_LIQUIDITY_MAX_PAGE = 6
 DYNAMIC_MARKET_ORIGIN = "dynamic_market_snapshot"
 DYNAMIC_MARKET_CACHE_ORIGIN = "dynamic_market_snapshot_cache"
 A_SHARE_BOARD_TARGETS = {
@@ -925,6 +932,187 @@ def _parse_dynamic_source_timestamp(value, market_key: str) -> int | None:
     return int(parsed.timestamp())
 
 
+@functools.lru_cache(maxsize=1)
+def _xhkg_calendar():
+    return xcals.get_calendar("XHKG")
+
+
+def _exchange_calendar_datetime(value) -> dt.datetime | None:
+    if value is None or str(value) == "NaT":
+        return None
+    try:
+        parsed = value.to_pydatetime()
+    except AttributeError:
+        parsed = value
+    if not isinstance(parsed, dt.datetime) or parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _hk_exchange_clock(value: dt.datetime) -> dict | None:
+    """Return actual XHKG session intervals and exchange-time progress."""
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        return None
+    calendar = _xhkg_calendar()
+    timezone = MARKET_SOURCE_TIMEZONES["hk"]
+    anchor = value.astimezone(dt.timezone.utc)
+    local_anchor = anchor.astimezone(timezone)
+    session_date = local_anchor.date()
+    session_label = session_date.isoformat()
+    if not calendar.is_session(session_label):
+        return None
+    session_open = _exchange_calendar_datetime(calendar.session_open(session_label))
+    session_close = _exchange_calendar_datetime(calendar.session_close(session_label))
+    break_start = _exchange_calendar_datetime(calendar.session_break_start(session_label))
+    break_end = _exchange_calendar_datetime(calendar.session_break_end(session_label))
+    if session_open is None or session_close is None or session_close <= session_open:
+        return None
+    if (
+        break_start is not None
+        and break_end is not None
+        and session_open < break_start < break_end < session_close
+    ):
+        intervals = ((session_open, break_start), (break_end, session_close))
+    else:
+        break_start = None
+        break_end = None
+        intervals = ((session_open, session_close),)
+    total_seconds = sum((end - start).total_seconds() for start, end in intervals)
+    if total_seconds <= 0:
+        return None
+    elapsed_seconds = sum(
+        max(0.0, (min(anchor, end) - start).total_seconds())
+        for start, end in intervals
+        if anchor > start
+    )
+    progress = min(1.0, max(0.0, elapsed_seconds / total_seconds))
+    phase = quote_session_phase("hk", value)
+    freshness_reference = anchor
+    if phase == "break":
+        freshness_reference = _exchange_calendar_datetime(calendar.previous_minute(anchor))
+        if freshness_reference is None:
+            return None
+    return {
+        "session_date": session_date,
+        "phase": phase,
+        "session_open": session_open,
+        "break_start": break_start,
+        "break_end": break_end,
+        "session_close": session_close,
+        "total_seconds": total_seconds,
+        "elapsed_seconds": elapsed_seconds,
+        "progress": progress,
+        "freshness_reference": freshness_reference,
+    }
+
+
+def _iso_in_hk(value: dt.datetime | None) -> str | None:
+    return (
+        value.astimezone(MARKET_SOURCE_TIMEZONES["hk"]).isoformat(timespec="seconds")
+        if value is not None
+        else None
+    )
+
+
+def _hk_intraday_liquidity_policy(source_timestamp, observed_at: str) -> dict:
+    """Build the point-in-time HK amount gate from the actual XHKG session."""
+
+    result = {
+        "liquidity_policy_version": HK_INTRADAY_LIQUIDITY_POLICY_VERSION,
+        "liquidity_standard_amount_threshold": HK_STANDARD_MIN_AMOUNT_HKD,
+        "liquidity_amount_threshold": HK_STANDARD_MIN_AMOUNT_HKD,
+        "liquidity_session_progress": None,
+        "liquidity_gate_progress": None,
+        "liquidity_data_progress": None,
+        "liquidity_gate_elapsed_minutes": None,
+        "liquidity_data_elapsed_minutes": None,
+        "liquidity_session_total_minutes": None,
+        "liquidity_reference_at": observed_at,
+        "liquidity_freshness_reference_at": None,
+        "liquidity_source_effective_at": None,
+        "liquidity_source_age_seconds": None,
+        "liquidity_source_age_minutes": None,
+        "liquidity_source_wall_age_minutes": None,
+        "liquidity_source_phase": "unknown",
+        "liquidity_gate_phase": "unknown",
+        "liquidity_session_open_at": None,
+        "liquidity_session_break_start_at": None,
+        "liquidity_session_break_end_at": None,
+        "liquidity_session_close_at": None,
+        "liquidity_intraday_scaling_eligible": False,
+    }
+    timestamp = _parse_dynamic_source_timestamp(source_timestamp, "hk")
+    if timestamp is None:
+        return result
+    try:
+        reference = dt.datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+        source = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return result
+    if reference.tzinfo is None or reference.utcoffset() is None:
+        return result
+    gate_clock = _hk_exchange_clock(reference)
+    source_clock = _hk_exchange_clock(source)
+    if gate_clock is None:
+        return result
+    gate_progress = round(safe_float(gate_clock["progress"]), 6)
+    data_progress = (
+        round(safe_float(source_clock["progress"]), 6) if source_clock is not None else None
+    )
+    freshness_reference = gate_clock["freshness_reference"]
+    source_effective = (
+        source_clock["freshness_reference"]
+        if source_clock is not None
+        else source.astimezone(dt.timezone.utc)
+    )
+    age = freshness_reference - source_effective
+    wall_age = reference.astimezone(dt.timezone.utc) - source.astimezone(dt.timezone.utc)
+    threshold = max(
+        HK_INTRADAY_MIN_AMOUNT_HKD,
+        round(HK_STANDARD_MIN_AMOUNT_HKD * gate_progress),
+    )
+    timezone = MARKET_SOURCE_TIMEZONES["hk"]
+    source_local_date = source.astimezone(timezone).date()
+    source_phase = str((source_clock or {}).get("phase") or "closed")
+    policy_eligible = bool(
+        gate_clock["phase"] in {"regular", "break"}
+        and source_phase in {"pre", "regular", "break"}
+        and expected_quote_session("hk", reference) == gate_clock["session_date"]
+        and source_local_date == gate_clock["session_date"]
+        and wall_age >= -DYNAMIC_MARKET_MAX_SOURCE_FUTURE_SKEW
+        and age >= -DYNAMIC_MARKET_MAX_SOURCE_FUTURE_SKEW
+        and age <= DYNAMIC_MARKET_MAX_REGULAR_SOURCE_AGE
+        and threshold < HK_STANDARD_MIN_AMOUNT_HKD
+    )
+    result.update(
+        {
+            "liquidity_amount_threshold": threshold,
+            "liquidity_session_progress": gate_progress,
+            "liquidity_gate_progress": gate_progress,
+            "liquidity_data_progress": data_progress,
+            "liquidity_gate_elapsed_minutes": round(gate_clock["elapsed_seconds"] / 60, 6),
+            "liquidity_data_elapsed_minutes": (
+                round(source_clock["elapsed_seconds"] / 60, 6) if source_clock is not None else None
+            ),
+            "liquidity_session_total_minutes": round(gate_clock["total_seconds"] / 60, 6),
+            "liquidity_freshness_reference_at": _iso_in_hk(freshness_reference),
+            "liquidity_source_effective_at": _iso_in_hk(source_effective),
+            "liquidity_source_age_seconds": round(age.total_seconds(), 6),
+            "liquidity_source_age_minutes": round(age.total_seconds() / 60, 2),
+            "liquidity_source_wall_age_minutes": round(wall_age.total_seconds() / 60, 2),
+            "liquidity_source_phase": source_phase,
+            "liquidity_gate_phase": gate_clock["phase"],
+            "liquidity_session_open_at": _iso_in_hk(gate_clock["session_open"]),
+            "liquidity_session_break_start_at": _iso_in_hk(gate_clock["break_start"]),
+            "liquidity_session_break_end_at": _iso_in_hk(gate_clock["break_end"]),
+            "liquidity_session_close_at": _iso_in_hk(gate_clock["session_close"]),
+            "liquidity_intraday_scaling_eligible": policy_eligible,
+        }
+    )
+    return result
+
+
 def _dynamic_source_time_coverage(
     candidates: list[dict], market_key: str, *, as_of: dt.datetime | None = None
 ) -> dict:
@@ -933,7 +1121,14 @@ def _dynamic_source_time_coverage(
     anchor = (as_of or now_cn()).astimezone(CN_TZ)
     expected_session = expected_quote_session(market_key, anchor)
     phase = quote_session_phase(market_key, anchor)
+    anchor_utc = anchor.astimezone(dt.timezone.utc)
+    gate_effective = anchor_utc
+    if market_key == "hk":
+        gate_clock = _hk_exchange_clock(anchor)
+        if gate_clock is not None:
+            gate_effective = gate_clock["freshness_reference"]
     source_timestamps: list[int] = []
+    source_effective_timestamps: list[int] = []
     fresh_symbols: list[str] = []
     stale_symbols: list[str] = []
     for candidate in candidates:
@@ -943,13 +1138,31 @@ def _dynamic_source_time_coverage(
         if timestamp is None:
             stale_symbols.append(symbol)
             continue
+        try:
+            source_moment = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            stale_symbols.append(symbol)
+            continue
         source_timestamps.append(timestamp)
-        source_moment = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc)
         source_session = source_moment.astimezone(MARKET_SOURCE_TIMEZONES[market_key]).date()
-        age = anchor.astimezone(dt.timezone.utc) - source_moment
+        source_effective = source_moment
+        source_phase_fresh = True
+        if market_key == "hk":
+            source_clock = _hk_exchange_clock(source_moment)
+            if source_clock is not None:
+                source_effective = source_clock["freshness_reference"]
+                if phase in {"regular", "break"}:
+                    source_phase_fresh = source_clock["phase"] in {"pre", "regular", "break"}
+        source_effective_timestamps.append(int(source_effective.timestamp()))
+        age = gate_effective - source_effective
+        wall_age = anchor_utc - source_moment
         session_fresh = source_session == expected_session
-        clock_fresh = age >= -DYNAMIC_MARKET_MAX_SOURCE_FUTURE_SKEW
-        if phase == "regular":
+        clock_fresh = bool(
+            source_phase_fresh
+            and wall_age >= -DYNAMIC_MARKET_MAX_SOURCE_FUTURE_SKEW
+            and age >= -DYNAMIC_MARKET_MAX_SOURCE_FUTURE_SKEW
+        )
+        if phase in {"regular", "break"}:
             clock_fresh = clock_fresh and age <= DYNAMIC_MARKET_MAX_REGULAR_SOURCE_AGE
         if session_fresh and clock_fresh:
             fresh_symbols.append(symbol)
@@ -960,6 +1173,11 @@ def _dynamic_source_time_coverage(
     fresh_count = len(fresh_symbols)
     return {
         "discovery_freshness_as_of": anchor.isoformat(timespec="seconds"),
+        "discovery_freshness_reference_at": (
+            gate_effective.astimezone(MARKET_SOURCE_TIMEZONES[market_key]).isoformat(
+                timespec="seconds"
+            )
+        ),
         "discovery_expected_session": expected_session.isoformat(),
         "discovery_session_phase": phase,
         "selected_source_time_count": source_time_count,
@@ -972,6 +1190,13 @@ def _dynamic_source_time_coverage(
             .astimezone(CN_TZ)
             .isoformat(timespec="seconds")
             if source_timestamps
+            else None
+        ),
+        "discovery_source_effective_as_of": (
+            dt.datetime.fromtimestamp(max(source_effective_timestamps), dt.timezone.utc)
+            .astimezone(CN_TZ)
+            .isoformat(timespec="seconds")
+            if source_effective_timestamps
             else None
         ),
     }
@@ -1025,12 +1250,23 @@ def _dynamic_hk_candidate(item: dict, query_route: str, observed_at: str) -> tup
     turnover_pct = nullable_float(item.get("turnover_pct"))
     volume_ratio = nullable_float(item.get("volume_ratio"))
     change_pct = safe_float(item.get("changepercent"))
-    if price < 0.5 or volume <= 0 or amount < 20_000_000:
+    source_timestamp = _parse_dynamic_source_timestamp(item.get("ticktime"), "hk")
+    liquidity_policy = _hk_intraday_liquidity_policy(source_timestamp, observed_at)
+    standard_liquidity = amount >= HK_STANDARD_MIN_AMOUNT_HKD
+    intraday_liquidity = bool(
+        liquidity_policy["liquidity_intraday_scaling_eligible"]
+        and amount >= safe_float(liquidity_policy["liquidity_amount_threshold"])
+        and market_cap >= HK_INTRADAY_MIN_MARKET_CAP_HKD
+    )
+    if price < 0.5 or volume <= 0 or not (standard_liquidity or intraday_liquidity):
         return None, "liquidity"
     if change_pct < -12 or change_pct > 15:
         return None, "extreme_move"
     pe = nullable_float(item.get("pe_ratio"))
     routes = ["liquidity", query_route]
+    liquidity_admission = "observed_amount" if standard_liquidity else "intraday_scaled"
+    if liquidity_admission == "intraday_scaled":
+        routes.append("intraday_liquidity_completion")
     if 0.5 <= change_pct <= 8.5:
         routes.append("momentum")
     if -8 <= change_pct < 0.5:
@@ -1039,6 +1275,20 @@ def _dynamic_hk_candidate(item: dict, query_route: str, observed_at: str) -> tup
         routes.append("activity")
     if amount >= 50_000_000 and pe is not None and 0 < pe <= 45:
         routes.append("quality")
+    data_progress = safe_float(liquidity_policy.get("liquidity_data_progress"))
+    source_phase = str(liquidity_policy.get("liquidity_source_phase") or "unknown")
+    projection_allowed = bool(
+        liquidity_policy["liquidity_intraday_scaling_eligible"]
+        and source_phase in {"regular", "break"}
+        and data_progress > 0
+    )
+    projection_basis = (
+        "source_trading_progress"
+        if projection_allowed
+        else "pre_no_linear_projection"
+        if source_phase == "pre"
+        else "unavailable"
+    )
     metrics = {
         "price": round(price, 4),
         "change_pct": round(change_pct, 4),
@@ -1050,7 +1300,13 @@ def _dynamic_hk_candidate(item: dict, query_route: str, observed_at: str) -> tup
         "turnover_pct": turnover_pct,
         "volume_ratio": volume_ratio,
         "source_ticktime": item.get("ticktime") or None,
-        "source_timestamp": _parse_dynamic_source_timestamp(item.get("ticktime"), "hk"),
+        "source_timestamp": source_timestamp,
+        "liquidity_admission": liquidity_admission,
+        **liquidity_policy,
+        "liquidity_projection_basis": projection_basis,
+        "projected_full_session_amount": (
+            round(amount / data_progress, 2) if projection_allowed else None
+        ),
     }
     return {
         "symbol": symbol,
@@ -1301,6 +1557,83 @@ def _fetch_sina_us_dynamic_rows() -> tuple[list[dict], dict]:
     }
 
 
+def _eastmoney_dynamic_candidate(
+    item: dict, route: str, market_key: str, observed_at: str
+) -> tuple[dict | None, str | None, int | None]:
+    """Normalize one Eastmoney cross-section row without losing its source clock."""
+
+    raw_timestamp = nullable_float(item.get("f124"))
+    if raw_timestamp is None:
+        return None, "invalid_source_timestamp", None
+    try:
+        timestamp = int(raw_timestamp)
+        source_moment = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None, "invalid_source_timestamp", None
+    if timestamp <= 0 or not 2000 <= source_moment.year <= 2100:
+        return None, "invalid_source_timestamp", None
+    if market_key == "hk":
+        normalized = {
+            "symbol": item.get("f12"),
+            "name": item.get("f14"),
+            "lasttrade": item.get("f2"),
+            "volume": item.get("f5"),
+            "amount": item.get("f6"),
+            "changepercent": item.get("f3"),
+            "pe_ratio": item.get("f9"),
+            "market_cap": item.get("f20"),
+            "turnover_pct": item.get("f8"),
+            "volume_ratio": item.get("f10"),
+            "ticktime": timestamp,
+        }
+        candidate, reason = _dynamic_hk_candidate(normalized, route, observed_at)
+    else:
+        market_names = {105: "NASDAQ", 106: "NYSE", 107: "AMEX"}
+        normalized = {
+            "symbol": item.get("f12"),
+            "name": item.get("f14"),
+            "cname": item.get("f14"),
+            "category": "",
+            "price": item.get("f2"),
+            "volume": item.get("f5"),
+            "mktcap": item.get("f20"),
+            "chg": item.get("f3"),
+            "pe": item.get("f9"),
+            "market": market_names.get(int(safe_float(item.get("f13"))), ""),
+        }
+        candidate, reason = _dynamic_us_candidate(normalized, route, observed_at)
+    if candidate:
+        candidate["source"] = f"eastmoney_delay_{market_key}_market"
+        candidate["reason"] = (
+            f"{market_key.upper()} 延迟市场横截面按成交、活跃度、动量、回踩和规模动态召回"
+        )
+        candidate["recall_metrics"].update(
+            {
+                "turnover_pct": nullable_float(item.get("f8")),
+                "volume_ratio": nullable_float(item.get("f10")),
+                "float_market_cap": nullable_float(item.get("f21")),
+                "pb": nullable_float(item.get("f23")),
+                "medium_return_pct": nullable_float(item.get("f24")),
+                "listing_date": item.get("f26") or None,
+                "main_net_flow": nullable_float(item.get("f62")),
+                "source_timestamp": timestamp,
+            }
+        )
+        if market_key == "hk":
+            candidate["recall_metrics"].update(
+                {
+                    "market_cap_currency": "HKD",
+                    "market_cap_kind": "total",
+                    "market_cap_source_field": "f20",
+                }
+            )
+        if safe_float(item.get("f10")) >= 1.2 or safe_float(item.get("f8")) >= 1.5:
+            candidate["recall_routes"] = list(
+                dict.fromkeys([*(candidate.get("recall_routes") or []), "activity"])
+            )
+    return candidate, reason, timestamp
+
+
 def _fetch_eastmoney_dynamic_rows(market_key: str) -> tuple[list[dict], dict]:
     """Fetch a bounded common-equity cross-section from Eastmoney's delay host."""
 
@@ -1373,66 +1706,66 @@ def _fetch_eastmoney_dynamic_rows(market_key: str) -> tuple[list[dict], dict]:
             )
             raw_rows.extend((item, route) for item in page_rows)
 
+    base_requested_pages = len(jobs)
+    base_completed_pages = completed
+    adaptive_requested_pages = 0
+    adaptive_completed_pages = 0
+    adaptive_stop_reason = "not_applicable" if market_key != "hk" else "not_required"
+
+    def eligible_symbol_count() -> int:
+        symbols: set[str] = set()
+        for item, route in raw_rows:
+            candidate, _reason, _timestamp = _eastmoney_dynamic_candidate(
+                item, route, market_key, observed_at
+            )
+            if candidate and candidate.get("symbol"):
+                symbols.add(str(candidate["symbol"]))
+        return len(symbols)
+
+    adaptive_trigger_eligible_size = eligible_symbol_count()
+    if market_key == "hk" and adaptive_trigger_eligible_size < DYNAMIC_MARKET_MIN_ELIGIBLE["hk"]:
+        adaptive_stop_reason = "max_pages_reached"
+        for page in range(3, HK_ADAPTIVE_LIQUIDITY_MAX_PAGE + 1):
+            adaptive_requested_pages += 1
+            try:
+                route, fetched_page, data = fetch(("liquidity", "f6", "1", page))
+            except Exception:
+                continue
+            adaptive_completed_pages += 1
+            completed += 1
+            try:
+                reported_totals.append(int(data.get("total")))
+            except (TypeError, ValueError):
+                pass
+            page_rows = [item for item in (data.get("diff") or []) if isinstance(item, dict)]
+            page_signatures.setdefault(route, {})[fetched_page] = tuple(
+                str(item.get("f12") or "") for item in page_rows
+            )
+            raw_rows.extend((item, route) for item in page_rows)
+            if eligible_symbol_count() >= DYNAMIC_MARKET_MIN_ELIGIBLE["hk"]:
+                adaptive_stop_reason = "minimum_eligible_met"
+                break
+
     raw_rows.sort(key=lambda pair: (str(pair[0].get("f12") or ""), pair[1]))
     rows: list[dict] = []
     excluded: dict[str, int] = {}
     source_times: list[int] = []
-    market_names = {105: "NASDAQ", 106: "NYSE", 107: "AMEX"}
     for item, route in raw_rows:
-        timestamp = int(safe_float(item.get("f124")))
-        if timestamp > 0:
+        candidate, reason, timestamp = _eastmoney_dynamic_candidate(
+            item, route, market_key, observed_at
+        )
+        if timestamp:
             source_times.append(timestamp)
-        if market_key == "hk":
-            normalized = {
-                "symbol": item.get("f12"),
-                "name": item.get("f14"),
-                "lasttrade": item.get("f2"),
-                "volume": item.get("f5"),
-                "amount": item.get("f6"),
-                "changepercent": item.get("f3"),
-                "pe_ratio": item.get("f9"),
-                "market_cap": item.get("f20"),
-                "turnover_pct": item.get("f8"),
-                "volume_ratio": item.get("f10"),
-                "ticktime": timestamp or None,
-            }
-            candidate, reason = _dynamic_hk_candidate(normalized, route, observed_at)
-        else:
-            normalized = {
-                "symbol": item.get("f12"),
-                "name": item.get("f14"),
-                "cname": item.get("f14"),
-                "category": "",
-                "price": item.get("f2"),
-                "volume": item.get("f5"),
-                "mktcap": item.get("f20"),
-                "chg": item.get("f3"),
-                "pe": item.get("f9"),
-                "market": market_names.get(int(safe_float(item.get("f13"))), ""),
-            }
-            candidate, reason = _dynamic_us_candidate(normalized, route, observed_at)
         if candidate:
-            candidate["source"] = f"eastmoney_delay_{market_key}_market"
-            candidate["reason"] = f"{market_key.upper()} 延迟市场横截面按成交、活跃度、动量、回踩和规模动态召回"
-            candidate["recall_metrics"].update(
-                {
-                    "turnover_pct": nullable_float(item.get("f8")),
-                    "volume_ratio": nullable_float(item.get("f10")),
-                    "float_market_cap": nullable_float(item.get("f21")),
-                    "pb": nullable_float(item.get("f23")),
-                    "medium_return_pct": nullable_float(item.get("f24")),
-                    "listing_date": item.get("f26") or None,
-                    "main_net_flow": nullable_float(item.get("f62")),
-                    "source_timestamp": timestamp or None,
-                }
-            )
-            if safe_float(item.get("f10")) >= 1.2 or safe_float(item.get("f8")) >= 1.5:
-                candidate["recall_routes"] = list(
-                    dict.fromkeys([*(candidate.get("recall_routes") or []), "activity"])
-                )
             rows.append(candidate)
         elif reason:
             excluded[reason] = excluded.get(reason, 0) + 1
+    requested_pages = base_requested_pages + adaptive_requested_pages
+    adaptive_symbols = {
+        str(row.get("symbol") or "")
+        for row in rows
+        if (row.get("recall_metrics") or {}).get("liquidity_admission") == "intraday_scaled"
+    }
     source_as_of = (
         dt.datetime.fromtimestamp(max(source_times), CN_TZ).isoformat(timespec="seconds")
         if source_times
@@ -1443,16 +1776,26 @@ def _fetch_eastmoney_dynamic_rows(market_key: str) -> tuple[list[dict], dict]:
         "discovery_retrieved_at": observed_at,
         "discovery_source_as_of": source_as_of,
         "discovery_reported_total": max(reported_totals) if reported_totals else None,
-        "discovery_requested_pages": len(jobs),
+        "discovery_requested_pages": requested_pages,
         "discovery_completed_pages": completed,
+        "discovery_base_requested_pages": base_requested_pages,
+        "discovery_base_completed_pages": base_completed_pages,
+        "discovery_adaptive_requested_pages": adaptive_requested_pages,
+        "discovery_adaptive_completed_pages": adaptive_completed_pages,
+        "discovery_adaptive_trigger_eligible_size": adaptive_trigger_eligible_size,
+        "discovery_adaptive_stop_reason": adaptive_stop_reason,
         "discovery_pagination_complete": bool(
-            completed == len(jobs)
+            completed == requested_pages
             and _dynamic_page_signatures_are_unique(page_signatures)
             and len(set(reported_totals)) <= 1
         ),
         "discovery_page_signatures_unique": _dynamic_page_signatures_are_unique(page_signatures),
         "discovery_reported_totals_consistent": len(set(reported_totals)) <= 1,
         "raw_discovery_size": len(raw_rows),
+        "adaptive_liquidity_policy_version": (
+            HK_INTRADAY_LIQUIDITY_POLICY_VERSION if market_key == "hk" else None
+        ),
+        "adaptive_liquidity_unique_candidates": len(adaptive_symbols - {""}),
         "excluded_counts": excluded,
     }
 
