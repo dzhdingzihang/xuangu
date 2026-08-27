@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import json
 import pathlib
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -119,6 +121,20 @@ def write_observation_pair(
 
 
 class MergeArchivePayloadTests(unittest.TestCase):
+    def test_cli_imports_repository_modules_from_foreign_working_directory(self) -> None:
+        script = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "merge_archive_payload.py"
+        with tempfile.TemporaryDirectory() as foreign_cwd:
+            completed = subprocess.run(
+                [sys.executable, str(script), "--help"],
+                cwd=foreign_cwd,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("payload", completed.stdout)
+
     def test_new_legacy_observation_is_validated_and_written_current(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             root = pathlib.Path(root)
