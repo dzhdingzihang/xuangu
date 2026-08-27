@@ -129,6 +129,32 @@ class DeploymentOrderGuardTests(unittest.TestCase):
 
         self.assertTrue(publication_decision(incoming, production)["should_publish"])
 
+    def test_relocated_late_recovery_uses_effective_invocation_for_ordering(self) -> None:
+        incoming = snapshot(
+            "late-recovery.json",
+            "2026-08-27T17:54:00+08:00",
+            checkpoint="2026-08-27T16:17:00+08:00",
+            invocation="2026-08-27T16:47:00+08:00",
+        )
+        incoming["automation"].update(
+            {
+                "source_invocation_slot": "2026-08-27T08:17:00+08:00",
+                "scheduler_delay_seconds": 34500,
+                "recovery_mode": "late_cron_recovery",
+            }
+        )
+        production = snapshot(
+            "newer.json",
+            "2026-08-27T20:20:00+08:00",
+            checkpoint="2026-08-27T20:17:00+08:00",
+            invocation="2026-08-27T20:17:00+08:00",
+        )
+
+        result = publication_decision(incoming, production)
+
+        self.assertFalse(result["should_publish"])
+        self.assertEqual(result["reason"], "production_logical_slot_is_newer")
+
     def test_non_scheduled_manual_snapshot_is_not_ordered_by_cron(self) -> None:
         incoming = snapshot(
             "manual.json",

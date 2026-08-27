@@ -233,6 +233,16 @@ class WorkerApiContractTests(unittest.TestCase):
                 }},
               }},
             }};
+            const uiBootstrap = {{
+              contract_version: "ui-bootstrap-v1",
+              generated_at: generatedAt,
+              snapshot_key: snapshotKey,
+              source_snapshot: {{ sha256: "a".repeat(64), byte_size: 7654321 }},
+              production_action: "QUALIFIED_PICK",
+              production_decision: productionDecision,
+              global_decision: runtime.global_decision,
+              markets: {{}},
+            }};
             const full = {{ generated_at: generatedAt, snapshot_key: snapshotKey, full_marker: true }};
             const calls = [];
             const jsonResponse = (payload) => new Response(JSON.stringify(payload), {{
@@ -248,6 +258,7 @@ class WorkerApiContractTests(unittest.TestCase):
               calls.push(url.pathname);
               if (url.pathname === "/data/picks/runtime.json") return jsonResponse(runtime);
               if (url.pathname === "/data/picks/live-index.json") return jsonResponse(liveIndex);
+              if (url.pathname === "/data/picks/ui-bootstrap.json") return jsonResponse(uiBootstrap);
               if (url.pathname === "/data/picks/latest.json") return streamOnlyResponse(full);
               if (url.pathname === `/data/picks/${{snapshotKey}}`) return streamOnlyResponse(full);
               return new Response("missing", {{ status: 404 }});
@@ -295,7 +306,7 @@ class WorkerApiContractTests(unittest.TestCase):
               new Request("https://xuangu.alixjd.com/api/latest-summary"), env,
             )).json();
             assert.equal(summary.latest.production_action, "QUALIFIED_PICK");
-            assert.deepEqual(calls, ["/data/picks/runtime.json"]);
+            assert.deepEqual(calls, ["/data/picks/runtime.json", "/data/picks/ui-bootstrap.json"]);
 
             const failClosedCalls = [];
             const failClosedEnv = {{ ASSETS: {{ async fetch(input) {{
@@ -319,6 +330,165 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.deepEqual(failClosedCalls, ["/data/picks/live-index.json"]);
             """
         )
+
+    def test_ui_endpoints_are_identity_bound_and_never_read_the_full_snapshot(self) -> None:
+        run_node(
+            f"""
+            import assert from "node:assert/strict";
+            const worker = (await import({json.dumps(WORKER_URI)} + "?ui-assets-contract")).default;
+            const generatedAt = new Date().toISOString();
+            const snapshotKey = "2026-08-27_ui.json";
+            const source = {{ sha256: "b".repeat(64), byte_size: 9876543 }};
+            const runtime = {{
+              contract_version: "worker-runtime-v1",
+              generated_at: generatedAt,
+              snapshot_key: snapshotKey,
+              source_snapshot: source,
+              production_decision: {{
+                contract_version: "production-rule-10d-v1",
+                decision_scope: "global_10d_bounded_recall",
+                action: "QUALIFIED_PICK",
+                action_basis: "dual_track_candidate_qualification_v3",
+                rule_model_id: "ten-day-audited-rule-ensemble-v3",
+                score_kind: "RULE_QUALIFICATION_SCORE",
+                probability: null,
+                calibrated: false,
+                primary: {{
+                  status: "QUALIFIED", market: "us", code: "VZ",
+                  qualification_id: "qual_0123456789abcdef01234567",
+                  qualification_score: 75,
+                }},
+                qualified_candidate_count: 1,
+                blocker_codes: [],
+              }},
+              global_decision: {{ action: "NO_VALID_PICK", primary: null }},
+              quote_health_by_market: {{ a_share: {{}}, hk: {{}}, us: {{}} }},
+            }};
+            const ui = (contractVersion, extra) => ({{
+              contract_version: contractVersion,
+              generated_at: generatedAt,
+              snapshot_key: snapshotKey,
+              source_snapshot: source,
+              ...extra,
+            }});
+            const bootstrap = ui("ui-bootstrap-v1", {{
+              production_decision: runtime.production_decision,
+              global_decision: runtime.global_decision,
+              markets: {{}},
+            }});
+            const candidates = ui("ui-candidates-v1", {{ candidates: [], candidate_count: 0 }});
+            const events = ui("ui-events-v1", {{ events: {{ items: [] }} }});
+            const calls = [];
+            const response = (payload) => new Response(JSON.stringify(payload), {{ headers: {{ "content-type": "application/json" }} }});
+            const env = {{ ASSETS: {{ async fetch(input) {{
+              const path = new URL(typeof input === "string" ? input : input.url).pathname;
+              calls.push(path);
+              if (path === "/data/picks/runtime.json") return response(runtime);
+              if (path === "/data/picks/ui-bootstrap.json") return response(bootstrap);
+              if (path === "/data/picks/ui-candidates.json") return response(candidates);
+              if (path === "/data/picks/ui-events.json") return response(events);
+              if (path === "/data/picks/latest.json") throw new Error("full snapshot must not be read");
+              return new Response("missing", {{ status: 404 }});
+            }} }} }};
+
+            const summary = await (await worker.fetch(new Request("https://xuangu.test/api/latest-summary"), env)).json();
+            assert.equal(summary.contract_version, "ui-bootstrap-v1");
+            assert.equal(summary.latest.snapshot_key, snapshotKey);
+            assert.equal(summary.status.snapshot_key, snapshotKey);
+            assert.equal(summary.snapshot_use.snapshot_key, snapshotKey);
+            assert.deepEqual(calls, ["/data/picks/runtime.json", "/data/picks/ui-bootstrap.json"]);
+
+            calls.length = 0;
+            const candidatePayload = await (await worker.fetch(new Request("https://xuangu.test/api/candidates"), env)).json();
+            assert.equal(candidatePayload.contract_version, "ui-candidates-v1");
+            assert.equal(candidatePayload.snapshot_use.snapshot_key, snapshotKey);
+            assert.deepEqual(calls, ["/data/picks/runtime.json", "/data/picks/ui-candidates.json"]);
+
+            calls.length = 0;
+            const eventPayload = await (await worker.fetch(new Request("https://xuangu.test/api/events"), env)).json();
+            assert.equal(eventPayload.contract_version, "ui-events-v1");
+            assert.deepEqual(calls, ["/data/picks/runtime.json", "/data/picks/ui-events.json"]);
+
+            const mismatched = {{ ...bootstrap, snapshot_key: "wrong.json" }};
+            const mismatchEnv = {{ ASSETS: {{ async fetch(input) {{
+              const path = new URL(typeof input === "string" ? input : input.url).pathname;
+              if (path === "/data/picks/runtime.json") return response(runtime);
+              if (path === "/data/picks/ui-bootstrap.json") return response(mismatched);
+              return new Response("missing", {{ status: 404 }});
+            }} }} }};
+            const mismatchResponse = await worker.fetch(new Request("https://xuangu.test/api/latest-summary"), mismatchEnv);
+            assert.equal(mismatchResponse.status, 503);
+            assert.equal((await mismatchResponse.json()).error, "UI_ASSET_IDENTITY_MISMATCH");
+            """
+        )
+
+    def test_cloudflare_scheduled_handler_dispatches_only_whitelisted_crons(self) -> None:
+        run_node(
+            f"""
+            import assert from "node:assert/strict";
+            const workerModule = await import({json.dumps(WORKER_URI)} + "?scheduled-dispatch-contract");
+            const worker = workerModule.default;
+            const requests = [];
+            globalThis.fetch = async (input, init) => {{
+              requests.push({{ input: String(input), init }});
+              return new Response(null, {{ status: 204 }});
+            }};
+            const env = {{ CLOUDFLARE_SCHEDULER_ENABLED: "1", GITHUB_WORKFLOW_DISPATCH_TOKEN: "secret-token" }};
+            const controller = {{
+              cron: "17 0,2,4,7,8,12,15 * * MON-FRI",
+              scheduledTime: Date.parse("2026-08-28T00:17:00Z"),
+            }};
+            await worker.scheduled(controller, env, {{ waitUntil() {{}} }});
+            assert.equal(requests.length, 1);
+            assert.equal(requests[0].input, "https://api.github.com/repos/dzhdingzihang/xuangu/actions/workflows/deploy-worker.yml/dispatches");
+            assert.equal(requests[0].init.headers.authorization, "Bearer secret-token");
+            const body = JSON.parse(requests[0].init.body);
+            assert.equal(body.ref, "main");
+            assert.deepEqual(body.inputs, {{
+              scheduler: "cloudflare-cron-v1",
+              cron: "17 0 * * 1-5",
+              scheduled_at: "2026-08-28T00:17:00.000Z",
+            }});
+            assert.equal(workerModule.canonicalGithubCronForScheduled({{
+              cron: "47 0,2,4,7,8,12,14 * * MON-FRI",
+              scheduledTime: Date.parse("2026-08-28T14:47:00Z"),
+            }}), "47 14 * * 1-5");
+            await assert.rejects(
+              worker.scheduled({{ ...controller, cron: "* * * * *" }}, env, {{ waitUntil() {{}} }}),
+              /not whitelisted/,
+            );
+            await assert.rejects(
+              worker.scheduled({{ ...controller, scheduledTime: Date.parse("2026-08-28T14:17:00Z") }}, env, {{ waitUntil() {{}} }}),
+              /does not match/,
+            );
+            await assert.rejects(
+              worker.scheduled({{ ...controller, scheduledTime: Date.parse("2026-08-29T00:17:00Z") }}, env, {{ waitUntil() {{}} }}),
+              /does not match/,
+            );
+            await assert.rejects(
+              worker.scheduled({{ ...controller, scheduledTime: Date.parse("2026-08-28T00:17:01Z") }}, env, {{ waitUntil() {{}} }}),
+              /does not match/,
+            );
+            await assert.rejects(
+              worker.scheduled(controller, {{ CLOUDFLARE_SCHEDULER_ENABLED: "1" }}, {{ waitUntil() {{}} }}),
+              /GITHUB_WORKFLOW_DISPATCH_TOKEN/,
+            );
+            await worker.scheduled(controller, {{}}, {{ waitUntil() {{}} }});
+            assert.equal(requests.length, 1);
+            """
+        )
+
+    def test_wrangler_uses_two_weekday_crons_within_cloudflare_free_limit(self) -> None:
+        config = json.loads((ROOT / "wrangler.jsonc").read_text(encoding="utf-8"))
+        crons = config["triggers"]["crons"]
+        self.assertEqual(
+            crons,
+            [
+                "17 0,2,4,7,8,12,15 * * MON-FRI",
+                "47 0,2,4,7,8,12,14 * * MON-FRI",
+            ],
+        )
+        self.assertLessEqual(len(crons), 5)
 
     def test_all_v3_rule_qualified_candidates_are_live_allowlisted_and_summarized(self) -> None:
         run_node(
@@ -1200,6 +1370,8 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(payload.meta.performance.schema_version, null);
             assert.equal(payload.meta.shadow_ledger.contract_status, "UNAVAILABLE");
             assert.equal(payload.meta.shadow_ledger.raw_count, undefined);
+            assert.equal(payload.meta.observation_performance.status, "UNAVAILABLE");
+            assert.equal(payload.meta.observation_performance.authorizes_production, false);
 
             const rawResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/history?view=raw&limit=2"),
@@ -1234,6 +1406,19 @@ class WorkerApiContractTests(unittest.TestCase):
                 pending_count: 2, settled_count: 3, excluded_count: 1,
                 conflict_count: 1, included_in_executable_performance: true,
               }},
+              observation_performance: {{
+                schema_version: "model-observation-performance-v1",
+                track: "MODEL_OBSERVATION",
+                status: "PENDING_MATURITY",
+                prediction_count: 31,
+                pending_maturity_count: 17,
+                pending_data_count: 3,
+                settled_count: 11,
+                included_in_shadow_research: false,
+                included_in_executable_performance: false,
+                authorizes_production: false,
+                authorization_status: "DIAGNOSTIC_ONLY_MANUAL_REVIEW_REQUIRED",
+              }},
             }};
             const evaluatedResponse = await worker.fetch(
               new Request("https://xuangu.alixjd.com/api/history?limit=1"), env,
@@ -1246,6 +1431,10 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(evaluatedPayload.meta.shadow_ledger.raw_count, 9);
             assert.equal(evaluatedPayload.meta.shadow_ledger.pending_count, 3);
             assert.equal(evaluatedPayload.meta.executable_ledger.settled_count, 3);
+            assert.equal(evaluatedPayload.meta.observation_performance.pending_maturity_count, 17);
+            assert.equal(evaluatedPayload.meta.observation_performance.pending_data_count, 3);
+            assert.equal(evaluatedPayload.meta.observation_performance.settled_count, 11);
+            assert.equal(evaluatedPayload.meta.observation_performance.authorizes_production, false);
             assert.deepEqual(evaluatedPayload.history_evaluation, manifest.history_evaluation);
             delete manifest.history_evaluation;
 

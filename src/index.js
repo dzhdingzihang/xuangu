@@ -37,11 +37,22 @@ const LIVE_MARKETS = new Set(["a_share", "hk", "us"]);
 const LIVE_CACHE_TTL_MS = 10_000;
 const WORKER_RUNTIME_CONTRACT_VERSION = "worker-runtime-v1";
 const WORKER_LIVE_INDEX_CONTRACT_VERSION = "worker-live-index-v1";
+const WORKER_UI_BOOTSTRAP_CONTRACT_VERSION = "ui-bootstrap-v1";
+const WORKER_UI_CANDIDATES_CONTRACT_VERSION = "ui-candidates-v1";
+const WORKER_UI_EVENTS_CONTRACT_VERSION = "ui-events-v1";
 const WORKER_RUNTIME_PATH = "/data/picks/runtime.json";
 const WORKER_LIVE_INDEX_PATH = "/data/picks/live-index.json";
+const WORKER_UI_BOOTSTRAP_PATH = "/data/picks/ui-bootstrap.json";
+const WORKER_UI_CANDIDATES_PATH = "/data/picks/ui-candidates.json";
+const WORKER_UI_EVENTS_PATH = "/data/picks/ui-events.json";
 const WORKER_LIVE_INDEX_CANDIDATE_LIMIT = 90;
 const WORKER_LIVE_INDEX_BYTE_SIZE_LIMIT = 524_288;
 const MAX_QUALIFIED_SUMMARY_CANDIDATES = 20;
+const GITHUB_WORKFLOW_DISPATCH_URL = "https://api.github.com/repos/dzhdingzihang/xuangu/actions/workflows/deploy-worker.yml/dispatches";
+const CLOUDFLARE_SCHEDULED_CRONS = new Map([
+  ["17 0,2,4,7,8,12,15 * * MON-FRI", { minute: 17, hours: new Set([0, 2, 4, 7, 8, 12, 15]) }],
+  ["47 0,2,4,7,8,12,14 * * MON-FRI", { minute: 47, hours: new Set([0, 2, 4, 7, 8, 12, 14]) }],
+]);
 const CURRENT_PRODUCTION_MODEL_VERSION = "smart-selector-2026-08-26.2-dual-track-rule";
 const PRODUCTION_RULE_V3_ACTION_BASIS = "dual_track_candidate_qualification_v3";
 const PRODUCTION_RULE_V3_MODEL_ID = "ten-day-audited-rule-ensemble-v3";
@@ -1037,6 +1048,95 @@ async function latestLiveIndex(env) {
   throw new Error("worker live index asset is unavailable");
 }
 
+function sameSourceSnapshot(left, right) {
+  return Boolean(
+    validSourceSnapshotBinding(left)
+    && validSourceSnapshotBinding(right)
+    && left.source_snapshot.sha256 === right.source_snapshot.sha256
+    && left.source_snapshot.byte_size === right.source_snapshot.byte_size
+  );
+}
+
+function sameSnapshotIdentity(runtime, asset) {
+  return Boolean(
+    runtime
+    && asset
+    && runtime.snapshot_key === asset.snapshot_key
+    && runtime.generated_at === asset.generated_at
+    && sameSourceSnapshot(runtime, asset)
+  );
+}
+
+async function latestUiAsset(env, path, contractVersion, runtime) {
+  const asset = await readOptionalAssetJson(env, path);
+  if (!asset) {
+    const error = new Error("worker UI asset is unavailable");
+    error.code = "UI_ASSET_UNAVAILABLE";
+    throw error;
+  }
+  if (!validRuntimeIdentity(asset, contractVersion) || !validSourceSnapshotBinding(asset)) {
+    const error = new Error("worker UI asset contract is invalid");
+    error.code = "UI_ASSET_CONTRACT_INVALID";
+    throw error;
+  }
+  if (!sameSnapshotIdentity(runtime, asset)) {
+    const error = new Error("worker UI asset identity does not match runtime");
+    error.code = "UI_ASSET_IDENTITY_MISMATCH";
+    throw error;
+  }
+  return asset;
+}
+
+export function snapshotUseContract(runtime, current = new Date()) {
+  const freshnessInput = runtime?.automation?.scheduled_slot || runtime?.generated_at || null;
+  const freshness = snapshotFreshness(freshnessInput, current);
+  const allowed = freshness.freshness_state === "fresh";
+  const evaluated = current instanceof Date ? current : new Date(current);
+  return {
+    contract_version: "snapshot-use-v1",
+    mode: allowed ? "CURRENT_RESEARCH" : "HISTORICAL_RESEARCH_ONLY",
+    freshness_state: freshness.freshness_state,
+    current_decision_allowed: allowed,
+    execution_review_allowed: Boolean(
+      allowed && runtime?.global_decision?.action === "REVIEW_EXECUTABLE_PICK"
+    ),
+    blocker_codes: allowed ? [] : ["SNAPSHOT_NOT_FRESH"],
+    evaluated_at: Number.isNaN(evaluated.getTime()) ? null : evaluated.toISOString(),
+    snapshot_key: runtime?.snapshot_key || null,
+    source_snapshot_sha256: runtime?.source_snapshot?.sha256 || null,
+    source_snapshot_byte_size: Number.isInteger(runtime?.source_snapshot?.byte_size)
+      ? runtime.source_snapshot.byte_size
+      : null,
+  };
+}
+
+function effectiveDecisions(runtime, snapshotUse) {
+  const productionAction = runtime?.production_decision?.action || "NO_QUALIFIED_PICK";
+  const globalAction = runtime?.global_decision?.action || "NO_VALID_PICK";
+  return {
+    production_action: snapshotUse.current_decision_allowed ? productionAction : "HISTORICAL_ONLY",
+    global_action: snapshotUse.current_decision_allowed ? globalAction : "NO_VALID_PICK",
+    current_qualified_candidate_count: snapshotUse.current_decision_allowed
+      && productionAction === "QUALIFIED_PICK"
+      ? Number(runtime?.production_decision?.qualified_candidate_count || 0)
+      : 0,
+    historical_qualified_candidate_count: productionAction === "QUALIFIED_PICK"
+      ? Number(runtime?.production_decision?.qualified_candidate_count || 0)
+      : 0,
+  };
+}
+
+function uiAssetFailure(error) {
+  const code = String(error?.code || "UI_ASSET_UNAVAILABLE");
+  return json({
+    ok: false,
+    error: code,
+    message: code === "UI_ASSET_IDENTITY_MISMATCH"
+      ? "UI 数据与当前运行快照身份不一致，已停止展示当前候选"
+      : "轻量页面数据暂时不可用",
+  }, 503);
+}
+
 function summarizeDecision(decision) {
   const primary = decision.primary || decision.blocked_candidate;
   const summary = {
@@ -1340,6 +1440,19 @@ function emptyLedger(track, includedInExecutablePerformance) {
   };
 }
 
+function emptyObservationPerformance() {
+  return {
+    schema_version: null,
+    track: "MODEL_OBSERVATION",
+    status: "UNAVAILABLE",
+    reason: "OBSERVATION_PERFORMANCE_CONTRACT_UNAVAILABLE",
+    included_in_shadow_research: false,
+    included_in_executable_performance: false,
+    authorizes_production: false,
+    authorization_status: "DIAGNOSTIC_CONTRACT_UNAVAILABLE",
+  };
+}
+
 function historyMetadata(rows, days, view, returnedCount, evaluation = null) {
   const contractDays = days.filter((row) => historyKind(row) === "global_10d_v1");
   const legacyDays = days.filter((row) => historyKind(row) === "legacy_snapshot");
@@ -1402,8 +1515,10 @@ function historyMetadata(rows, days, view, returnedCount, evaluation = null) {
         status: "UNAVAILABLE",
         included_in_shadow_research: false,
         included_in_executable_performance: false,
-        settlement_status: "NOT_IMPLEMENTED",
       },
+    observation_performance: evaluation?.observation_performance && typeof evaluation.observation_performance === "object"
+      ? evaluation.observation_performance
+      : emptyObservationPerformance(),
     returned_count: returnedCount,
     has_more: selectedCount > returnedCount,
   };
@@ -1526,6 +1641,7 @@ function snapshotLiveContract(snapshot, market, code, current = new Date()) {
     ? quote.volume
     : null;
   const snapshotState = snapshotFreshness(snapshot.generated_at, current).freshness_state;
+  const snapshotUse = snapshotUseContract(snapshot, current);
 
   return {
     contract_version: "live-quote-v1",
@@ -1572,9 +1688,72 @@ function snapshotLiveContract(snapshot, market, code, current = new Date()) {
     snapshot_as_of: snapshot.generated_at || null,
     snapshot_generated_at: snapshot.generated_at || null,
     snapshot_key: snapshot.snapshot_key || null,
+    snapshot_use: snapshotUse,
+    execution_review_allowed: snapshotUse.execution_review_allowed,
+    execution_blocker_codes: snapshotUse.blocker_codes,
     next_refresh: nextScheduledRefresh(current),
     cache_ttl_seconds: LIVE_CACHE_TTL_MS / 1000,
     kline: Array.isArray(candidate.kline) ? candidate.kline : [],
+  };
+}
+
+function buildStatusPayload(latest, current = new Date()) {
+  const productionDecision = latest ? productionDecisionForRuntime(latest) : null;
+  const currentTime = nowCN();
+  const snapshotUse = snapshotUseContract(latest, current);
+  const freshness = snapshotFreshness(
+    latest?.automation?.scheduled_slot || latest?.generated_at || null,
+    current,
+  );
+  const sourceStateByMarket = Object.fromEntries(["a_share", "hk", "us"].map((market) => {
+    const section = latest?.markets?.[market] || {};
+    const health = latest?.quote_health_by_market?.[market] || section.quote_health || {};
+    return [market, {
+      status: health.status || "unknown",
+      quote_coverage: Number.isFinite(Number(health.quote_coverage)) ? Number(health.quote_coverage) : null,
+      source_session: health.freshness_reference_session || null,
+      source_as_of: health.source_as_of || health.observed_at || null,
+    }];
+  }));
+  return {
+    ok: true,
+    time: currentTime,
+    platform: "cloudflare-workers",
+    snapshot_generation: "github-actions",
+    data_mode: "scheduled_snapshot",
+    quote_delivery_mode: "scheduled_snapshot",
+    publication_state: freshness.freshness_state === "fresh" ? "BATCH_PUBLISHED" : freshness.freshness_state.toUpperCase(),
+    source_state_by_market: sourceStateByMarket,
+    device_dependency: false,
+    schedule_time_zone: SHANGHAI_TIME_ZONE,
+    schedule_primary_checkpoints: WEEKDAY_CHECKPOINTS.map(([hour, minute]) => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`),
+    schedule_fallback_checkpoints: FALLBACK_CHECKPOINTS.map(([hour, minute]) => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`),
+    recompute_supported: false,
+    has_latest: Boolean(latest),
+    latest_path: latest ? "/data/picks/latest.json" : null,
+    schema_version: latest?.schema_version || null,
+    selector_mode: latest?.selector_mode || null,
+    model_version: latest?.model_version || null,
+    weights_version: latest?.weights_version || null,
+    universe_version: latest?.universe_version || null,
+    generated_at: latest?.generated_at || null,
+    snapshot_as_of: latest?.generated_at || null,
+    next_refresh: nextScheduledRefresh(current),
+    snapshot_key: latest?.snapshot_key || null,
+    runtime_contract_version: latest?.contract_version === WORKER_RUNTIME_CONTRACT_VERSION
+      ? latest.contract_version
+      : null,
+    source_snapshot_sha256: latest?.source_snapshot?.sha256 || null,
+    source_snapshot_byte_size: Number.isInteger(latest?.source_snapshot?.byte_size)
+      ? latest.source_snapshot.byte_size
+      : null,
+    production_action: productionDecision?.action || "NO_QUALIFIED_PICK",
+    qualification_id: productionDecision?.primary?.qualification_id || null,
+    calibrated_action: latest?.global_decision?.action || latest?.calibrated_action || "NO_VALID_PICK",
+    prediction_id: latest?.global_decision?.primary?.prediction_id || latest?.prediction_id || null,
+    snapshot_use: snapshotUse,
+    effective_decisions: effectiveDecisions(latest, snapshotUse),
+    ...freshness,
   };
 }
 
@@ -1582,58 +1761,7 @@ async function handleApi(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/api/status") {
     const latest = await latestRuntime(env);
-    const productionDecision = latest ? productionDecisionForRuntime(latest) : null;
-    const currentTime = nowCN();
-    const current = new Date(currentTime);
-    const freshness = snapshotFreshness(latest ? latest.generated_at : null, current);
-    const sourceStateByMarket = Object.fromEntries(["a_share", "hk", "us"].map((market) => {
-      const section = latest?.markets?.[market] || {};
-      const health = latest?.quote_health_by_market?.[market] || section.quote_health || {};
-      return [market, {
-        status: health.status || "unknown",
-        quote_coverage: Number.isFinite(Number(health.quote_coverage)) ? Number(health.quote_coverage) : null,
-        source_session: health.freshness_reference_session || null,
-        source_as_of: health.source_as_of || health.observed_at || null,
-      }];
-    }));
-    return json({
-      ok: true,
-      time: currentTime,
-      platform: "cloudflare-workers",
-      snapshot_generation: "github-actions",
-      data_mode: "scheduled_snapshot",
-      quote_delivery_mode: "scheduled_snapshot",
-      publication_state: freshness.freshness_state === "fresh" ? "BATCH_PUBLISHED" : freshness.freshness_state.toUpperCase(),
-      source_state_by_market: sourceStateByMarket,
-      device_dependency: false,
-      schedule_time_zone: SHANGHAI_TIME_ZONE,
-      schedule_primary_checkpoints: WEEKDAY_CHECKPOINTS.map(([hour, minute]) => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`),
-      schedule_fallback_checkpoints: FALLBACK_CHECKPOINTS.map(([hour, minute]) => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`),
-      recompute_supported: false,
-      has_latest: Boolean(latest),
-      latest_path: latest ? "/data/picks/latest.json" : null,
-      schema_version: latest ? latest.schema_version || null : null,
-      selector_mode: latest ? latest.selector_mode || null : null,
-      model_version: latest ? latest.model_version || null : null,
-      weights_version: latest ? latest.weights_version || null : null,
-      universe_version: latest ? latest.universe_version || null : null,
-      generated_at: latest ? latest.generated_at || null : null,
-      snapshot_as_of: latest ? latest.generated_at || null : null,
-      next_refresh: nextScheduledRefresh(current),
-      snapshot_key: latest ? latest.snapshot_key || null : null,
-      runtime_contract_version: latest?.contract_version === WORKER_RUNTIME_CONTRACT_VERSION
-        ? latest.contract_version
-        : null,
-      source_snapshot_sha256: latest?.source_snapshot?.sha256 || null,
-      source_snapshot_byte_size: Number.isInteger(latest?.source_snapshot?.byte_size)
-        ? latest.source_snapshot.byte_size
-        : null,
-      production_action: productionDecision?.action || "NO_QUALIFIED_PICK",
-      qualification_id: productionDecision?.primary?.qualification_id || null,
-      calibrated_action: latest?.global_decision?.action || latest?.calibrated_action || "NO_VALID_PICK",
-      prediction_id: latest?.global_decision?.primary?.prediction_id || latest?.prediction_id || null,
-      ...freshness,
-    });
+    return json(buildStatusPayload(latest, new Date()));
   }
 
   if (url.pathname === "/api/latest") {
@@ -1643,15 +1771,57 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === "/api/latest-summary") {
-    const latest = await latestRuntime(env);
-    if (!latest) return json({ error: "暂无历史决策缓存" }, 404);
-    return json({
-      ok: true,
-      time: nowCN(),
-      latest: latest.contract_version === WORKER_RUNTIME_CONTRACT_VERSION
-        ? latest.latest_summary || null
-        : summarizePick(latest),
-    });
+    let runtime;
+    try {
+      runtime = await latestRuntime(env);
+      const latest = await latestUiAsset(
+        env,
+        WORKER_UI_BOOTSTRAP_PATH,
+        WORKER_UI_BOOTSTRAP_CONTRACT_VERSION,
+        runtime,
+      );
+      const current = new Date();
+      const status = buildStatusPayload(runtime, current);
+      const snapshotUse = status.snapshot_use;
+      const effective = status.effective_decisions;
+      return json({
+        contract_version: WORKER_UI_BOOTSTRAP_CONTRACT_VERSION,
+        ok: true,
+        time: status.time,
+        status,
+        snapshot_use: snapshotUse,
+        effective_decisions: effective,
+        latest: { ...latest, snapshot_use: snapshotUse, effective_decisions: effective },
+      });
+    } catch (error) {
+      if (error?.code === "UI_ASSET_UNAVAILABLE" && legacyFullSnapshotFallbackEnabled(env) && runtime) {
+        return json({ ok: true, time: nowCN(), latest: summarizePick(runtime) });
+      }
+      if (String(error?.code || "").startsWith("UI_ASSET_")) return uiAssetFailure(error);
+      throw error;
+    }
+  }
+
+  if (url.pathname === "/api/candidates" || url.pathname === "/api/events") {
+    try {
+      const runtime = await latestRuntime(env);
+      const candidates = url.pathname === "/api/candidates";
+      const asset = await latestUiAsset(
+        env,
+        candidates ? WORKER_UI_CANDIDATES_PATH : WORKER_UI_EVENTS_PATH,
+        candidates ? WORKER_UI_CANDIDATES_CONTRACT_VERSION : WORKER_UI_EVENTS_CONTRACT_VERSION,
+        runtime,
+      );
+      const snapshotUse = snapshotUseContract(runtime, new Date());
+      return json({
+        ...asset,
+        snapshot_use: snapshotUse,
+        effective_decisions: effectiveDecisions(runtime, snapshotUse),
+      });
+    } catch (error) {
+      if (String(error?.code || "").startsWith("UI_ASSET_")) return uiAssetFailure(error);
+      throw error;
+    }
   }
 
   if (url.pathname === "/api/history") {
@@ -1801,6 +1971,64 @@ async function handleApi(request, env) {
   return json({ error: "Not found" }, 404);
 }
 
+export function canonicalGithubCronForScheduled(controller) {
+  const cron = String(controller?.cron || "");
+  const schedule = CLOUDFLARE_SCHEDULED_CRONS.get(cron);
+  if (!schedule) {
+    throw new Error(`scheduled cron is not whitelisted: ${cron || "missing"}`);
+  }
+  const scheduledTime = Number(controller?.scheduledTime);
+  const scheduledAt = new Date(scheduledTime);
+  if (!Number.isFinite(scheduledTime) || Number.isNaN(scheduledAt.getTime())) {
+    throw new Error("scheduledTime is invalid");
+  }
+  const weekday = scheduledAt.getUTCDay();
+  const hour = scheduledAt.getUTCHours();
+  const minute = scheduledAt.getUTCMinutes();
+  if (
+    weekday < 1 || weekday > 5
+    || minute !== schedule.minute
+    || !schedule.hours.has(hour)
+    || scheduledAt.getUTCSeconds() !== 0
+    || scheduledAt.getUTCMilliseconds() !== 0
+  ) {
+    throw new Error(`scheduledTime does not match whitelisted cron: ${scheduledAt.toISOString()}`);
+  }
+  return `${minute} ${hour} * * 1-5`;
+}
+
+async function dispatchScheduledWorkflow(controller, env) {
+  if (String(env?.CLOUDFLARE_SCHEDULER_ENABLED || "") !== "1") {
+    return { dispatched: false, reason: "SCHEDULER_DISABLED" };
+  }
+  const cron = canonicalGithubCronForScheduled(controller);
+  const token = String(env?.GITHUB_WORKFLOW_DISPATCH_TOKEN || "");
+  if (!token) throw new Error("GITHUB_WORKFLOW_DISPATCH_TOKEN is required");
+  const scheduledAt = new Date(Number(controller.scheduledTime));
+  const response = await fetch(GITHUB_WORKFLOW_DISPATCH_URL, {
+    method: "POST",
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "user-agent": "xuangu-cloudflare-scheduler",
+      "x-github-api-version": "2022-11-28",
+    },
+    body: JSON.stringify({
+      ref: "main",
+      inputs: {
+        scheduler: "cloudflare-cron-v1",
+        cron,
+        scheduled_at: scheduledAt.toISOString(),
+      },
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`GitHub workflow dispatch failed with status ${response.status}`);
+  }
+  return { dispatched: true };
+}
+
 export default {
   async fetch(request, env) {
     const redirect = httpsRedirect(request, env);
@@ -1829,5 +2057,8 @@ export default {
       }
     }
     return withSecurityHeaders(response);
+  },
+  async scheduled(controller, env) {
+    return dispatchScheduledWorkflow(controller, env);
   },
 };

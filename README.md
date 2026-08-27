@@ -12,8 +12,9 @@ XuanGu 是一个面向未来约两周（10 个交易日）的 A 股、港股、�
 - **A 股 300 只完整深评**：全部有效行情候选先完成基础评分和技术评分；技术 K 线完整、满足交易性过滤的候选最多 300 只继续运行 Legacy、V2、双低、Chan/CZSC、Serenity、UZI 与评审团深研，不再把第 97–300 只固定挡在深度评分之外。
 - **双层生产输出**：`production_decision` V3 在共享安全门禁后分别运行“事件催化”和“质量趋势”两条规则资格通道，产出 `QUALIFIED_PICK / NO_QUALIFIED_PICK`；`global_decision` 继续负责独立的严格校准概率。规则资格分不等于上涨概率，Shadow 模型也不会因为规则轨有候选而被授权。
 - **纯云端自动更新**：GitHub Actions 在工作日多时点生成并校验不可变快照，Cloudflare Worker 负责发布；每日末次检查点、规则合格批次或正式可执行批次进入长期归档，不依赖 Render、OpenD 或个人电脑常开。
+- **时效失败关闭**：已发布结论与“现在能否使用”分开。快照过期时仍保留历史规则合格记录，但运行合同切换为 `HISTORICAL_RESEARCH_ONLY`、`current_decision_allowed=false`，当前可执行候选强制为 0。
 
-页面提供今日答案、候选池、事件证据、历史检验、模型逻辑和数据健康六个 Tab。所有数字均来自已发布快照；浏览器会用快照内的冻结规则输入复算资格门禁以校验合同，但只展示服务端已经发布且校验一致的结果，不会自行补选或把计划价冒充实时行情。
+页面提供今日答案、候选池、事件证据、历史检验、模型逻辑和数据健康六个 Tab。首屏只读与快照身份绑定的轻量摘要，候选、事件和历史数据在进入对应 Tab 时才按需加载。所有数字均来自已发布快照；浏览器只展示服务端已经发布且校验一致的结果，不会自行补选或把计划价冒充实时行情。
 
 > 本项目仅用于研究辅助，不构成投资建议。任何预估区间、分数和历史结果都不是收益承诺。
 
@@ -220,9 +221,9 @@ V2 根据 `trend_risk_on / range / risk_off / high_vol / unknown` 使用可解�
 
 - 正式轨写入 `data/outcomes/executable/<prediction_id>.json`，`track=EXECUTABLE_MODEL`。只有完整、已校准且通过严格门禁的 `global_decision.primary` 才能登记；所有真实发布的可执行预测按稳定 `prediction_id` 去重，`NO_VALID_PICK`、Legacy 和研究优先项不会进入正式收益分母。
 - 研究轨继续写入 `data/outcomes/<prediction_id>.json`，`track=SHADOW_RESEARCH`。当 Shadow 模型通过本轮研究排序资格时，账本固化技术模型的 `prediction_id`、影子概率、净效用、尾部风险、成本、市场级产物哈希和训练截止日；未通过时不把不合格概率错记为研究样本。研究账本只在每日末次 `22:47` 主检查点登记一条 `PENDING`；`23:17` 健康补跑在入场前可更新同槽记录，已结算记录永不改写，手动运维刷新不登记研究样本。
-- 完整观察轨写入 `data/outcomes/observations/obscohort_<id>.json`，`track=MODEL_OBSERVATION`。每日 `22:47` 固化原概率模型的全部 `shadow_predictions`，不以 `rank_eligible`、质量门槛或净效用正负作为准入条件；`23:17` 同槽补跑作为 revision 保留。这条轨解决“被拒绝模型永远积累不到观察样本”的问题，但明确标记 `included_in_shadow_research=false` 与 `included_in_executable_performance=false`。当前只冻结预测，结果结算仍为 `NOT_IMPLEMENTED`，页面不会把它包装成胜率。
+- 完整观察轨写入 `data/outcomes/observations/obscohort_<id>.json`，`track=MODEL_OBSERVATION`。每日 `22:47` 固化原概率模型的全部 `shadow_predictions`，不以 `rank_eligible`、质量门槛或净效用正负作为准入条件；`23:17` 同槽补跑作为 revision 保留。每个 canonical cohort 的结果独立写入 `data/outcomes/observation-settlements/<cohort_id>.json`，并明确标记 `included_in_shadow_research=false`、`included_in_executable_performance=false` 和 `authorizes_production=false`。
 
-正式轨与研究轨共同遵循：
+三条轨的结算合同共同遵循：
 
 - 入场采用下一交易日开盘，退出采用第 10 个交易日收盘；
 - 合同同时固化交易所日历给出的真实开盘、收盘时刻；不会用 UTC 午夜伪装成交时间；
@@ -238,6 +239,8 @@ V2 根据 `trend_risk_on / range / risk_off / high_vol / unknown` 使用可解�
 每条正式历史记录还会发布 `formal_sample_status` 与 `outcome_validation`。只有后端确认 `SETTLED_VALID + VALID` 的记录才能显示绿色“可执行·已结算”；仅有原始 `SETTLED`、身份冲突、算术错误或时点错误都不会进入正式指标，也不会在页面被包装成成功结算。
 
 Shadow 的 PENDING/SETTLED、排除和冲突数量独立展示。旧的手动或本地调试 ledger 若不符合当前采样合同，会保留文件但标记为排除，不计入有效研究样本。
+
+观察结算有三种逐股状态：预测窗口未结束时为 `PENDING_MATURITY`；已成熟但缺少完整复权开收盘价时为 `PENDING_DATA`；只有身份、时间窗口、调整行情和收益算术全部通过合同校验才进入 `SETTLED`。独立 Workflow 每天北京时间 `06:30` 尝试结算；新产物由下一次选股构建发布为观察诊断。诊断可以计算 Brier、AUC、ECE、Rank IC 和分位收益，但只属于 `MODEL_OBSERVATION`；它不进入正式收益分母，也不能自动授权生产概率模型。生产授权仍需要预注册门槛、足够的独立前瞻 cohort，以及未参与调参的留出样本；代码部署本身不会强制晋级。
 
 ## 云端定时快照与数据源
 
@@ -270,12 +273,13 @@ GitHub Actions（定时 / 手动）
   → 按归档策略将每日检查点、规则合格或正式可执行快照与 ledger 写回 main
 
 Cloudflare Worker（请求时）
-  → 完整快照以静态流式响应交给页面与审计接口
-  → 状态 API 只读已验证摘要，`/api/live` 只读有界候选行情索引
+  → 首屏只返回身份绑定的 `ui-bootstrap` 轻量摘要
+  → 候选与事件 API 按 Tab 懒加载有界资产
+  → 完整快照只供审计、不可变历史与显式调用
   → 不在请求时获取行情，也不重算选股
 ```
 
-Python 选股程序不会在 Worker 或浏览器请求中重算。页面只读 `/api/latest` 与历史快照；刷新页面不改变 Legacy、V2、双低分数、全局排序或门禁结论。`GET /api/pick?force=1` 固定返回 `409 RECOMPUTE_NOT_SUPPORTED`，需要重算时应手动触发 GitHub Actions。
+Python 选股程序不会在 Worker 或浏览器请求中重算。页面初始化只读 `/api/latest-summary`；打开候选、事件或历史 Tab 后才读取对应轻量 API。刷新页面不改变 Legacy、V2、双低分数、全局排序或门禁结论。`GET /api/pick?force=1` 固定返回 `409 RECOMPUTE_NOT_SUPPORTED`，需要重算时应手动触发 GitHub Actions。
 
 ## 数据更新时序与可靠性
 
@@ -286,13 +290,15 @@ Python 选股程序不会在 Worker 或浏览器请求中重算。页面只读 `
 健康补跑：08:47 / 10:47 / 12:47 / 15:47 / 16:47 / 20:47 / 23:17
 ```
 
-七个主跑分别覆盖盘前与隔夜收盘、A/H 早盘、亚洲午间、A 股收盘、港股收盘、美股盘前和美股开盘。`22:47` 兼顾美股夏令时与冬令时，都会落在常规交易开始之后。每个主跑后 30 分钟有一次健康补跑。每个 cron 保持独立表达式，快照同时记录主检查点和实际 cron 调用点；发布前按“调用点 + 生成时间”做单调校验，因此 GitHub 排队不会再让迟到的旧任务覆盖较新补跑。`schedule_gate.py` 只用线上完整 `/api/latest` 作为“已成功发布”证据：对应主跑已发布健康快照时跳过补跑；线上不可达、主跑缺失/失败，或行情/候选池处于可恢复降级时，补跑继续尝试。门禁会硬校验 A/港/美实际召回是否分别达到 `300 / 200 / 300`；任一市场差 1 只也不会把该快照当作健康主跑。港美还必须具备本轮动态来源、完整请求页、最低发现宽度、唯一 manifest，以及行情与完整深评至少 98%；使用上次动态池缓存也会保持降级并继续补跑。同时校验 A 股基础评分覆盖全部有效行情、技术评分至少完成 98%，以及最多 300 只深研至少完成 98%（满池即至少 294 只）。仓库里的 `latest.json` 不能单独抑制补跑，因为它不证明 Cloudflare 已经切换成功。
+七个主跑分别覆盖盘前与隔夜收盘、A/H 早盘、亚洲午间、A 股收盘、港股收盘、美股盘前和美股开盘。`22:47` 兼顾美股夏令时与冬令时，都会落在常规交易开始之后。每个主跑后 30 分钟有一次健康补跑。每个 cron 保持独立表达式，快照同时记录主检查点和实际 cron 调用点；发布前按“调用点 + 生成时间”做单调校验，因此 GitHub 排队不会再让迟到的旧任务覆盖较新补跑。普通延迟仍在原调用点的 4 小时窗口内处理；超过该窗口时进入 `late_cron_recovery`，改为生成“当前时刻之前最新的合法检查点”，且有效恢复调用点最多 12 小时。快照同时保留 `source_invocation_slot`、`scheduler_delay_seconds` 和实际 `scheduled_invocation_slot`，因此追赶任务不会伪装成原来的过时快照。`schedule_gate.py` 只用线上完整 `/api/latest` 作为“已成功发布”证据：对应主跑已发布健康快照时跳过补跑；线上不可达、主跑缺失/失败，或行情/候选池处于可恢复降级时，补跑继续尝试。门禁会硬校验 A/港/美实际召回是否分别达到 `300 / 200 / 300`；任一市场差 1 只也不会把该快照当作健康主跑。港美还必须具备本轮动态来源、完整请求页、最低发现宽度、唯一 manifest，以及行情与完整深评至少 98%；使用上次动态池缓存也会保持降级并继续补跑。同时校验 A 股基础评分覆盖全部有效行情、技术评分至少完成 98%，以及最多 300 只深研至少完成 98%（满池即至少 294 只）。仓库里的 `latest.json` 不能单独抑制补跑，因为它不证明 Cloudflare 已经切换成功。
+
+观察轨结算与选股发布分离：`settle-observations.yml` 每天北京时间 `06:30` 运行，也可手动触发。它只写入并提交 observation settlement JSON，不构建或部署 Worker；未成熟预测正常保持 `PENDING_MATURITY` 并成功结束，不会因“还没到第 10 个交易日”让后续部署失败。对已成熟且未结算的去重标的，每次发布尝试只做单轮行情请求（`--retries 0`）；行情源超时或缺数不会丢弃本轮结果，而是及时固化为 `PENDING_DATA` 等待下次运行。Workflow 整体有 40 分钟硬超时，为安装、单轮行情请求和最多 3 次有界 Git 发布冲突处理留出空间。只有合同冲突、无法读取的账本或非法结算结果会让该 Workflow 标红。
 
 一次生成与 outcome 结算各最多尝试 3 次。部署前执行单元测试、JavaScript 语法检查、snapshot schema 校验和 immutable 快照一致性检查；部署后先轻量轮询 `generated_at` / `snapshot_key` 直到新版本收敛，再验证完整快照摘要、历史、不可变快照、页面合同和所有可见候选行情，避免在边缘版本传播期每轮重复执行整套探针。生成、测试或部署前校验失败时不会切换生产版。部署前还会记录当前唯一 100% 生效的 Cloudflare Worker Version 和快照摘要；若部署后完整验收失败，Workflow 会标红并自动回滚到该精确版本，再核对旧快照身份与摘要。这是自动恢复，不是零暴露发布：新版在部署后验证窗口内可能短暂在线；回滚本身若失败也会继续标红，需要人工处理。
 
-每次定时或手动生成都会上传一个保留 30 天的 GitHub Actions 恢复包。为避免约 4–5 MiB 的全量快照在 Git 和 Worker 中无限增长，长期 Git 归档保存每日 `22:47` 检查点、产生生产规则合格候选的批次，以及确实产生正式可执行候选的批次；Worker 只携带最近 30 个决策日的完整交互快照。更早的已归档决策日继续保留轻量摘要和三轨账本，因此历史统计仍可审计，但页面不会再下载其完整候选明细。归档冲突重试采用单调合并：较旧任务可以补充自己的不可变快照，但不能覆盖较新的 `latest.json`、把 `SETTLED` 降级成 `PENDING`，或丢失观察轨 revision。被发布顺序门禁拦下的倒序任务只保留 Actions 恢复包，不能借归档提交间接发布。
+每次定时或手动生成都会上传一个保留 30 天的 GitHub Actions 恢复包。为避免数 MiB、宽池批次可接近 10 MiB 的全量快照在 Git 和 Worker 中无限增长，长期 Git 归档保存每日 `22:47` 检查点、产生生产规则合格候选的批次，以及确实产生正式可执行候选的批次；Worker 只携带最近 30 个决策日的完整交互快照。更早的已归档决策日继续保留轻量摘要和三轨账本，因此历史统计仍可审计，但页面不会再下载其完整候选明细。归档冲突重试采用单调合并：较旧任务可以补充自己的不可变快照，但不能覆盖较新的 `latest.json`、把 `SETTLED` 降级成 `PENDING`，或丢失观察轨 revision。被发布顺序门禁拦下的倒序任务只保留 Actions 恢复包，不能借归档提交间接发布。
 
-浏览器每 5 分钟读取一次 `/api/status`，只有 `generated_at` 变化才重载快照和历史。它不会轮询盘中行情，也不在前端重算评分与排序。快照 `fresh` 只表示它满足发布时效合同，不等于所有公开数据源绝对完整。
+浏览器每 5 分钟读取一次 `/api/status`，并在服务端发布的 `next_refresh` 检查点主动复核；只有 `snapshot_key` 变化才重读 `/api/latest-summary`。当前未打开的候选、事件和历史 Tab 不会被顺带请求；按需接口返回更新的时效门禁时，浏览器会按服务端 `evaluated_at` 单调收紧状态，不等待下一轮定时轮询。它不会轮询盘中行情，也不在前端重算评分与排序。快照 `fresh` 只表示它满足发布时效合同，不等于所有公开数据源绝对完整。
 
 GitHub scheduled workflow 不是精确计时器，可能因平台排队延后。公开数据源也没有 SLA，因此系统提供的是“目标检查点 + 健康补跑 + 可观测降级”，不是 100% 准点保证。交易所休市、任务排队或数据源失败时，`next_refresh` 也只是下一个计划检查点（含健康补跑）。
 
@@ -310,13 +316,15 @@ GitHub scheduled workflow 不是精确计时器，可能因平台排队延后。
 | 指定历史日期不存在 | `/api/pick?date=` 返回 `404 PICK_NOT_FOUND`，不会静默回退 latest |
 | 日期格式非法 | 返回 `400 INVALID_DATE` |
 | 历史 manifest 不可用 | 返回 `503 HISTORY_MANIFEST_UNAVAILABLE`，页面不显示伪 0 样本 |
-| 快照过期 | 页面标记 stale，global 门禁阻止升级；旧不可变档案仍可审计 |
+| 快照过期 | `snapshot_use.mode=HISTORICAL_RESEARCH_ONLY`、`current_decision_allowed=false`、`blocker_codes=[SNAPSHOT_NOT_FRESH]`；当前合格候选强制为 0，旧不可变档案和当时的历史合格结论仍可审计 |
 
 ## API 契约
 
 ```text
 GET /api/status
 GET /api/latest-summary
+GET /api/candidates
+GET /api/events
 GET /api/latest
 GET /api/history?view=daily&limit=120
 GET /api/history?view=raw&limit=120
@@ -330,8 +338,9 @@ GET /api/live?market=us&code=PWR
 
 契约要点：
 
-- `/api/status` 从与完整快照同批生成的轻量运行摘要返回快照版本、新鲜度、`snapshot_as_of`、`next_refresh`、主跑/健康补跑检查点、`data_mode=scheduled_snapshot` 和 `device_dependency=false`；它不在请求内重放全部候选计算，并公开运行索引合同及源快照摘要供部署验收。
-- `/api/latest` 流式返回完整快照，避免 Worker 内再次解析与序列化；`/api/latest-summary` 返回轻量摘要。
+- `/api/status` 从与完整快照同批生成的轻量运行摘要返回快照版本、新鲜度、`snapshot_as_of`、`next_refresh`、主跑/健康补跑检查点、`data_mode=scheduled_snapshot` 和 `device_dependency=false`；它同时返回 `snapshot_use`，快照过期时使用 `SNAPSHOT_NOT_FRESH` 失败关闭。
+- `/api/latest-summary`、`/api/candidates` 和 `/api/events` 分别读取有界的 `ui-bootstrap`、`ui-candidates` 和 `ui-events` 资产。三者必须具有相同 `snapshot_key`、源快照 SHA-256 和字节数；身份不一致时返回 503，不回退加载数 MB 完整快照。首屏摘要不超过 192 KiB，候选不超过 768 KiB，事件不超过 512 KiB。
+- `/api/latest` 流式返回完整快照，供审计和兼容客户端使用；它不是首屏加载依赖。
 - `/api/history` 默认 `view=daily`，按 `target_date` 合并盘中重复运行，同类保留最后一次；`view=raw` 返回不可变原始运行。`meta.performance`、`meta.executable_ledger` 和 `meta.shadow_ledger` 始终基于完整账本计算，不受页面 limit 或 daily 合并影响。
 - `/api/pick?snapshot=` 是最精确的历史寻址方式；同一天可能有多次快照。
 - `/api/pick?date=` 只返回该日期匹配项；非法日期 400、不存在 404，绝不静默返回 latest。
@@ -384,6 +393,7 @@ npm run dev
 ### GitHub / Cloudflare Secrets
 
 - `CLOUDFLARE_API_TOKEN`：Worker 部署权限。
+- Cloudflare Cron 备用调度默认关闭，配置为 `CLOUDFLARE_SCHEDULER_ENABLED=0`。其两条 `MON-FRI` Cron Trigger 覆盖 14 个计划时点，再由 `scheduledTime` 严格映射为 GitHub 的单点 cron，既避免星期数字语义差异，也不超过 Free 账户的 Trigger 数量上限。在开启前，必须为仓库 `dzhdingzihang/xuangu` 单独创建只有 `Actions: write` 的 fine-grained token，并以 Wrangler secret `GITHUB_WORKFLOW_DISPATCH_TOKEN` 保存。不得复用 `CLOUDFLARE_API_TOKEN`、任何行情密钥或本地 `gh` 的宽权限凭证；缺少专用 token 时不得将开关改为 `1`。
 - 定时选股不需要 OpenD、Tunnel、Render 或个人设备密钥。
 
 ### 部署 Worker

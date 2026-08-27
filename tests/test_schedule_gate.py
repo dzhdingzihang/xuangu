@@ -161,6 +161,79 @@ class ScheduleGateTests(unittest.TestCase):
 
         self.assertEqual(invocation.isoformat(), "2026-08-21T08:17:00+08:00")
 
+    def test_nine_hour_late_primary_recovers_latest_legal_checkpoint(self) -> None:
+        output = self._run_main(
+            "2026-08-27T17:52:00+08:00",
+            published_source=None,
+            cron="17 0 * * 1-5",
+        )
+
+        self.assertIn("should_run=true", output)
+        self.assertIn("reason=late_cron_recovery", output)
+        self.assertIn("slot=2026-08-27T16:17+08:00", output)
+        self.assertIn("invocation_slot=2026-08-27T16:47+08:00", output)
+        self.assertIn("source_invocation_slot=2026-08-27T08:17+08:00", output)
+        self.assertIn("scheduler_delay_seconds=34500", output)
+        self.assertIn("recovery_mode=late_cron_recovery", output)
+
+    def test_late_recovery_skips_when_latest_checkpoint_is_already_healthy(self) -> None:
+        output = self._run_main(
+            "2026-08-27T17:52:00+08:00",
+            published_source="live",
+            cron="17 0 * * 1-5",
+        )
+
+        self.assertIn("should_run=false", output)
+        self.assertIn("reason=slot_already_published", output)
+        self.assertIn("slot=2026-08-27T16:17+08:00", output)
+        self.assertIn("invocation_slot=2026-08-27T16:47+08:00", output)
+        self.assertIn("source_invocation_slot=2026-08-27T08:17+08:00", output)
+
+    def test_late_recovery_is_bounded_to_twelve_hours(self) -> None:
+        output = self._run_main(
+            "2026-08-22T12:00:00+08:00",
+            published_source=None,
+            cron="17 0 * * 1-5",
+        )
+
+        self.assertIn("should_run=false", output)
+        self.assertIn("reason=outside_late_recovery_window", output)
+
+    def test_explicit_cloudflare_scheduled_time_preserves_source_invocation(self) -> None:
+        output = self._run_main(
+            "2026-08-27T17:52:00+08:00",
+            published_source=None,
+            cron="17 0 * * 1-5",
+            scheduled_at="2026-08-27T00:17:00Z",
+        )
+
+        self.assertIn("source_invocation_slot=2026-08-27T08:17+08:00", output)
+        self.assertIn("slot=2026-08-27T16:17+08:00", output)
+
+    def test_invalid_explicit_scheduler_timestamp_fails_red(self) -> None:
+        result, output = self._run_main_result(
+            "2026-08-27T17:52:00+08:00",
+            published_source=None,
+            cron="17 0 * * 1-5",
+            scheduled_at="not-a-time",
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("should_run=false", output)
+        self.assertIn("reason=invalid_schedule_intent", output)
+
+    def test_future_explicit_scheduler_timestamp_fails_before_recovery(self) -> None:
+        result, output = self._run_main_result(
+            "2026-08-27T17:52:00+08:00",
+            published_source=None,
+            cron="17 0 * * 1-5",
+            scheduled_at="2026-08-28T00:17:00Z",
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("scheduled_at cannot be in the future", output)
+        self.assertNotIn("reason=late_cron_recovery", output)
+
     def test_early_unique_fallback_waits_to_its_0847_invocation(self) -> None:
         output = self._run_main(
             "2026-08-21T08:46:00+08:00",
@@ -589,7 +662,25 @@ class ScheduleGateTests(unittest.TestCase):
         *,
         published_source: str | None,
         cron: str | None = None,
+        scheduled_at: str | None = None,
     ) -> str:
+        result, output = self._run_main_result(
+            now,
+            published_source=published_source,
+            cron=cron,
+            scheduled_at=scheduled_at,
+        )
+        self.assertEqual(result, 0)
+        return output
+
+    def _run_main_result(
+        self,
+        now: str,
+        *,
+        published_source: str | None,
+        cron: str | None = None,
+        scheduled_at: str | None = None,
+    ) -> tuple[int, str]:
         output = io.StringIO()
         environment = {
             "SCHEDULE_GATE_NOW": now,
@@ -597,6 +688,8 @@ class ScheduleGateTests(unittest.TestCase):
         }
         if cron:
             environment["SCHEDULE_GATE_CRON"] = cron
+        if scheduled_at:
+            environment["SCHEDULE_GATE_SCHEDULED_AT"] = scheduled_at
         with (
             mock.patch.dict(
                 os.environ,
@@ -610,8 +703,8 @@ class ScheduleGateTests(unittest.TestCase):
             ),
             redirect_stdout(output),
         ):
-            self.assertEqual(self.module.main(), 0)
-        return output.getvalue()
+            result = self.module.main()
+        return result, output.getvalue()
 
 
 if __name__ == "__main__":

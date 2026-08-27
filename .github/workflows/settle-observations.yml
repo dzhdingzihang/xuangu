@@ -1,0 +1,183 @@
+name: Settle Model Observations
+
+on:
+  schedule:
+    # Beijing 06:30 every day is UTC 22:30 on the preceding UTC date.
+    # Weekend runs can settle Friday/Saturday-matured US observations without
+    # waiting until Monday.
+    - cron: "30 22 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  # Serialize every repository data writer with snapshot deploy/archive jobs.
+  group: xuangu-production
+  cancel-in-progress: false
+
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    # One full provider-timeout pass over 795 symbols is about nine minutes at
+    # 12 workers.  Keep room for setup plus all three bounded Git publish
+    # attempts without letting a stuck writer block the shared group forever.
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install settlement dependencies
+        run: pip install -r requirements.txt
+
+      - name: Settle, validate, and publish observation outcomes
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          validate_only() {
+            settlement_tree="$1"
+            (
+              set -e
+              cd "${settlement_tree}"
+              python - <<'PY'
+          from collections import Counter
+
+          import model_observation_ledger
+          import observation_outcome_ledger
+
+          cohorts = model_observation_ledger.load_observation_cohorts()
+          batches = observation_outcome_ledger.load_outcome_batches()
+          if set(batches) != set(cohorts):
+              missing = sorted(set(cohorts) - set(batches))
+              unknown = sorted(set(batches) - set(cohorts))
+              raise SystemExit(
+                  f"observation settlement coverage mismatch: missing={missing} unknown={unknown}"
+              )
+
+          statuses = Counter()
+          for cohort_id, batch in batches.items():
+              validated = observation_outcome_ledger.validate_outcome_batch(
+                  batch,
+                  cohort=cohorts[cohort_id],
+              )
+              statuses.update(validated.get("status_counts") or {})
+          print(
+              "Validated observation settlements: "
+              f"cohorts={len(cohorts)} statuses={dict(sorted(statuses.items()))}"
+          )
+          PY
+            )
+          }
+
+          settle_and_validate() {
+            settlement_tree="$1"
+            (
+              set -e
+              cd "${settlement_tree}"
+              python scripts/settle_observations.py --max-workers 12 --retries 0
+            )
+            validate_only "${settlement_tree}"
+          }
+
+          for attempt in 1 2 3; do
+            echo "Observation settlement push attempt ${attempt}/3"
+            if ! git fetch --prune origin main; then
+              echo "Fetch failed before observation settlement attempt ${attempt}" >&2
+              sleep "$((attempt * 5))"
+              continue
+            fi
+
+            attempt_root="$(mktemp -d "${RUNNER_TEMP}/xuangu-observation-${attempt}-XXXXXX")"
+            settlement_tree="${attempt_root}/worktree"
+            if ! git worktree add --detach "${settlement_tree}" origin/main; then
+              echo "Unable to create observation settlement worktree on attempt ${attempt}" >&2
+              sleep "$((attempt * 5))"
+              continue
+            fi
+
+            if ! settle_and_validate "${settlement_tree}"; then
+              echo "Observation settlement or validation failed on attempt ${attempt}" >&2
+              git worktree remove --force "${settlement_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+
+            settlement_files=()
+            while IFS= read -r -d '' path; do
+              settlement_files+=("${path#${settlement_tree}/}")
+            done < <(
+              find "${settlement_tree}/data/outcomes/observation-settlements" \
+                -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null
+            )
+            if ((${#settlement_files[@]})); then
+              git -C "${settlement_tree}" add -- "${settlement_files[@]}"
+            fi
+
+            while IFS= read -r staged_path; do
+              case "${staged_path}" in
+                data/outcomes/observation-settlements/*.json) ;;
+                *)
+                  echo "Refusing to commit non-observation JSON: ${staged_path}" >&2
+                  git worktree remove --force "${settlement_tree}"
+                  exit 1
+                  ;;
+              esac
+            done < <(git -C "${settlement_tree}" diff --cached --name-only)
+
+            if git -C "${settlement_tree}" diff --cached --quiet; then
+              echo "Observation settlements are already current."
+              git worktree remove "${settlement_tree}"
+              exit 0
+            fi
+
+            git -C "${settlement_tree}" config user.name "github-actions[bot]"
+            git -C "${settlement_tree}" config user.email \
+              "41898282+github-actions[bot]@users.noreply.github.com"
+            if ! git -C "${settlement_tree}" commit \
+              -m "Settle model observations [skip ci]"; then
+              echo "Observation settlement commit failed on attempt ${attempt}" >&2
+              git worktree remove --force "${settlement_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+
+            if ! git fetch --prune origin main || \
+              ! git -C "${settlement_tree}" rebase origin/main; then
+              echo "Observation settlement rebase failed on attempt ${attempt}" >&2
+              git -C "${settlement_tree}" rebase --abort >/dev/null 2>&1 || :
+              git worktree remove --force "${settlement_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            # A clean Git rebase is not sufficient: cohort and settlement live
+            # in different files and can merge without a textual conflict. Join
+            # them again against the rebased main before allowing the push.
+            if ! validate_only "${settlement_tree}"; then
+              echo "Observation settlement join changed after rebase on attempt ${attempt}" >&2
+              git worktree remove --force "${settlement_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            if git -C "${settlement_tree}" push origin HEAD:main; then
+              git worktree remove "${settlement_tree}"
+              echo "Observation settlements published successfully."
+              exit 0
+            fi
+
+            echo "Observation settlement push conflicted on attempt ${attempt}" >&2
+            git worktree remove --force "${settlement_tree}"
+            sleep "$((attempt * 5))"
+          done
+
+          echo "Observation settlement failed after 3 bounded attempts" >&2
+          exit 1

@@ -34,6 +34,7 @@ import exchange_calendars as xcals
 
 import history_evaluation
 import model_observation_ledger
+import observation_outcome_ledger
 import production_rule_model
 
 try:
@@ -2562,10 +2563,31 @@ def history_payload(limit: int = 30, view: str = "daily") -> dict:
         shadow_inventory,
         executable_inventory,
     )
+    observation_cohorts = model_observation_ledger.load_observation_cohorts(
+        OUTCOMES / "observations"
+    )
+    observation_batches = observation_outcome_ledger.load_outcome_batches(
+        OUTCOMES / "observation-settlements"
+    )
+    observation_performance = history_evaluation.evaluate_observation_performance(
+        observation_cohorts,
+        observation_batches,
+    )
     observation_summary = model_observation_ledger.summarize_observation_cohorts(
-        model_observation_ledger.load_observation_cohorts(OUTCOMES / "observations")
+        observation_cohorts
+    )
+    observation_summary.update(
+        {
+            "settlement_status": observation_performance["status"],
+            "outcome_prediction_count": observation_performance["prediction_count"],
+            "pending_maturity_count": observation_performance["pending_maturity_count"],
+            "pending_data_count": observation_performance["pending_data_count"],
+            "settled_count": observation_performance["settled_count"],
+            "untracked_count": observation_performance["untracked_count"],
+        }
     )
     evaluation["observation_ledger"] = observation_summary
+    evaluation["observation_performance"] = observation_performance
 
     latest = None
     latest_path = PICKS / "latest.json"
@@ -2579,6 +2601,7 @@ def history_payload(limit: int = 30, view: str = "daily") -> dict:
     meta["shadow_ledger"] = evaluation["shadow_ledger"]
     meta["executable_ledger"] = evaluation["executable_ledger"]
     meta["observation_ledger"] = observation_summary
+    meta["observation_performance"] = observation_performance
     return {
         "ok": True,
         "time": now_cn().isoformat(timespec="seconds"),
@@ -2626,10 +2649,14 @@ def automation_metadata() -> dict:
         run_id = f"{run_id}:{generation_attempt}"
     else:
         run_id = f"local:{now_cn().strftime('%Y%m%dT%H%M%S%z')}:{generation_attempt}"
+    scheduler_delay = os.environ.get("SCHEDULER_DELAY_SECONDS")
     return {
         "trigger": os.environ.get("AUTOMATION_TRIGGER") or os.environ.get("GITHUB_EVENT_NAME") or "local",
         "scheduled_slot": os.environ.get("SCHEDULED_SLOT") or os.environ.get("SCHEDULE_GATE_SLOT") or None,
         "scheduled_invocation_slot": os.environ.get("SCHEDULED_INVOCATION_SLOT") or None,
+        "source_invocation_slot": os.environ.get("SCHEDULED_SOURCE_INVOCATION_SLOT") or None,
+        "scheduler_delay_seconds": int(scheduler_delay) if scheduler_delay else None,
+        "recovery_mode": os.environ.get("SCHEDULE_RECOVERY_MODE") or "none",
         "generation_attempt": generation_attempt,
         "run_id": run_id,
     }

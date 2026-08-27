@@ -14,8 +14,11 @@ import math
 import pathlib
 import re
 from collections import Counter, defaultdict
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
+
+import model_observation_ledger
+import observation_outcome_ledger
 
 
 HISTORY_EVALUATION_SCHEMA = "history-evaluation-v1"
@@ -26,6 +29,7 @@ SHADOW_LEDGER_SCHEMA = "shadow-outcome-v1"
 EXECUTABLE_LEDGER_SCHEMA = "executable-outcome-v1"
 MINIMUM_RELIABLE_SAMPLE = 20
 MINIMUM_TAIL_SAMPLE = 5
+MINIMUM_OBSERVATION_COHORT_DAYS = 60
 CN_TZ = ZoneInfo("Asia/Shanghai")
 SETTLEMENT_TOLERANCE = 1e-6
 SHADOW_DAILY_SLOT = (22, 47)
@@ -919,6 +923,284 @@ def _pearson(left: list[float], right: list[float]) -> float | None:
     if denominator == 0:
         return None
     return sum(a * b for a, b in zip(centered_left, centered_right)) / denominator
+
+
+def _observation_auc(probabilities: list[float], labels: list[float]) -> float | None:
+    positives = [index for index, label in enumerate(labels) if label == 1.0]
+    negatives = [index for index, label in enumerate(labels) if label == 0.0]
+    if not positives or not negatives:
+        return None
+    wins = 0.0
+    for positive in positives:
+        for negative in negatives:
+            if probabilities[positive] > probabilities[negative]:
+                wins += 1.0
+            elif probabilities[positive] == probabilities[negative]:
+                wins += 0.5
+    return wins / (len(positives) * len(negatives))
+
+
+def _observation_ece(probabilities: list[float], labels: list[float]) -> float:
+    total = len(probabilities)
+    result = 0.0
+    for bucket in range(10):
+        indices = [
+            index
+            for index, probability in enumerate(probabilities)
+            if min(9, int(probability * 10)) == bucket
+        ]
+        if indices:
+            confidence = sum(probabilities[index] for index in indices) / len(indices)
+            accuracy = sum(labels[index] for index in indices) / len(indices)
+            result += len(indices) / total * abs(confidence - accuracy)
+    return result
+
+
+def _equal_weight_metric(
+    values: list[float],
+    eligible_days: int,
+    *,
+    cell_count: int,
+    complete_day_count: int,
+    unit: str,
+    method: str,
+    unavailable_reason: str,
+) -> dict[str, Any]:
+    value = round(sum(values) / len(values), 12) if values else None
+    metric = _metric(
+        value,
+        eligible_days,
+        unit=unit,
+        method=method,
+        minimum=MINIMUM_OBSERVATION_COHORT_DAYS,
+        unavailable_reason=unavailable_reason if not values and complete_day_count else None,
+    )
+    if not values and complete_day_count:
+        metric.update(
+            {
+                "status": "UNAVAILABLE",
+                "reason": unavailable_reason,
+            }
+        )
+    metric["cell_n"] = cell_count
+    metric["complete_day_n"] = complete_day_count
+    return metric
+
+
+def evaluate_observation_performance(
+    cohorts: Mapping[str, Mapping[str, Any]],
+    outcome_batches: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate prospective observations without touching executable metrics.
+
+    Every statistic is first computed within one scheduled-date/market cell and
+    then averaged across cells.  This prevents a market with more recalled
+    symbols from dominating the diagnostics.  The result is descriptive only:
+    it is never an authorization gate and cannot promote a model.
+    """
+
+    normalized_cohorts: dict[str, dict[str, Any]] = {}
+    invalid_cohort_count = 0
+    for cohort_id, cohort in cohorts.items():
+        try:
+            normalized = model_observation_ledger.validate_observation_cohort(cohort)
+            if normalized.get("cohort_id") != cohort_id:
+                raise model_observation_ledger.ObservationConflictError(
+                    "observation cohort key mismatch"
+                )
+        except (ValueError, RuntimeError):
+            invalid_cohort_count += 1
+            continue
+        normalized_cohorts[cohort_id] = normalized
+
+    market_counts: dict[str, Counter[str]] = {
+        market: Counter() for market in model_observation_ledger.VALID_MARKETS
+    }
+    prediction_count = 0
+    pending_maturity_count = 0
+    pending_data_count = 0
+    settled_count = 0
+    untracked_count = 0
+    invalid_outcome_count = 0
+    invalid_batch_count = 0
+    settled_rows: list[dict[str, Any]] = []
+    expected_cell_counts: Counter[tuple[str, str]] = Counter()
+
+    for cohort_id, cohort in normalized_cohorts.items():
+        canonical_id = cohort["canonical_revision_id"]
+        canonical = next(
+            revision
+            for revision in cohort["revisions"]
+            if revision["revision_id"] == canonical_id
+        )
+        predictions = canonical.get("predictions") or []
+        prediction_count += len(predictions)
+        for prediction in predictions:
+            market = str(prediction["market"])
+            market_counts[market]["prediction"] += 1
+            expected_cell_counts[(str(cohort["scheduled_slot"])[:10], market)] += 1
+        batch = outcome_batches.get(cohort_id)
+        if batch is None:
+            untracked_count += len(predictions)
+            continue
+        try:
+            validated = observation_outcome_ledger.validate_outcome_batch(
+                batch,
+                cohort=cohort,
+            )
+        except (ValueError, RuntimeError):
+            invalid_batch_count += 1
+            invalid_outcome_count += len(predictions)
+            continue
+        for row in validated["outcomes"]:
+            market = str(row["market"])
+            status = str(row["status"])
+            market_counts[market][status] += 1
+            if status == "PENDING_MATURITY":
+                pending_maturity_count += 1
+            elif status == "PENDING_DATA":
+                pending_data_count += 1
+            elif status == "SETTLED":
+                settled_count += 1
+                settled_rows.append(dict(row))
+            else:
+                invalid_outcome_count += 1
+
+    unknown_batches = set(outcome_batches) - set(normalized_cohorts)
+    invalid_batch_count += len(unknown_batches)
+    invalid_outcome_count += sum(
+        len((outcome_batches[cohort_id].get("outcomes") or []))
+        if isinstance(outcome_batches[cohort_id], Mapping)
+        else 1
+        for cohort_id in unknown_batches
+    )
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in settled_rows:
+        grouped[(str(row["scheduled_slot"])[:10], str(row["market"]))].append(row)
+    settled_independent_days = len({day for day, _market in grouped})
+    complete_grouped = {
+        key: rows
+        for key, rows in grouped.items()
+        if len(rows) == expected_cell_counts.get(key, 0) and expected_cell_counts.get(key, 0) > 0
+    }
+    incomplete_cell_count = sum(
+        1
+        for key, expected in expected_cell_counts.items()
+        if expected > 0 and len(grouped.get(key, [])) != expected
+    )
+    independent_days = len({day for day, _market in complete_grouped})
+
+    metric_cells: dict[str, list[float]] = defaultdict(list)
+    metric_days: dict[str, set[str]] = defaultdict(set)
+
+    def add_metric(name: str, value: float, day: str) -> None:
+        metric_cells[name].append(value)
+        metric_days[name].add(day)
+
+    for (day, _market), rows in complete_grouped.items():
+        probabilities = [float(row["probability"]) for row in rows]
+        labels = [1.0 if row["positive_label"] else 0.0 for row in rows]
+        returns = [float(row["net_total_return"]) for row in rows]
+        utilities = [float(row["expected_net_utility"]) for row in rows]
+        count = len(rows)
+        brier = sum((probability - label) ** 2 for probability, label in zip(probabilities, labels)) / count
+        add_metric("brier_score", brier, day)
+        prevalence = sum(labels) / count
+        baseline = sum((prevalence - label) ** 2 for label in labels) / count
+        if baseline > 0:
+            add_metric("brier_skill", 1.0 - brier / baseline, day)
+        auc = _observation_auc(probabilities, labels)
+        if auc is not None:
+            add_metric("auc", auc, day)
+        add_metric("ece_10bin", _observation_ece(probabilities, labels), day)
+        rank_ic = _pearson(_average_ranks(utilities), _average_ranks(returns))
+        if rank_ic is not None:
+            add_metric("daily_cross_sectional_rank_ic", rank_ic, day)
+        tail_count = max(1, math.ceil(count * 0.10))
+        ranked = sorted(range(count), key=utilities.__getitem__, reverse=True)
+        top_return = sum(returns[index] for index in ranked[:tail_count]) / tail_count
+        market_return = sum(returns) / count
+        add_metric("top_decile_net_return", top_return, day)
+        add_metric("top_decile_excess_return", top_return - market_return, day)
+        bottom = ranked[-tail_count:]
+        add_metric(
+            "worst_decile_net_return",
+            sum(returns[index] for index in bottom) / tail_count,
+            day,
+        )
+
+    methods = {
+        "brier_score": ("score", "equal-weight mean of date-market cell Brier scores", "NO_SETTLED_CELL"),
+        "brier_skill": ("ratio", "equal-weight mean Brier skill versus each cell prevalence", "BINARY_LABEL_VARIATION_REQUIRED"),
+        "auc": ("score", "equal-weight mean pairwise AUC across date-market cells", "BOTH_LABEL_CLASSES_REQUIRED"),
+        "ece_10bin": ("score", "equal-weight mean ten-bin ECE across date-market cells", "NO_SETTLED_CELL"),
+        "daily_cross_sectional_rank_ic": ("correlation", "equal-weight mean daily market-level Spearman IC of expected utility and net return", "CROSS_SECTIONAL_VARIATION_REQUIRED"),
+        "top_decile_net_return": ("ratio", "equal-weight mean realized return of each cell's top expected-utility decile", "NO_SETTLED_CELL"),
+        "top_decile_excess_return": ("ratio", "top expected-utility decile return minus its date-market cell mean", "NO_SETTLED_CELL"),
+        "worst_decile_net_return": ("ratio", "equal-weight mean realized return of each cell's bottom expected-utility decile", "NO_SETTLED_CELL"),
+    }
+    metrics = {
+        name: _equal_weight_metric(
+            metric_cells.get(name, []),
+            len(metric_days.get(name, set())),
+            cell_count=len(metric_cells.get(name, [])),
+            complete_day_count=independent_days,
+            unit=unit,
+            method=method,
+            unavailable_reason=reason,
+        )
+        for name, (unit, method, reason) in methods.items()
+    }
+
+    market_coverage = {}
+    for market in model_observation_ledger.VALID_MARKETS:
+        counts = market_counts[market]
+        total = counts["prediction"]
+        settled = counts["SETTLED"]
+        market_coverage[market] = {
+            "prediction_count": total,
+            "pending_maturity_count": counts["PENDING_MATURITY"],
+            "pending_data_count": counts["PENDING_DATA"],
+            "settled_count": settled,
+            "settlement_coverage": round(settled / total, 8) if total else None,
+        }
+
+    if prediction_count == 0:
+        status = "NO_SAMPLE"
+    elif settled_count:
+        status = "OBSERVING" if independent_days >= MINIMUM_OBSERVATION_COHORT_DAYS else "EARLY_SAMPLE"
+    elif pending_data_count:
+        status = "PENDING_DATA"
+    elif pending_maturity_count:
+        status = "PENDING_MATURITY"
+    else:
+        status = "UNSETTLED"
+    return {
+        "schema_version": "model-observation-performance-v1",
+        "track": model_observation_ledger.TRACK,
+        "status": status,
+        "minimum_reliable_independent_cohort_days": MINIMUM_OBSERVATION_COHORT_DAYS,
+        "cohort_count": len(normalized_cohorts),
+        "prediction_count": prediction_count,
+        "pending_maturity_count": pending_maturity_count,
+        "pending_data_count": pending_data_count,
+        "settled_count": settled_count,
+        "untracked_count": untracked_count,
+        "invalid_cohort_count": invalid_cohort_count,
+        "invalid_batch_count": invalid_batch_count,
+        "invalid_outcome_count": invalid_outcome_count,
+        "independent_cohort_day_count": independent_days,
+        "settled_independent_cohort_day_count": settled_independent_days,
+        "complete_metric_cell_count": len(complete_grouped),
+        "incomplete_metric_cell_count": incomplete_cell_count,
+        "market_coverage": market_coverage,
+        "metrics": metrics,
+        "included_in_shadow_research": False,
+        "included_in_executable_performance": False,
+        "authorizes_production": False,
+        "authorization_status": "DIAGNOSTIC_ONLY_MANUAL_REVIEW_REQUIRED",
+    }
 
 
 def evaluate_formal_performance(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:

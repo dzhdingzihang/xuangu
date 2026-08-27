@@ -1,4 +1,4 @@
-"""Deterministic, settlement-free ledger for all ten-day model observations.
+"""Deterministic prospective ledger for all ten-day model observations.
 
 The observation track is deliberately independent from both the selected
 ``SHADOW_RESEARCH`` track and the formal ``EXECUTABLE_MODEL`` track.  A model
@@ -8,8 +8,8 @@ promote an observation into an executable decision.
 
 One cohort represents the scheduled Beijing 22:47 sample.  A 23:17 health
 recovery inherits the same ``scheduled_slot`` and is retained as a later
-revision of that cohort.  This module only freezes predictions and summaries;
-network outcome settlement belongs to a separate integration layer.
+revision of that cohort.  This module freezes the exchange-calendar settlement
+contract; network outcome settlement belongs to a separate integration layer.
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import Any
 from zoneinfo import ZoneInfo
+
+import market_calendar
 
 
 TRACK = "MODEL_OBSERVATION"
@@ -42,7 +44,115 @@ VALID_ARTIFACT = re.compile(r"^[a-f0-9]{64}$")
 VALID_SAFE_SNAPSHOT = re.compile(r"^[A-Za-z0-9_.-]+\.json$")
 VALID_OBSERVATION_ID = re.compile(r"^obs_[a-f0-9]{24}$")
 VALID_COHORT_ID = re.compile(r"^obscohort_[a-f0-9]{24}$")
+VALID_REVISION_ID = re.compile(r"^obsrev_[a-f0-9]{24}$")
 DEFAULT_OBSERVATION_DIRECTORY = pathlib.Path(__file__).resolve().parent / "data" / "outcomes" / "observations"
+CURRENCIES = {"a_share": "CNY", "hk": "HKD", "us": "USD"}
+SETTLEMENT_CONTRACT_FIELDS = (
+    "observation_id",
+    "prediction_sha256",
+    "market",
+    "code",
+    "model_id",
+    "label_version",
+    "entry_trade_date",
+    "entry_session_open_at",
+    "forecast_end_trade_date",
+    "forecast_end_session_close_at",
+    "horizon_trade_sessions",
+    "entry_policy",
+    "exit_policy",
+    "calendar_id",
+    "calendar_version",
+    "currency",
+    "transaction_cost",
+)
+PREDICTION_SHA256_FIELDS = (
+    "schema_version",
+    "track",
+    "observation_id",
+    "source_prediction_id",
+    "scheduled_slot",
+    "market",
+    "code",
+    "model_id",
+    "label_version",
+    "feature_schema_version",
+    "artifact_sha256",
+    "training_cutoff",
+    "fit_data_cutoff",
+    "prediction_as_of",
+    "probability",
+    "expected_net_return",
+    "expected_net_utility",
+    "transaction_cost",
+    "tail_risk",
+    "market_validation_status",
+    "rank_eligible",
+    "participates_in_decision",
+    "production_eligible",
+    "included_in_shadow_research",
+    "included_in_executable_performance",
+)
+PREDICTION_SETTLEMENT_DERIVED_FIELDS = (
+    "entry_trade_date",
+    "entry_session_open_at",
+    "forecast_end_trade_date",
+    "forecast_end_session_close_at",
+    "horizon_trade_sessions",
+    "entry_policy",
+    "exit_policy",
+    "calendar_id",
+    "calendar_version",
+    "currency",
+    "settlement_contract_sha256",
+)
+PREDICTION_BASE_FIELDS = frozenset(
+    (*PREDICTION_SHA256_FIELDS, "source_snapshot", "prediction_sha256")
+)
+PREDICTION_CURRENT_FIELDS = frozenset(
+    (*PREDICTION_BASE_FIELDS, *PREDICTION_SETTLEMENT_DERIVED_FIELDS)
+)
+REVISION_FIELDS = frozenset(
+    {
+        "schema_version",
+        "track",
+        "sampling_policy",
+        "cohort_id",
+        "revision_id",
+        "scheduled_slot",
+        "generated_at",
+        "source_snapshot",
+        "model_id",
+        "label_version",
+        "model_status",
+        "model_artifact_sha256",
+        "prediction_count",
+        "market_prediction_counts",
+        "predictions",
+        "included_in_shadow_research",
+        "included_in_executable_performance",
+        "revision_sha256",
+    }
+)
+COHORT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "track",
+        "sampling_policy",
+        "cohort_id",
+        "scheduled_slot",
+        "revision_count",
+        "canonical_revision_id",
+        "canonical_source_snapshot",
+        "canonical_generated_at",
+        "prediction_count",
+        "market_prediction_counts",
+        "revisions",
+        "included_in_shadow_research",
+        "included_in_executable_performance",
+        "cohort_sha256",
+    }
+)
 
 
 class ObservationContractError(ValueError):
@@ -95,6 +205,86 @@ def _stable_id(prefix: str, *parts: Any) -> str:
     return f"{prefix}_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:24]}"
 
 
+def settlement_contract_sha256(record: Mapping[str, Any]) -> str:
+    """Return the immutable ten-session settlement-contract digest."""
+
+    missing = [field for field in SETTLEMENT_CONTRACT_FIELDS if record.get(field) is None]
+    if missing:
+        raise ObservationContractError(
+            "observation settlement contract is incomplete: " + ",".join(missing)
+        )
+    if record.get("horizon_trade_sessions") != 10:
+        raise ObservationContractError("observation settlement horizon must be ten sessions")
+    if record.get("entry_policy") != "next_session_open_v1":
+        raise ObservationContractError("observation entry policy is invalid")
+    if record.get("exit_policy") != "tenth_session_close_v1":
+        raise ObservationContractError("observation exit policy is invalid")
+    return _digest({field: record.get(field) for field in SETTLEMENT_CONTRACT_FIELDS})
+
+
+def prediction_sha256(record: Mapping[str, Any]) -> str:
+    """Hash the immutable model output before derived settlement fields.
+
+    ``source_snapshot`` is deliberately excluded so ``latest.json`` and its
+    immutable filename have the same prediction identity.  Settlement calendar
+    fields are derived later from ``generated_at`` and have their own digest.
+    An explicit allow-list prevents a newly introduced, unhashed field from
+    silently becoming part of the persisted prediction contract.
+    """
+
+    missing = [field for field in PREDICTION_SHA256_FIELDS if field not in record]
+    if missing:
+        raise ObservationContractError(
+            "observation prediction hash fields are incomplete: " + ",".join(missing)
+        )
+    return _digest({field: record.get(field) for field in PREDICTION_SHA256_FIELDS})
+
+
+def _settlement_contract_fields(
+    record: Mapping[str, Any],
+    generated_at: dt.datetime | str,
+) -> dict[str, Any]:
+    market = str(record.get("market") or "")
+    if market not in VALID_MARKETS:
+        raise ObservationContractError("observation settlement market is invalid")
+    window = market_calendar.market_trade_window(market, generated_at, horizon_sessions=10)
+    return {
+        "entry_trade_date": window["entry_trade_date"],
+        "entry_session_open_at": window["entry_session_open_at"],
+        "forecast_end_trade_date": window["forecast_end_trade_date"],
+        "forecast_end_session_close_at": window["forecast_end_session_close_at"],
+        "horizon_trade_sessions": 10,
+        "entry_policy": "next_session_open_v1",
+        "exit_policy": "tenth_session_close_v1",
+        "calendar_id": window["calendar_id"],
+        "calendar_version": window["calendar_version"],
+        "currency": CURRENCIES[market],
+    }
+
+
+def _normalize_prediction_settlement_contract(
+    raw_record: Mapping[str, Any],
+    generated_at: dt.datetime | str,
+) -> dict[str, Any]:
+    record = dict(raw_record)
+    expected = _settlement_contract_fields(record, generated_at)
+    for field, value in expected.items():
+        current = record.get(field)
+        if current is not None and current != value:
+            raise ObservationConflictError(
+                f"observation settlement field conflict: {record.get('observation_id')}:{field}"
+            )
+        record[field] = value
+    expected_digest = settlement_contract_sha256(record)
+    stored_digest = record.get("settlement_contract_sha256")
+    if stored_digest is not None and stored_digest != expected_digest:
+        raise ObservationConflictError(
+            f"observation settlement digest conflict: {record.get('observation_id')}"
+        )
+    record["settlement_contract_sha256"] = expected_digest
+    return record
+
+
 def _canonical_snapshot_name(snapshot: Mapping[str, Any], explicit: str | None) -> str:
     candidate = snapshot.get("snapshot_key") or explicit
     if not isinstance(candidate, str) or not VALID_SAFE_SNAPSHOT.fullmatch(candidate):
@@ -135,6 +325,7 @@ def _prediction_record(
     scheduled_slot: str,
     source_snapshot: str,
     model: Mapping[str, Any],
+    generated_at: dt.datetime,
 ) -> dict[str, Any]:
     declared_track = prediction.get("track")
     if declared_track not in (None, "", TRACK):
@@ -159,9 +350,17 @@ def _prediction_record(
     if not isinstance(artifact, str) or VALID_ARTIFACT.fullmatch(artifact.lower()) is None:
         raise ObservationContractError("prediction.artifact_sha256 is invalid")
     training_cutoff = _iso_date(prediction.get("training_cutoff"), "prediction.training_cutoff")
+    fit_data_cutoff = _iso_date(
+        prediction.get("fit_data_cutoff"),
+        "prediction.fit_data_cutoff",
+    )
     prediction_as_of = _iso_date(prediction.get("prediction_as_of"), "prediction.prediction_as_of")
-    if training_cutoff > prediction_as_of:
-        raise ObservationContractError("training_cutoff cannot be after prediction_as_of")
+    decision_local_date = market_calendar.market_local_date(str(market), generated_at).isoformat()
+    if not training_cutoff <= fit_data_cutoff <= prediction_as_of <= decision_local_date:
+        raise ObservationContractError(
+            "observation cutoffs must satisfy training_cutoff <= fit_data_cutoff "
+            "<= prediction_as_of <= the market-local decision date"
+        )
 
     probability = prediction.get("probability")
     expected_return = prediction.get("expected_net_return")
@@ -207,7 +406,7 @@ def _prediction_record(
         or model.get("feature_schema_version"),
         "artifact_sha256": artifact.lower(),
         "training_cutoff": training_cutoff,
-        "fit_data_cutoff": prediction.get("fit_data_cutoff"),
+        "fit_data_cutoff": fit_data_cutoff,
         "prediction_as_of": prediction_as_of,
         "probability": float(probability),
         "expected_net_return": float(expected_return),
@@ -221,10 +420,8 @@ def _prediction_record(
         "included_in_shadow_research": False,
         "included_in_executable_performance": False,
     }
-    record["prediction_sha256"] = _digest(
-        {key: value for key, value in record.items() if key not in {"source_snapshot", "prediction_sha256"}}
-    )
-    return record
+    record["prediction_sha256"] = prediction_sha256(record)
+    return _normalize_prediction_settlement_contract(record, generated_at)
 
 
 def build_observation_revision(
@@ -262,6 +459,7 @@ def build_observation_revision(
             scheduled_slot=slot_iso,
             source_snapshot=source_snapshot,
             model=model,
+            generated_at=generated,
         )
         key = (str(record["market"]), str(record["code"]))
         if key in seen_keys or record["observation_id"] in seen_ids:
@@ -309,41 +507,293 @@ def _iter_snapshots(
     return snapshots.items() if isinstance(snapshots, Mapping) else snapshots
 
 
-def _cohort_from_revisions(revisions: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+def _normalize_persisted_prediction(
+    raw_record: Mapping[str, Any],
+    revision: Mapping[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Validate one persisted prediction and upgrade only the legacy calendar block."""
+
+    if not isinstance(raw_record, Mapping):
+        raise ObservationContractError("observation prediction must be an object")
+    record = dict(raw_record)
+    fields = frozenset(record)
+    derived_present = fields & frozenset(PREDICTION_SETTLEMENT_DERIVED_FIELDS)
+    if not derived_present:
+        expected_fields = PREDICTION_BASE_FIELDS
+        legacy = True
+    elif derived_present == frozenset(PREDICTION_SETTLEMENT_DERIVED_FIELDS):
+        expected_fields = PREDICTION_CURRENT_FIELDS
+        legacy = False
+    else:
+        raise ObservationContractError(
+            "observation settlement fields must be either wholly absent or complete"
+        )
+    if fields != expected_fields:
+        missing = sorted(expected_fields - fields)
+        unexpected = sorted(fields - expected_fields)
+        raise ObservationContractError(
+            "observation prediction field set is invalid: "
+            f"missing={missing} unexpected={unexpected}"
+        )
+    if (
+        record.get("schema_version") != REVISION_SCHEMA_VERSION
+        or record.get("track") != TRACK
+        or record.get("participates_in_decision") is not False
+        or record.get("production_eligible") is not False
+        or record.get("included_in_shadow_research") is not False
+        or record.get("included_in_executable_performance") is not False
+        or type(record.get("rank_eligible")) is not bool
+    ):
+        raise ObservationContractError("observation prediction isolation contract is invalid")
+
+    market = record.get("market")
+    code = record.get("code")
+    model_id = record.get("model_id")
+    label_version = record.get("label_version")
+    scheduled_slot = record.get("scheduled_slot")
+    source_snapshot = record.get("source_snapshot")
+    if (
+        not isinstance(market, str)
+        or market not in VALID_MARKETS
+        or not isinstance(code, str)
+        or not code
+        or code != code.strip()
+    ):
+        raise ObservationContractError("observation prediction market or code is invalid")
+    if (
+        not isinstance(model_id, str)
+        or not model_id
+        or not isinstance(label_version, str)
+        or not label_version
+        or not isinstance(scheduled_slot, str)
+        or not isinstance(source_snapshot, str)
+    ):
+        raise ObservationContractError("observation prediction model identity is invalid")
+    source_prediction_id = record.get("source_prediction_id")
+    if source_prediction_id is not None and (
+        not isinstance(source_prediction_id, str) or not source_prediction_id
+    ):
+        raise ObservationContractError("observation source_prediction_id is invalid")
+    for field in ("feature_schema_version", "market_validation_status"):
+        value = record.get(field)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ObservationContractError(f"observation prediction {field} is invalid")
+    if scheduled_slot != revision.get("scheduled_slot"):
+        raise ObservationConflictError("observation prediction scheduled_slot conflict")
+    if source_snapshot != revision.get("source_snapshot"):
+        raise ObservationConflictError("observation prediction source_snapshot conflict")
+    if (
+        not VALID_SAFE_SNAPSHOT.fullmatch(source_snapshot)
+        or pathlib.PurePosixPath(source_snapshot).name != source_snapshot
+    ):
+        raise ObservationContractError("observation prediction source_snapshot is unsafe")
+    if model_id != revision.get("model_id") or label_version != revision.get("label_version"):
+        raise ObservationConflictError("observation prediction model identity conflicts with revision")
+
+    expected_observation_id = _stable_id(
+        "obs",
+        scheduled_slot,
+        market,
+        code,
+        model_id,
+        label_version,
+    )
+    if record.get("observation_id") != expected_observation_id:
+        raise ObservationConflictError("observation_id does not match its immutable identity")
+    expected_prediction_digest = prediction_sha256(record)
+    if record.get("prediction_sha256") != expected_prediction_digest:
+        raise ObservationConflictError(
+            f"observation prediction digest mismatch: {record.get('observation_id')}"
+        )
+
+    artifact = record.get("artifact_sha256")
+    if (
+        not isinstance(artifact, str)
+        or artifact != artifact.lower()
+        or VALID_ARTIFACT.fullmatch(artifact) is None
+    ):
+        raise ObservationContractError("observation prediction artifact_sha256 is invalid")
+    training_cutoff = _iso_date(record.get("training_cutoff"), "training_cutoff")
+    fit_data_cutoff = _iso_date(record.get("fit_data_cutoff"), "fit_data_cutoff")
+    prediction_as_of = _iso_date(record.get("prediction_as_of"), "prediction_as_of")
+    if (
+        record.get("training_cutoff") != training_cutoff
+        or record.get("fit_data_cutoff") != fit_data_cutoff
+        or record.get("prediction_as_of") != prediction_as_of
+    ):
+        raise ObservationContractError("observation prediction dates are not canonical ISO dates")
+    generated_at = _aware_moment(revision.get("generated_at"), "revision.generated_at")
+    local_decision_date = market_calendar.market_local_date(market, generated_at).isoformat()
+    if not training_cutoff <= fit_data_cutoff <= prediction_as_of <= local_decision_date:
+        raise ObservationContractError("observation prediction cutoffs are not monotonic")
+    probability = record.get("probability")
+    if not _finite(probability) or not 0.0 <= float(probability) <= 1.0:
+        raise ObservationContractError("observation prediction probability is invalid")
+    for field in ("expected_net_return", "expected_net_utility"):
+        if not _finite(record.get(field)):
+            raise ObservationContractError(f"observation prediction {field} is invalid")
+    for field in ("transaction_cost", "tail_risk"):
+        value = record.get(field)
+        if not _finite(value) or float(value) < 0.0:
+            raise ObservationContractError(f"observation prediction {field} is invalid")
+
+    normalized = _normalize_prediction_settlement_contract(record, generated_at)
+    return normalized, legacy
+
+
+def _normalize_persisted_revision(
+    raw_revision: Mapping[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Validate a raw revision before returning its deterministic current form."""
+
+    if not isinstance(raw_revision, Mapping):
+        raise ObservationContractError("observation revision must be an object")
+    revision = dict(raw_revision)
+    revision_id = revision.get("revision_id")
+    raw_digest = _digest(
+        {key: value for key, value in revision.items() if key != "revision_sha256"}
+    )
+    if revision.get("revision_sha256") != raw_digest:
+        raise ObservationConflictError(f"revision digest mismatch: {revision_id}")
+    fields = frozenset(revision)
+    if fields != REVISION_FIELDS:
+        raise ObservationContractError(
+            "observation revision field set is invalid: "
+            f"missing={sorted(REVISION_FIELDS - fields)} "
+            f"unexpected={sorted(fields - REVISION_FIELDS)}"
+        )
+    if revision.get("schema_version") != REVISION_SCHEMA_VERSION or revision.get("track") != TRACK:
+        raise ObservationContractError("observation revision belongs to another schema or track")
+    cohort_id = revision.get("cohort_id")
+    if not isinstance(cohort_id, str) or VALID_COHORT_ID.fullmatch(cohort_id) is None:
+        raise ObservationContractError("observation cohort_id is invalid")
+    if not isinstance(revision_id, str) or VALID_REVISION_ID.fullmatch(revision_id) is None:
+        raise ObservationContractError("observation revision_id is invalid")
+    for field in ("model_id", "label_version", "model_status"):
+        value = revision.get(field)
+        if not isinstance(value, str) or not value:
+            raise ObservationContractError(f"observation revision {field} is invalid")
+    if (
+        revision.get("sampling_policy") != SAMPLING_POLICY
+        or revision.get("included_in_shadow_research") is not False
+        or revision.get("included_in_executable_performance") is not False
+    ):
+        raise ObservationContractError("observation revision isolation contract is invalid")
+
+    scheduled = _aware_moment(revision.get("scheduled_slot"), "revision.scheduled_slot")
+    generated = _aware_moment(revision.get("generated_at"), "revision.generated_at")
+    slot_iso = scheduled.astimezone(CN_TZ).isoformat(timespec="minutes")
+    generated_iso = generated.isoformat(timespec="seconds")
+    delay = generated.astimezone(dt.timezone.utc) - scheduled.astimezone(dt.timezone.utc)
+    if (
+        revision.get("scheduled_slot") != slot_iso
+        or revision.get("generated_at") != generated_iso
+        or (scheduled.astimezone(CN_TZ).hour, scheduled.astimezone(CN_TZ).minute)
+        != DAILY_SLOT
+        or delay < dt.timedelta(0)
+        or delay > MAX_REVISION_DELAY
+    ):
+        raise ObservationContractError("observation revision schedule contract is invalid")
+    source_snapshot = str(revision.get("source_snapshot") or "")
+    if (
+        not VALID_SAFE_SNAPSHOT.fullmatch(source_snapshot)
+        or pathlib.PurePosixPath(source_snapshot).name != source_snapshot
+    ):
+        raise ObservationContractError("observation revision source_snapshot is unsafe")
+    if cohort_id != _stable_id("obscohort", slot_iso):
+        raise ObservationConflictError("observation revision cohort identity mismatch")
+    if revision_id != _stable_id("obsrev", slot_iso, generated_iso, source_snapshot):
+        raise ObservationConflictError("observation revision identity mismatch")
+
+    predictions = revision.get("predictions")
+    if not isinstance(predictions, list):
+        raise ObservationContractError("observation revision predictions must be a list")
+    normalized_predictions: list[dict[str, Any]] = []
+    legacy_states: list[bool] = []
+    seen_keys: set[tuple[str, str]] = set()
+    seen_ids: set[str] = set()
+    for raw_prediction in predictions:
+        prediction, prediction_legacy = _normalize_persisted_prediction(
+            raw_prediction,
+            revision,
+        )
+        identity = (str(prediction["market"]), str(prediction["code"]))
+        observation_id = str(prediction["observation_id"])
+        if identity in seen_keys or observation_id in seen_ids:
+            raise ObservationConflictError(
+                f"duplicate prediction identity in revision {revision_id}: {identity}"
+            )
+        seen_keys.add(identity)
+        seen_ids.add(observation_id)
+        normalized_predictions.append(prediction)
+        legacy_states.append(prediction_legacy)
+    if legacy_states and any(legacy_states) and not all(legacy_states):
+        raise ObservationContractError(
+            "one observation revision cannot mix legacy and current prediction fields"
+        )
+    legacy = bool(legacy_states and all(legacy_states))
+    model_artifact = revision.get("model_artifact_sha256")
+    if model_artifact is not None and (
+        not isinstance(model_artifact, str)
+        or model_artifact != model_artifact.lower()
+        or VALID_ARTIFACT.fullmatch(model_artifact) is None
+    ):
+        raise ObservationContractError("observation revision model artifact is invalid")
+    if normalized_predictions and model_artifact is None:
+        raise ObservationContractError(
+            "non-empty observation revision requires a model artifact"
+        )
+    expected_order = sorted(
+        normalized_predictions,
+        key=lambda item: (VALID_MARKETS.index(str(item["market"])), str(item["code"])),
+    )
+    if normalized_predictions != expected_order:
+        raise ObservationConflictError("observation revision predictions are not canonical-order")
+    market_counts = Counter(str(item["market"]) for item in normalized_predictions)
+    expected_market_counts = {
+        market: market_counts.get(market, 0) for market in VALID_MARKETS
+    }
+    prediction_count = revision.get("prediction_count")
+    if (
+        not isinstance(prediction_count, int)
+        or isinstance(prediction_count, bool)
+        or prediction_count != len(normalized_predictions)
+        or revision.get("market_prediction_counts") != expected_market_counts
+    ):
+        raise ObservationConflictError("observation revision prediction counts are inconsistent")
+
+    revision["predictions"] = normalized_predictions
+    revision["revision_sha256"] = _digest(
+        {key: value for key, value in revision.items() if key != "revision_sha256"}
+    )
+    return revision, legacy
+
+
+def _cohort_from_normalized_revisions(
+    revisions: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
     unique: dict[str, dict[str, Any]] = {}
     moments: dict[str, str] = {}
     cohort_id: str | None = None
     for raw_revision in revisions:
-        if not isinstance(raw_revision, Mapping):
-            raise ObservationContractError("observation revision must be an object")
         revision = dict(raw_revision)
-        if revision.get("schema_version") != REVISION_SCHEMA_VERSION or revision.get("track") != TRACK:
-            raise ObservationContractError("observation revision belongs to another schema or track")
         current_cohort_id = revision.get("cohort_id")
         revision_id = revision.get("revision_id")
-        if not isinstance(current_cohort_id, str) or VALID_COHORT_ID.fullmatch(current_cohort_id) is None:
-            raise ObservationContractError("observation cohort_id is invalid")
-        if not isinstance(revision_id, str) or not revision_id.startswith("obsrev_"):
-            raise ObservationContractError("observation revision_id is invalid")
         if cohort_id is None:
             cohort_id = current_cohort_id
         elif current_cohort_id != cohort_id:
             raise ObservationConflictError("revisions from different daily cohorts cannot be merged")
-        expected_digest = _digest(
-            {key: value for key, value in revision.items() if key != "revision_sha256"}
-        )
-        if revision.get("revision_sha256") != expected_digest:
-            raise ObservationConflictError(f"revision digest mismatch: {revision_id}")
         existing = unique.get(revision_id)
         if existing is not None and existing != revision:
             raise ObservationConflictError(f"conflicting payload for revision {revision_id}")
         generated_at = str(revision.get("generated_at") or "")
         existing_moment = moments.get(generated_at)
-        if existing_moment is not None and existing_moment != expected_digest:
+        normalized_digest = str(revision.get("revision_sha256") or "")
+        if existing_moment is not None and existing_moment != normalized_digest:
             raise ObservationConflictError(
                 f"ambiguous same-moment revisions in cohort {cohort_id}: {generated_at}"
             )
-        moments[generated_at] = expected_digest
+        moments[generated_at] = normalized_digest
         unique[revision_id] = revision
     if not unique or cohort_id is None:
         raise ObservationContractError("observation cohort requires at least one revision")
@@ -375,6 +825,14 @@ def _cohort_from_revisions(revisions: Iterable[Mapping[str, Any]]) -> dict[str, 
     return cohort
 
 
+def _cohort_from_revisions(revisions: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    normalized = [
+        _normalize_persisted_revision(raw_revision)[0]
+        for raw_revision in revisions
+    ]
+    return _cohort_from_normalized_revisions(normalized)
+
+
 def _atomic_write_json(path: pathlib.Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
@@ -404,6 +862,7 @@ def record_observation_revision(
         raise ObservationContractError("refusing unsafe observation cohort filename")
     target = pathlib.Path(directory) / f"{cohort_id}.json"
     existing: dict[str, Any] | None = None
+    stored_existing: dict[str, Any] | None = None
     if target.is_file():
         try:
             loaded = json.loads(target.read_text(encoding="utf-8"))
@@ -411,28 +870,17 @@ def record_observation_revision(
             raise ObservationConflictError(f"existing observation cohort is unreadable: {target.name}") from exc
         if not isinstance(loaded, dict):
             raise ObservationConflictError(f"existing observation cohort is not an object: {target.name}")
-        existing = loaded
-        if (
-            existing.get("schema_version") != COHORT_SCHEMA_VERSION
-            or existing.get("track") != TRACK
-            or existing.get("cohort_id") != cohort_id
-            or existing.get("included_in_shadow_research") is not False
-            or existing.get("included_in_executable_performance") is not False
-        ):
+        stored_existing = loaded
+        existing = validate_observation_cohort(loaded)
+        if existing.get("cohort_id") != cohort_id:
             raise ObservationConflictError(f"existing observation cohort identity conflict: {target.name}")
-        stored_digest = existing.get("cohort_sha256")
-        expected_digest = _digest(
-            {key: value for key, value in existing.items() if key != "cohort_sha256"}
-        )
-        if stored_digest != expected_digest:
-            raise ObservationConflictError(f"existing observation cohort digest mismatch: {target.name}")
     cohort = _cohort_from_revisions([*((existing or {}).get("revisions") or []), revision])
-    changed = existing != cohort
+    changed = stored_existing != cohort
     if changed:
         _atomic_write_json(target, cohort)
     return {
         "path": target,
-        "created": existing is None,
+        "created": stored_existing is None,
         "changed": changed,
         "cohort": cohort,
     }
@@ -456,11 +904,61 @@ def load_observation_cohorts(
             raise ObservationConflictError(f"observation cohort is unreadable: {path.name}") from exc
         if not isinstance(payload, dict) or payload.get("cohort_id") != path.stem:
             raise ObservationConflictError(f"observation cohort filename identity mismatch: {path.name}")
-        rebuilt = _cohort_from_revisions(payload.get("revisions") or [])
-        if payload != rebuilt:
-            raise ObservationConflictError(f"observation cohort payload conflict: {path.name}")
+        rebuilt = validate_observation_cohort(payload)
         result[path.stem] = rebuilt
     return result
+
+
+def validate_observation_cohort(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a cohort and upgrade settlement-free legacy revisions in memory."""
+
+    if not isinstance(payload, Mapping):
+        raise ObservationContractError("observation cohort must be an object")
+    cohort = dict(payload)
+    stored_digest = cohort.get("cohort_sha256")
+    expected_digest = _digest(
+        {key: value for key, value in cohort.items() if key != "cohort_sha256"}
+    )
+    if stored_digest != expected_digest:
+        raise ObservationConflictError("observation cohort digest mismatch")
+    fields = frozenset(cohort)
+    if fields != COHORT_FIELDS:
+        raise ObservationContractError(
+            "observation cohort field set is invalid: "
+            f"missing={sorted(COHORT_FIELDS - fields)} "
+            f"unexpected={sorted(fields - COHORT_FIELDS)}"
+        )
+    raw_revisions = cohort.get("revisions")
+    if not isinstance(raw_revisions, list):
+        raise ObservationContractError("observation cohort revisions must be a list")
+    normalized_pairs = [
+        _normalize_persisted_revision(raw_revision)
+        for raw_revision in raw_revisions
+    ]
+    normalized_revisions = [revision for revision, _legacy in normalized_pairs]
+    rebuilt = _cohort_from_normalized_revisions(normalized_revisions)
+    if rebuilt.get("cohort_id") != cohort.get("cohort_id"):
+        raise ObservationConflictError("observation cohort identity conflict")
+    raw_header = {
+        key: value
+        for key, value in cohort.items()
+        if key not in {"revisions", "cohort_sha256"}
+    }
+    rebuilt_header = {
+        key: value
+        for key, value in rebuilt.items()
+        if key not in {"revisions", "cohort_sha256"}
+    }
+    if raw_header != rebuilt_header:
+        raise ObservationConflictError("observation cohort canonical metadata conflict")
+    if normalized_revisions != rebuilt["revisions"]:
+        raise ObservationConflictError(
+            "observation cohort revision order, count, or uniqueness is non-canonical"
+        )
+    has_legacy_revision = any(legacy for _revision, legacy in normalized_pairs)
+    if rebuilt != cohort and not has_legacy_revision:
+        raise ObservationConflictError("observation cohort payload conflict")
+    return rebuilt
 
 
 def build_observation_cohorts(
@@ -536,7 +1034,10 @@ def summarize_observation_cohorts(
         "model_status_counts": dict(sorted(model_status_counts.items())),
         "included_in_shadow_research": False,
         "included_in_executable_performance": False,
-        "settlement_status": "NOT_IMPLEMENTED",
+        "settlement_status": (
+            "NO_SAMPLE" if canonical_prediction_count == 0 else "PENDING_MATURITY"
+        ),
+        "authorizes_production": False,
     }
 
 
@@ -550,10 +1051,15 @@ __all__ = [
     "SAMPLING_POLICY",
     "SHADOW_TRACK",
     "SUMMARY_SCHEMA_VERSION",
+    "SETTLEMENT_CONTRACT_FIELDS",
+    "PREDICTION_SETTLEMENT_DERIVED_FIELDS",
     "TRACK",
     "build_observation_cohorts",
     "build_observation_revision",
     "load_observation_cohorts",
     "record_observation_revision",
+    "prediction_sha256",
+    "settlement_contract_sha256",
     "summarize_observation_cohorts",
+    "validate_observation_cohort",
 ]

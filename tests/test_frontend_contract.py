@@ -37,6 +37,7 @@ const sandbox = {{
     matchMedia: () => ({{ matches: false }}),
     setInterval: () => 0,
     setTimeout,
+    clearTimeout,
   }},
   location: {{ hash: "", origin: "https://xuangu.test" }},
   URL,
@@ -74,7 +75,8 @@ class FrontendContractTests(unittest.TestCase):
         self.assertEqual(self.html.count('role="tabpanel"'), 6)
 
     def test_frontend_uses_published_cloud_snapshot_only(self) -> None:
-        self.assertIn('getJson("/api/latest")', self.js)
+        self.assertIn('getJson("/api/latest-summary")', self.js)
+        self.assertNotIn('getJson("/api/latest")', self.js)
         self.assertNotIn('/api/live?market=', self.js)
         self.assertNotIn("LIVE_POLL_INTERVAL_MS", self.js)
         self.assertNotIn("pollVisibleLive", self.js)
@@ -292,11 +294,240 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("next_refresh", self.js)
         self.assertIn("status.generated_at !== previousGeneratedAt", self.js)
         self.assertIn("!state.snapshot ||", self.js)
-        self.assertIn('getJson("/api/latest")', self.js)
-        self.assertIn("getHistoryPayload()", self.js)
+        self.assertIn('getJson("/api/latest-summary")', self.js)
+        self.assertIn("ensureTabData", self.js)
         self.assertIn("window.setInterval(pollStatus, STATUS_POLL_INTERVAL_MS)", self.js)
         for label in ("计划批次已发布", "等待计划批次", "计划批次已过期", "状态未知"):
             self.assertIn(label, self.js)
+
+    def test_initial_load_is_bounded_and_tabs_load_only_their_required_payloads(self) -> None:
+        self.assertIn("const TAB_DATA_REQUIREMENTS", self.js)
+        self.assertRegex(self.js, r"async function ensureTabData\(")
+        self.assertRegex(self.js, r"async function applyBootstrapPayload\(")
+        initialize = self.js[self.js.index("async function initialize()") :]
+        self.assertIn('getJson("/api/latest-summary")', initialize)
+        self.assertNotIn('getJson("/api/latest")', initialize)
+        self.assertNotIn("getHistoryPayload()", initialize.split("initialize();", 1)[0])
+        self.assertIn('getJson("/api/candidates")', self.js)
+        self.assertIn('getJson("/api/events")', self.js)
+        self.assertIn("snapshotKey !== state.snapshot?.snapshot_key", self.js)
+
+    def test_lazy_snapshot_use_merges_monotonically_and_checkpoint_poll_has_no_five_minute_gap(self) -> None:
+        run_app_node(
+            r"""
+const snapshot = {
+  contract_version: "ui-bootstrap-v1",
+  snapshot_key: "2026-08-27_fixture.json",
+  generated_at: "2026-08-27T08:17:00+08:00",
+  source_snapshot: { sha256: "a".repeat(64), byte_size: 1234 },
+};
+const use = (evaluatedAt, allowed, freshness = allowed ? "fresh" : "stale") => ({
+  contract_version: "snapshot-use-v1",
+  snapshot_key: snapshot.snapshot_key,
+  source_snapshot_sha256: snapshot.source_snapshot.sha256,
+  source_snapshot_byte_size: snapshot.source_snapshot.byte_size,
+  evaluated_at: evaluatedAt,
+  freshness_state: freshness,
+  mode: allowed ? "CURRENT_RESEARCH" : "HISTORICAL_RESEARCH_ONLY",
+  current_decision_allowed: allowed,
+  execution_review_allowed: allowed,
+  blocker_codes: allowed ? [] : ["SNAPSHOT_NOT_FRESH"],
+});
+state.snapshot = snapshot;
+state.status = {
+  ok: true,
+  snapshot_key: snapshot.snapshot_key,
+  generated_at: snapshot.generated_at,
+  freshness_state: "fresh",
+  snapshot_use: use("2026-08-27T00:02:00Z", true),
+  effective_decisions: { production_action: "QUALIFIED_PICK", global_action: "REVIEW_EXECUTABLE_PICK" },
+};
+const older = mergeSnapshotDecisionState({
+  snapshot_use: use("2026-08-27T00:01:00Z", false),
+  effective_decisions: { production_action: "HISTORICAL_ONLY", global_action: "NO_VALID_PICK" },
+}, { strict: true });
+assert.equal(older, false);
+assert.equal(state.status.snapshot_use.current_decision_allowed, true);
+assert.equal(state.status.effective_decisions.production_action, "QUALIFIED_PICK");
+assert.equal(mergeSnapshotDecisionState({
+  snapshot_use: use("2026-08-27T00:02:00Z", false),
+  effective_decisions: { production_action: "HISTORICAL_ONLY" },
+}, { strict: true }), false);
+assert.equal(state.status.snapshot_use.current_decision_allowed, true);
+
+const newer = mergeSnapshotDecisionState({
+  snapshot_use: use("2026-08-27T00:03:00Z", false),
+  effective_decisions: { production_action: "HISTORICAL_ONLY", global_action: "NO_VALID_PICK" },
+}, { strict: true });
+assert.equal(newer, true);
+assert.equal(snapshotUseTruth().currentDecisionAllowed, false);
+assert.equal(state.status.effective_decisions.production_action, "HISTORICAL_ONLY");
+assert.equal(mergeSnapshotDecisionState({
+  snapshot_use: { ...use("2026-08-27T00:04:00Z", true), snapshot_key: "other.json" },
+}, { strict: false }), false);
+assert.throws(() => mergeSnapshotDecisionState({
+  snapshot_use: { ...use("2026-08-27T00:04:00Z", true), snapshot_key: "other.json" },
+}, { strict: true }), /身份不一致/);
+assert.equal(nextRefreshPollDelay("2026-08-27T00:10:00Z", Date.parse("2026-08-27T00:09:59Z")), 1250);
+assert.equal(nextRefreshPollDelay("2026-08-27T00:10:00Z", Date.parse("2026-08-27T00:10:01Z")), CHECKPOINT_POLL_RETRY_MS);
+"""
+        )
+
+    def test_decision_health_and_evidence_do_not_change_after_events_tab_load(self) -> None:
+        run_app_node(
+            r"""
+const candidate = { market: "us", code: "MSFT", symbol: "MSFT", name: "Microsoft" };
+const evidence = {
+  event_id: "evt-global-primary", event_type: "announcement", market: "us", symbol: "MSFT",
+  company: "Microsoft", title: "Official filing", source: "SEC", url: "https://example.test/filing",
+  published_at: "2026-08-26T20:00:00Z", effective_at: "2026-08-27T00:00:00Z",
+  decision_eligible: true, ingestion_mode: "automatic", evidence_status: "verified",
+  source_tier: "official", direction: "positive",
+};
+const section = (market) => ({
+  key: market,
+  decision: market === "us" ? { primary: candidate } : {},
+  pool_health: { state: "READY" },
+  quote_health: { status: "available", quote_coverage: 1, realtime_coverage: 1 },
+  market_regime: "trend_risk_on",
+  stats: { universe_origin: market === "a_share" ? "dynamic_snapshot" : "dynamic_market_snapshot" },
+});
+state.snapshot = {
+  contract_version: "ui-bootstrap-v1",
+  snapshot_key: "2026-08-27_fixture.json",
+  generated_at: "2026-08-27T08:17:00+08:00",
+  target_date: "2026-08-27", forecast_end_date: "2026-09-10",
+  source_snapshot: { sha256: "b".repeat(64), byte_size: 2000 },
+  markets: { a_share: section("a_share"), hk: section("hk"), us: section("us") },
+  analysis_models: { ten_day_return: {
+    status: "READY", calibrated: true, costs_ready: true, tail_risk_ready: true,
+    participates_in_decision: true, model_id: "ten-day-model",
+  } },
+  global_decision: {
+    contract_version: "global-10d-v1", decision_scope: "global_10d",
+    action: "REVIEW_EXECUTABLE_PICK", action_basis: "strict_cross_market_gate_v1",
+    calibrated: true, probability_status: "CALIBRATED", probability: 0.61,
+    automatic_external_evidence_count: 1, blocker_codes: [],
+    market_states: { a_share: { state: "READY" }, hk: { state: "READY" }, us: { state: "READY" } },
+    primary: {
+      status: "EXECUTABLE", market: "us", code: "MSFT", name: "Microsoft",
+      score_kind: "TEN_DAY_EXPECTED_NET_UTILITY", probability: 0.61,
+      expected_net_utility: 0.02, transaction_cost: 0.001, tail_risk: 0.05,
+      model_id: "ten-day-model", calibrated: true,
+    },
+  },
+  production_decision: null,
+  decision_evidence: { automatic_external_evidence_count: 1, bound_event_ids: [evidence.event_id], items: [evidence] },
+  event_stats: { total: 405, model_signals: 3, automatic_external: 1, decision_eligible: 1, decision_bound: 1 },
+};
+state.status = {
+  ok: true, freshness_state: "fresh", snapshot_key: state.snapshot.snapshot_key,
+  generated_at: state.snapshot.generated_at,
+  source_snapshot_sha256: state.snapshot.source_snapshot.sha256,
+  source_snapshot_byte_size: state.snapshot.source_snapshot.byte_size,
+  snapshot_use: {
+    snapshot_key: state.snapshot.snapshot_key,
+    source_snapshot_sha256: state.snapshot.source_snapshot.sha256,
+    source_snapshot_byte_size: state.snapshot.source_snapshot.byte_size,
+    evaluated_at: "2026-08-27T00:18:00Z", freshness_state: "fresh",
+    mode: "CURRENT_RESEARCH", current_decision_allowed: true, execution_review_allowed: true,
+    blocker_codes: [],
+  },
+};
+__roots.set("#healthView", { innerHTML: "" });
+const beforeTruth = globalDecisionTruth();
+const beforeEvidence = automaticExternalEvents().map((item) => item.event_id);
+renderHealth();
+const beforeHealth = __roots.get("#healthView").innerHTML;
+state.eventsPayload = {
+  events: { items: [{ ...evidence, event_id: "unbound-newer", symbol: "NVDA" }] },
+  event_publication: { total: 999, published: 1, truncated: 998, is_truncated: true },
+};
+const afterTruth = globalDecisionTruth();
+const afterEvidence = automaticExternalEvents().map((item) => item.event_id);
+renderHealth();
+assert.equal(beforeTruth.action, "REVIEW_EXECUTABLE_PICK");
+assert.equal(afterTruth.action, beforeTruth.action);
+assert.equal(afterTruth.executable.primary.code, beforeTruth.executable.primary.code);
+assert.deepEqual(afterEvidence, beforeEvidence);
+assert.equal(publishedEventStats().modelSignals, 3);
+assert.equal(__roots.get("#healthView").innerHTML, beforeHealth);
+assert.deepEqual(automaticEventFeed().map((item) => item.event_id), ["unbound-newer"]);
+"""
+        )
+
+    def test_stale_published_qualification_is_historical_and_never_current(self) -> None:
+        run_app_node(
+            r"""
+const candidate = {
+  market: "us", code: "VZ", symbol: "VZ", name: "Verizon",
+  recommendation_degree: 72, realtime: {
+    price: 50, change_pct: 0.2, source_as_of: "2026-08-26T16:00:00-04:00",
+    fetched_at: "2026-08-27T08:00:00+08:00", volume_unit: "share",
+  },
+};
+const primary = {
+  qualification_id: "qual_0123456789abcdef01234567", status: "QUALIFIED",
+  market: "us", code: "VZ", name: "Verizon",
+  rule_model_id: "ten-day-audited-rule-ensemble-v3",
+  score_kind: "RULE_QUALIFICATION_SCORE", qualification_score: 75,
+  probability: null, calibrated: false, candidate_snapshot: candidate,
+};
+const snapshot = {
+  contract_version: "ui-bootstrap-v1",
+  model_version: CURRENT_PRODUCTION_MODEL_VERSION,
+  snapshot_key: "2026-08-26_fixture.json",
+  generated_at: "2026-08-26T22:47:00+08:00",
+  target_date: "2026-08-26", forecast_end_date: "2026-09-09",
+  source_snapshot: { sha256: "a".repeat(64), byte_size: 1000 },
+  production_decision: {
+    contract_version: "production-rule-10d-v1",
+    decision_scope: "global_10d_bounded_recall",
+    action: "QUALIFIED_PICK", action_basis: "dual_track_candidate_qualification_v3",
+    rule_model_id: "ten-day-audited-rule-ensemble-v3",
+    score_kind: "RULE_QUALIFICATION_SCORE", probability: null, calibrated: false,
+    primary, qualified_candidates: [primary], qualified_candidate_count: 1,
+    rejected_candidate_count: 797, evaluated_candidate_count: 798, blocker_codes: [],
+  },
+  global_decision: {
+    contract_version: "global-10d-v1", decision_scope: "global_10d",
+    action_basis: "strict_cross_market_gate_v1", action: "NO_VALID_PICK",
+    primary: null, blocker_codes: [], automatic_external_evidence_count: 0,
+  },
+  decision_evidence: { automatic_external_evidence_count: 0, items: [] },
+  markets: {
+    a_share: { key: "a_share", decision: {}, pool_health: {}, quote_health: {}, stats: {} },
+    hk: { key: "hk", decision: {}, pool_health: {}, quote_health: {}, stats: {} },
+    us: { key: "us", decision: { primary: candidate }, pool_health: {}, quote_health: {}, stats: {} },
+  },
+};
+const status = {
+  ok: true, snapshot_key: snapshot.snapshot_key, generated_at: snapshot.generated_at,
+  source_snapshot_sha256: snapshot.source_snapshot.sha256,
+  source_snapshot_byte_size: snapshot.source_snapshot.byte_size,
+  freshness_state: "stale",
+  snapshot_use: {
+    mode: "HISTORICAL_RESEARCH_ONLY", current_decision_allowed: false,
+    execution_review_allowed: false, blocker_codes: ["SNAPSHOT_NOT_FRESH"],
+  },
+};
+state.snapshot = snapshot;
+state.status = status;
+const truth = productionDecisionTruth(snapshot, status);
+assert.equal(truth.currentQualifiedCount, 0);
+assert.equal(truth.historicalQualifiedCount, 1);
+assert.equal(truth.currentAction, "HISTORICAL_ONLY");
+assert.equal(truth.publishedAction, "QUALIFIED_PICK");
+assert.equal(candidateDecisionRole(candidate, "us"), "historical_qualified");
+__roots.set("#decisionView", { innerHTML: "" });
+renderDecision();
+const html = __roots.get("#decisionView").innerHTML;
+assert.match(html, /历史快照曾规则合格/);
+assert.match(html, /暂停执行/);
+assert.doesNotMatch(html, /今日质量趋势合格/);
+assert.doesNotMatch(html, /仍需核对交易计划/);
+"""
+        )
 
     def test_decision_page_makes_degraded_pool_visible(self) -> None:
         self.assertRegex(self.js, r"function poolHealthAlert\(")
@@ -369,17 +600,17 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("decision.probability === null", self.js)
         self.assertIn("decision.calibrated === false", self.js)
         self.assertIn("serverPrimary?.qualification_score", self.js)
-        self.assertIn('action: qualified ? "QUALIFIED_PICK" : "NO_QUALIFIED_PICK"', self.js)
-        self.assertIn("const selected = production.qualified;", self.js)
+        self.assertIn('const currentAction = snapshotUse.currentDecisionAllowed', self.js)
+        self.assertIn("const selected = production.qualified || production.historicalQualified;", self.js)
         self.assertIn("浏览器绝不把它们自行升级为 QUALIFIED_PICK", self.js)
         self.assertIn("规则资格分（非概率）", self.js)
         self.assertIn("生产规则模型已有合格候选", self.js)
-        self.assertIn("规则合格 ${fmt(production.qualifiedCount, 0)} · 校准可执行", self.js)
+        self.assertIn("当前规则合格 ${fmt(production.currentQualifiedCount, 0)}", self.js)
         self.assertIn("productionQualificationForCandidate", self.js)
         self.assertIn("decision.qualified_candidates", self.js)
-        self.assertIn("qualifiedCount: qualified ? qualifiedRows.length : 0", self.js)
+        self.assertIn("qualifiedCount: currentQualified ? qualifiedRows.length : 0", self.js)
         self.assertIn("publishedCount !== rows.length", self.js)
-        self.assertIn("productionQualifiedRows(state.snapshot, market).some", self.js)
+        self.assertIn("const publishedQualified = productionQualifiedRows(state.snapshot, market)", self.js)
         self.assertIn("const rolePriority = { qualified: 0", self.js)
         self.assertIn("syncPreferredCandidate({ revealQualified: true })", self.js)
         self.assertIn("productionPrimary.rule_model_id || item.production_decision?.rule_model_id", self.js)
@@ -402,7 +633,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('quality_technical: "质量趋势合格"', self.js)
         self.assertIn("qualificationTrackLabel(primary.qualification_track)", self.js)
         self.assertIn("qualificationTrackLabel(qualification.qualification_track)", self.js)
-        self.assertIn("qualificationTrackLabel(production.primary.qualification_track)", self.js)
+        self.assertIn("qualificationTrackLabel(displayPrimary.qualification_track)", self.js)
         self.assertIn("qualificationTrackLabel(productionPrimary.qualification_track)", self.js)
         self.assertIn("已完成事件扫描且未发现重大负面；本通道不要求正向催化", self.js)
         self.assertIn("质量趋势通道不绑定正向事件", self.js)
@@ -1013,7 +1244,7 @@ assert.equal(candidateId({ code: "BRK.B" }, "us"), candidateId({ symbol: "BRK_B"
         self.assertIn("historyError", self.js)
         self.assertIn("HISTORY_DATA_UNAVAILABLE", self.js)
         self.assertIn("getHistoryPayload", self.js)
-        self.assertIn("HISTORY_LIMIT = 1000", self.js)
+        self.assertIn("HISTORY_LIMIT = 120", self.js)
         self.assertIn("暂无已结算的可执行预测样本", self.js)
         self.assertIn("原始运行", self.js)
         self.assertIn("决策日", self.js)
@@ -1030,6 +1261,68 @@ assert.equal(candidateId({ code: "BRK.B" }, "us"), candidateId({ symbol: "BRK_B"
         self.assertIn("正式十日预测", self.js)
         self.assertIn("prediction_id", self.js)
         self.assertNotIn("空白代表尚未有可靠评估", self.js)
+
+    def test_observation_performance_is_rendered_as_diagnostic_only(self) -> None:
+        for field in (
+            "observation_performance",
+            "pending_maturity_count",
+            "pending_data_count",
+            "settled_count",
+            "authorization_status",
+            "included_in_executable_performance",
+            "authorizes_production",
+        ):
+            self.assertIn(field, self.js)
+        self.assertIn("不进入正式绩效", self.js)
+        self.assertIn("不授权生产", self.js)
+        self.assertNotIn("NOT IMPLEMENTED", self.js)
+        self.assertNotIn("当前只负责积累点时预测", self.js)
+        run_app_node(
+            r"""
+const html = renderObservationLedgerPanel(
+  {
+    track: "MODEL_OBSERVATION",
+    status: "OBSERVING",
+    cohort_count: 4,
+    revision_count: 6,
+    canonical_prediction_count: 31,
+    market_prediction_counts: { a_share: 11, hk: 9, us: 11 },
+  },
+  {
+    schema_version: "model-observation-performance-v1",
+    track: "MODEL_OBSERVATION",
+    status: "PENDING_MATURITY",
+    cohort_count: 4,
+    prediction_count: 31,
+    pending_maturity_count: 17,
+    pending_data_count: 3,
+    settled_count: 11,
+    independent_cohort_day_count: 2,
+    minimum_reliable_independent_cohort_days: 20,
+    untracked_count: 0,
+    invalid_cohort_count: 0,
+    invalid_batch_count: 0,
+    invalid_outcome_count: 0,
+    market_coverage: {},
+    metrics: {},
+    included_in_shadow_research: false,
+    included_in_executable_performance: false,
+    authorizes_production: false,
+    authorization_status: "DIAGNOSTIC_ONLY_MANUAL_REVIEW_REQUIRED",
+  },
+);
+assert.match(html, /PENDING_MATURITY/);
+assert.match(html, /PENDING_DATA/);
+assert.match(html, /SETTLED/);
+assert.match(html, />17</);
+assert.match(html, />3</);
+assert.match(html, />11</);
+assert.match(html, /DIAGNOSTIC_ONLY_MANUAL_REVIEW_REQUIRED/);
+assert.match(html, /不进入正式绩效/);
+assert.match(html, /不授权生产/);
+assert.doesNotMatch(html, /NOT IMPLEMENTED/);
+"""
+        )
 
     def test_old_full_history_assets_have_an_explicit_retention_message(self) -> None:
         self.assertIn("item.full_snapshot_available === false", self.js)

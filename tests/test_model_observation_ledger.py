@@ -71,7 +71,57 @@ def snapshot(
     }
 
 
+def current_observation_cohort() -> dict:
+    revision = ledger.build_observation_revision(snapshot())
+    return ledger._cohort_from_revisions([revision])
+
+
+def rehash_revision_and_cohort(cohort: dict, revision_index: int = 0) -> None:
+    revision = cohort["revisions"][revision_index]
+    revision["revision_sha256"] = ledger._digest(
+        {key: value for key, value in revision.items() if key != "revision_sha256"}
+    )
+    cohort["cohort_sha256"] = ledger._digest(
+        {key: value for key, value in cohort.items() if key != "cohort_sha256"}
+    )
+
+
+def legacy_observation_cohort(cohort: dict) -> dict:
+    """Return the exact settlement-free prediction shape written by origin/main."""
+
+    legacy = copy.deepcopy(cohort)
+    for index, revision in enumerate(legacy["revisions"]):
+        for row in revision["predictions"]:
+            for field in ledger.PREDICTION_SETTLEMENT_DERIVED_FIELDS:
+                row.pop(field)
+        rehash_revision_and_cohort(legacy, index)
+    # The helper above updates the cohort hash after every revision; this final
+    # pass binds all final legacy revision hashes together.
+    legacy["cohort_sha256"] = ledger._digest(
+        {key: value for key, value in legacy.items() if key != "cohort_sha256"}
+    )
+    return legacy
+
+
 class ModelObservationLedgerTests(unittest.TestCase):
+    def test_future_prediction_or_fit_cutoff_fails_closed(self) -> None:
+        for field in ("prediction_as_of", "fit_data_cutoff"):
+            payload = snapshot()
+            for row in payload["analysis_models"]["ten_day_return"]["shadow_predictions"]:
+                row[field] = "2026-09-01"
+            with self.subTest(field=field), self.assertRaises(
+                ledger.ObservationContractError
+            ):
+                ledger.build_observation_revision(payload)
+
+    def test_cutoff_order_must_be_monotonic(self) -> None:
+        payload = snapshot()
+        for row in payload["analysis_models"]["ten_day_return"]["shadow_predictions"]:
+            row["training_cutoff"] = "2026-08-10"
+            row["fit_data_cutoff"] = "2026-08-09"
+        with self.assertRaises(ledger.ObservationContractError):
+            ledger.build_observation_revision(payload)
+
     def test_rejected_model_records_all_predictions_without_rank_eligibility(self) -> None:
         revision = ledger.build_observation_revision(snapshot())
 
@@ -85,6 +135,31 @@ class ModelObservationLedgerTests(unittest.TestCase):
         self.assertEqual([row["rank_eligible"] for row in revision["predictions"]], [False, False, False])
         self.assertTrue(all(row["track"] == ledger.TRACK for row in revision["predictions"]))
         self.assertTrue(all(row["included_in_executable_performance"] is False for row in revision["predictions"]))
+
+    def test_every_prediction_freezes_a_ten_session_settlement_contract(self) -> None:
+        revision = ledger.build_observation_revision(snapshot())
+
+        expected = {
+            "a_share": ("2026-08-24", "2026-09-04", "XSHG", "CNY", 0.0015),
+            "hk": ("2026-08-24", "2026-09-04", "XHKG", "HKD", 0.003),
+            "us": ("2026-08-24", "2026-09-04", "XNYS", "USD", 0.0015),
+        }
+        for row in revision["predictions"]:
+            entry, exit_, calendar, currency, cost = expected[row["market"]]
+            self.assertEqual(row["entry_trade_date"], entry)
+            self.assertEqual(row["forecast_end_trade_date"], exit_)
+            self.assertEqual(row["horizon_trade_sessions"], 10)
+            self.assertEqual(row["entry_policy"], "next_session_open_v1")
+            self.assertEqual(row["exit_policy"], "tenth_session_close_v1")
+            self.assertEqual(row["calendar_id"], calendar)
+            self.assertEqual(row["calendar_version"], "exchange-calendars-4.13.2")
+            self.assertEqual(row["currency"], currency)
+            self.assertEqual(row["transaction_cost"], cost)
+            self.assertRegex(row["settlement_contract_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                row["settlement_contract_sha256"],
+                ledger.settlement_contract_sha256(row),
+            )
 
     def test_observation_ids_are_stable_across_same_slot_revisions(self) -> None:
         primary = ledger.build_observation_revision(snapshot())
@@ -173,6 +248,129 @@ class ModelObservationLedgerTests(unittest.TestCase):
 
         self.assertEqual(immutable, latest_alias)
 
+    def test_complete_legacy_settlement_block_is_upgraded_deterministically(self) -> None:
+        current = current_observation_cohort()
+        legacy = legacy_observation_cohort(current)
+
+        self.assertNotEqual(legacy["cohort_sha256"], current["cohort_sha256"])
+        self.assertEqual(ledger.validate_observation_cohort(legacy), current)
+
+    def test_legacy_upgrade_does_not_excuse_revision_reorder_or_duplication(self) -> None:
+        primary = ledger.build_observation_revision(snapshot())
+        recovery_payload = snapshot(
+            generated_at="2026-08-21T23:18:00+08:00",
+            source="2026-08-22_2026-08-21_231800.json",
+        )
+        recovery = ledger.build_observation_revision(recovery_payload)
+        current = ledger._cohort_from_revisions([primary, recovery])
+        legacy = legacy_observation_cohort(current)
+
+        reordered = copy.deepcopy(legacy)
+        reordered["revisions"].reverse()
+        reordered["cohort_sha256"] = ledger._digest(
+            {key: value for key, value in reordered.items() if key != "cohort_sha256"}
+        )
+        with self.assertRaisesRegex(
+            ledger.ObservationConflictError,
+            "revision order, count, or uniqueness",
+        ):
+            ledger.validate_observation_cohort(reordered)
+
+        duplicated = copy.deepcopy(legacy)
+        duplicated["revisions"].append(copy.deepcopy(duplicated["revisions"][0]))
+        duplicated["cohort_sha256"] = ledger._digest(
+            {key: value for key, value in duplicated.items() if key != "cohort_sha256"}
+        )
+        with self.assertRaisesRegex(
+            ledger.ObservationConflictError,
+            "revision order, count, or uniqueness",
+        ):
+            ledger.validate_observation_cohort(duplicated)
+
+    def test_rehashed_outer_payload_cannot_hide_stale_prediction_digest(self) -> None:
+        tampered = current_observation_cohort()
+        tampered["revisions"][0]["predictions"][0]["probability"] = 0.99
+        rehash_revision_and_cohort(tampered)
+
+        with self.assertRaisesRegex(
+            ledger.ObservationConflictError,
+            "observation prediction digest mismatch",
+        ):
+            ledger.validate_observation_cohort(tampered)
+
+    def test_prediction_fields_must_be_exactly_legacy_or_current(self) -> None:
+        unknown = current_observation_cohort()
+        unknown["revisions"][0]["predictions"][0]["unhashed_extension"] = True
+        rehash_revision_and_cohort(unknown)
+        with self.assertRaisesRegex(
+            ledger.ObservationContractError,
+            "prediction field set is invalid",
+        ):
+            ledger.validate_observation_cohort(unknown)
+
+        partial = legacy_observation_cohort(current_observation_cohort())
+        partial["revisions"][0]["predictions"][0]["entry_trade_date"] = "2026-08-24"
+        rehash_revision_and_cohort(partial)
+        with self.assertRaisesRegex(
+            ledger.ObservationContractError,
+            "settlement fields must be either wholly absent or complete",
+        ):
+            ledger.validate_observation_cohort(partial)
+
+    def test_observation_identity_is_recomputed_even_when_all_hashes_are_updated(self) -> None:
+        tampered = current_observation_cohort()
+        row = tampered["revisions"][0]["predictions"][0]
+        row["observation_id"] = "obs_" + "f" * 24
+        row["prediction_sha256"] = ledger.prediction_sha256(row)
+        row["settlement_contract_sha256"] = ledger.settlement_contract_sha256(row)
+        rehash_revision_and_cohort(tampered)
+
+        with self.assertRaisesRegex(
+            ledger.ObservationConflictError,
+            "observation_id does not match",
+        ):
+            ledger.validate_observation_cohort(tampered)
+
+    def test_revision_counts_and_uniqueness_are_recomputed(self) -> None:
+        bad_count = current_observation_cohort()
+        bad_count["revisions"][0]["prediction_count"] += 1
+        rehash_revision_and_cohort(bad_count)
+        with self.assertRaisesRegex(
+            ledger.ObservationConflictError,
+            "prediction counts are inconsistent",
+        ):
+            ledger.validate_observation_cohort(bad_count)
+
+        duplicate = current_observation_cohort()
+        duplicate["revisions"][0]["predictions"].append(
+            copy.deepcopy(duplicate["revisions"][0]["predictions"][0])
+        )
+        duplicate["revisions"][0]["prediction_count"] += 1
+        duplicate["revisions"][0]["market_prediction_counts"]["a_share"] += 1
+        rehash_revision_and_cohort(duplicate)
+        with self.assertRaisesRegex(
+            ledger.ObservationConflictError,
+            "duplicate prediction identity",
+        ):
+            ledger.validate_observation_cohort(duplicate)
+
+    def test_record_api_rewrites_legacy_duplicate_revision_in_current_format(self) -> None:
+        current = current_observation_cohort()
+        legacy = legacy_observation_cohort(current)
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / f"{current['cohort_id']}.json"
+            target.write_text(json.dumps(legacy), encoding="utf-8")
+
+            result = ledger.record_observation_revision(
+                snapshot(),
+                directory=pathlib.Path(directory),
+            )
+
+            self.assertFalse(result["created"])
+            self.assertTrue(result["changed"])
+            self.assertEqual(result["cohort"], current)
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), current)
+
     def test_summary_is_compact_and_explicitly_isolated(self) -> None:
         cohorts = ledger.build_observation_cohorts({snapshot()["snapshot_key"]: snapshot()})
         summary = ledger.summarize_observation_cohorts(cohorts)
@@ -186,7 +384,8 @@ class ModelObservationLedgerTests(unittest.TestCase):
         self.assertEqual(summary["model_status_counts"], {"SHADOW_REJECTED": 1})
         self.assertFalse(summary["included_in_shadow_research"])
         self.assertFalse(summary["included_in_executable_performance"])
-        self.assertEqual(summary["settlement_status"], "NOT_IMPLEMENTED")
+        self.assertEqual(summary["settlement_status"], "PENDING_MATURITY")
+        self.assertFalse(summary["authorizes_production"])
 
     def test_record_api_atomically_creates_extends_and_deduplicates_cohort(self) -> None:
         primary = snapshot()

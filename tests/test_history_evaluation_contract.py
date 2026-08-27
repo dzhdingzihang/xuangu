@@ -9,7 +9,10 @@ from copy import deepcopy
 from unittest import mock
 
 import history_evaluation
+import model_observation_ledger
+import observation_outcome_ledger
 import server
+from tests.test_model_observation_ledger import snapshot as observation_snapshot
 
 
 def write_snapshot(directory: pathlib.Path, name: str, payload: dict) -> None:
@@ -113,6 +116,215 @@ def set_formal_version(row: dict, model_id: str, label_version: str) -> dict:
 
 
 class HistoryEvaluationContractTests(unittest.TestCase):
+    def test_observation_diagnostics_are_isolated_from_executable_performance(self) -> None:
+        cohorts = model_observation_ledger.build_observation_cohorts(
+            {observation_snapshot()["snapshot_key"]: observation_snapshot()}
+        )
+        cohort = next(iter(cohorts.values()))
+        batches = {
+            cohort["cohort_id"]: observation_outcome_ledger.settle_observation_cohort(
+                cohort,
+                "2026-08-25T00:00:00Z",
+                lambda *_: ([], "unused", True),
+            )
+        }
+
+        diagnostics = history_evaluation.evaluate_observation_performance(cohorts, batches)
+        formal = history_evaluation.evaluate_formal_performance([])
+
+        self.assertEqual(diagnostics["track"], "MODEL_OBSERVATION")
+        self.assertEqual(diagnostics["prediction_count"], 3)
+        self.assertEqual(diagnostics["pending_maturity_count"], 3)
+        self.assertEqual(diagnostics["settled_count"], 0)
+        self.assertEqual(diagnostics["independent_cohort_day_count"], 0)
+        self.assertFalse(diagnostics["included_in_executable_performance"])
+        self.assertFalse(diagnostics["authorizes_production"])
+        self.assertEqual(formal["executable_prediction_count"], 0)
+        self.assertEqual(formal["settled_sample_count"], 0)
+
+    def test_observation_diagnostics_report_equal_weight_market_day_metrics(self) -> None:
+        snapshot = observation_snapshot()
+        predictions = snapshot["analysis_models"]["ten_day_return"]["shadow_predictions"]
+        second_a_share = deepcopy(predictions[0])
+        second_a_share.update(
+            {
+                "code": "600001",
+                "probability": 0.80,
+                "expected_net_return": 0.08,
+                "expected_net_utility": 0.05,
+            }
+        )
+        predictions.append(second_a_share)
+        cohorts = model_observation_ledger.build_observation_cohorts(
+            {snapshot["snapshot_key"]: snapshot}
+        )
+        cohort = next(iter(cohorts.values()))
+        exit_prices = {"600000": 90.0, "600001": 110.0, "0700.HK": 103.0, "NVDA": 105.0}
+
+        def loader(market: str, code: str):
+            prediction = next(
+                row
+                for row in cohort["revisions"][-1]["predictions"]
+                if row["market"] == market and row["code"] == code
+            )
+            return (
+                [
+                    {"date": prediction["entry_trade_date"], "open": 100.0, "close": 100.0},
+                    {
+                        "date": prediction["forecast_end_trade_date"],
+                        "open": exit_prices[code],
+                        "close": exit_prices[code],
+                    },
+                ],
+                "fixture_adjusted_daily",
+                True,
+            )
+
+        batch = observation_outcome_ledger.settle_observation_cohort(
+            cohort,
+            "2026-09-07T00:00:00Z",
+            loader,
+        )
+        diagnostics = history_evaluation.evaluate_observation_performance(
+            cohorts,
+            {cohort["cohort_id"]: batch},
+        )
+
+        self.assertEqual(diagnostics["settled_count"], 4)
+        self.assertEqual(diagnostics["independent_cohort_day_count"], 1)
+        self.assertEqual(diagnostics["market_coverage"]["a_share"]["settled_count"], 2)
+        self.assertEqual(diagnostics["metrics"]["auc"]["value"], 1.0)
+        self.assertEqual(diagnostics["metrics"]["daily_cross_sectional_rank_ic"]["value"], 1.0)
+        self.assertEqual(diagnostics["metrics"]["auc"]["n"], 1)
+        self.assertEqual(diagnostics["metrics"]["auc"]["cell_n"], 1)
+        self.assertEqual(diagnostics["metrics"]["brier_score"]["cell_n"], 3)
+        self.assertEqual(diagnostics["complete_metric_cell_count"], 3)
+        self.assertEqual(diagnostics["incomplete_metric_cell_count"], 0)
+        for name in (
+            "brier_score",
+            "brier_skill",
+            "auc",
+            "ece_10bin",
+            "daily_cross_sectional_rank_ic",
+            "top_decile_net_return",
+            "top_decile_excess_return",
+            "worst_decile_net_return",
+        ):
+            self.assertIn(name, diagnostics["metrics"])
+        self.assertFalse(diagnostics["included_in_executable_performance"])
+        self.assertFalse(diagnostics["authorizes_production"])
+
+    def test_observation_metrics_exclude_incomplete_market_cells(self) -> None:
+        snapshot = observation_snapshot()
+        predictions = snapshot["analysis_models"]["ten_day_return"]["shadow_predictions"]
+        second_a_share = deepcopy(predictions[0])
+        second_a_share.update(
+            {
+                "code": "600001",
+                "probability": 0.80,
+                "expected_net_return": 0.08,
+                "expected_net_utility": 0.05,
+            }
+        )
+        predictions.append(second_a_share)
+        cohorts = model_observation_ledger.build_observation_cohorts(
+            {snapshot["snapshot_key"]: snapshot}
+        )
+        cohort = next(iter(cohorts.values()))
+
+        def partial_loader(market: str, code: str):
+            prediction = next(
+                row
+                for row in cohort["revisions"][-1]["predictions"]
+                if row["market"] == market and row["code"] == code
+            )
+            if code == "600001":
+                return [], "fixture_adjusted_daily", True
+            return (
+                [
+                    {"date": prediction["entry_trade_date"], "open": 100.0, "close": 100.0},
+                    {
+                        "date": prediction["forecast_end_trade_date"],
+                        "open": 105.0,
+                        "close": 105.0,
+                    },
+                ],
+                "fixture_adjusted_daily",
+                True,
+            )
+
+        batch = observation_outcome_ledger.settle_observation_cohort(
+            cohort,
+            "2026-09-07T00:00:00Z",
+            partial_loader,
+        )
+        diagnostics = history_evaluation.evaluate_observation_performance(
+            cohorts,
+            {cohort["cohort_id"]: batch},
+        )
+
+        self.assertEqual(diagnostics["incomplete_metric_cell_count"], 1)
+        self.assertEqual(diagnostics["complete_metric_cell_count"], 2)
+        self.assertEqual(diagnostics["metrics"]["brier_score"]["cell_n"], 2)
+        self.assertEqual(diagnostics["metrics"]["auc"]["n"], 0)
+        self.assertEqual(diagnostics["metrics"]["auc"]["status"], "UNAVAILABLE")
+
+    def test_history_api_publishes_persisted_observation_settlement_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            picks = root / "picks"
+            outcomes_root = root / "outcomes"
+            picks.mkdir()
+            recorded = model_observation_ledger.record_observation_revision(
+                observation_snapshot(),
+                directory=outcomes_root / "observations",
+            )
+            cohort = recorded["cohort"]
+
+            def loader(market: str, code: str):
+                prediction = next(
+                    row
+                    for row in cohort["revisions"][-1]["predictions"]
+                    if row["market"] == market and row["code"] == code
+                )
+                return (
+                    [
+                        {"date": prediction["entry_trade_date"], "open": 100.0, "close": 100.0},
+                        {
+                            "date": prediction["forecast_end_trade_date"],
+                            "open": 105.0,
+                            "close": 105.0,
+                        },
+                    ],
+                    "fixture_adjusted_daily",
+                    True,
+                )
+
+            batch = observation_outcome_ledger.settle_observation_cohort(
+                cohort,
+                "2026-09-07T00:00:00Z",
+                loader,
+            )
+            observation_outcome_ledger.write_outcome_batch(
+                outcomes_root / "observation-settlements",
+                batch,
+            )
+            with (
+                mock.patch.object(server, "PICKS", picks),
+                mock.patch.object(server, "OUTCOMES", outcomes_root),
+                mock.patch.object(server, "EXECUTABLE_OUTCOMES", outcomes_root / "executable"),
+            ):
+                payload = server.history_payload(limit=30)
+
+            performance = payload["history_evaluation"]["observation_performance"]
+            self.assertEqual(performance["status"], "EARLY_SAMPLE")
+            self.assertEqual(performance["settled_count"], 3)
+            self.assertEqual(payload["meta"]["observation_ledger"]["settled_count"], 3)
+            self.assertEqual(
+                payload["meta"]["observation_ledger"]["settlement_status"],
+                "EARLY_SAMPLE",
+            )
+
     def test_history_payload_consolidates_runs_without_relabeling_legacy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             picks = pathlib.Path(temporary)
@@ -170,6 +382,14 @@ class HistoryEvaluationContractTests(unittest.TestCase):
             self.assertEqual(daily["meta"]["legacy_day_count"], 1)
             self.assertEqual(raw["meta"]["view"], "raw")
             self.assertEqual(len(raw["history"]), 4)
+            self.assertEqual(
+                daily["history_evaluation"]["observation_performance"]["status"],
+                "NO_SAMPLE",
+            )
+            self.assertEqual(
+                daily["meta"]["observation_ledger"]["settlement_status"],
+                "NO_SAMPLE",
+            )
             contract_row = next(row for row in daily["history"] if row["target_date"] == "2026-08-21")
             self.assertEqual(contract_row["history_kind"], "global_10d_v1")
 

@@ -43,6 +43,11 @@ SUPPORTED_PRODUCTION_RULE_CONTRACTS = {
     (PRODUCTION_RULE_ACTION_BASIS, PRODUCTION_RULE_MODEL_ID),
 }
 STATE_SEVERITY = {"READY": 0, "DEGRADED": 1, "BLOCKED": 2}
+SCHEDULE_ON_TIME_MAX_SECONDS = 4 * 60 * 60
+SCHEDULE_LATE_EFFECTIVE_MAX_SECONDS = 12 * 60 * 60
+# The gate records delay before dependency installation and snapshot generation.
+# Allow one bounded workflow hour between that audit moment and generated_at.
+SCHEDULE_GENERATION_TOLERANCE_SECONDS = 60 * 60
 VALID_VOLUME_UNITS = {"lot", "share"}
 MARKET_RECALL_TARGETS = {"a_share": 300, "hk": 200, "us": 300}
 A_SHARE_BOARD_TARGETS = {"sh_main": 90, "sz_main": 75, "chinext": 75, "star": 60}
@@ -176,6 +181,96 @@ def _append_schedule_automation_errors(snapshot: dict, errors: list[str]) -> Non
     )
     if checkpoint.astimezone(dt.timezone.utc) != expected_checkpoint.astimezone(dt.timezone.utc):
         errors.append("automation.scheduled_slot does not match its invocation checkpoint")
+
+    recovery_fields_present = any(
+        field in automation
+        for field in (
+            "source_invocation_slot",
+            "scheduler_delay_seconds",
+            "recovery_mode",
+        )
+    )
+    if not recovery_fields_present:
+        # Compatibility bridge for snapshots published before late-recovery
+        # metadata was added. Newly generated snapshots always carry it.
+        return
+
+    recovery_mode = automation.get("recovery_mode")
+    if recovery_mode not in {"on_time", "late_cron_recovery"}:
+        errors.append("automation.recovery_mode is invalid")
+    source_invocation = _aware_automation_moment(
+        automation.get("source_invocation_slot")
+    )
+    scheduler_delay = automation.get("scheduler_delay_seconds")
+    if recovery_mode in {"on_time", "late_cron_recovery"}:
+        if source_invocation is None:
+            errors.append(
+                "scheduled automation.source_invocation_slot must be an aware ISO datetime"
+            )
+        if (
+            not isinstance(scheduler_delay, int)
+            or isinstance(scheduler_delay, bool)
+            or scheduler_delay < 0
+        ):
+            errors.append(
+                "automation.scheduler_delay_seconds must be a non-negative integer"
+            )
+    elif scheduler_delay is not None and (
+        not isinstance(scheduler_delay, int)
+        or isinstance(scheduler_delay, bool)
+        or scheduler_delay < 0
+    ):
+        errors.append(
+            "automation.scheduler_delay_seconds must be a non-negative integer"
+        )
+
+    generated = _aware_automation_moment(snapshot.get("generated_at"))
+    if generated is not None and invocation > generated:
+        errors.append("automation.scheduled_invocation_slot cannot be after generated_at")
+
+    if source_invocation is not None:
+        source_local = source_invocation.astimezone(ZoneInfo("Asia/Shanghai"))
+        source_clock = (source_local.hour, source_local.minute)
+        if (
+            source_local.weekday() >= 5
+            or source_clock not in PRIMARY_SCHEDULE_SLOTS
+            and source_clock not in FALLBACK_SCHEDULE_MAP
+        ):
+            errors.append("automation.source_invocation_slot is not a configured invocation")
+        if generated is not None and source_invocation > generated:
+            errors.append("automation.source_invocation_slot cannot be in the future")
+        if recovery_mode == "on_time" and source_invocation != invocation:
+            errors.append(
+                "on-time automation.source_invocation_slot must equal scheduled_invocation_slot"
+            )
+        if recovery_mode == "late_cron_recovery" and source_invocation > invocation:
+            errors.append(
+                "late recovery source_invocation_slot cannot follow scheduled_invocation_slot"
+            )
+
+    if (
+        generated is not None
+        and source_invocation is not None
+        and isinstance(scheduler_delay, int)
+        and not isinstance(scheduler_delay, bool)
+        and scheduler_delay >= 0
+    ):
+        observed_source_delay = (generated - source_invocation).total_seconds()
+        if abs(observed_source_delay - scheduler_delay) > SCHEDULE_GENERATION_TOLERANCE_SECONDS:
+            errors.append(
+                "automation.scheduler_delay_seconds is inconsistent with generated_at"
+            )
+        if recovery_mode == "on_time" and scheduler_delay > SCHEDULE_ON_TIME_MAX_SECONDS:
+            errors.append("on-time automation exceeds the four-hour scheduler window")
+        if recovery_mode == "late_cron_recovery" and scheduler_delay <= SCHEDULE_ON_TIME_MAX_SECONDS:
+            errors.append("late recovery must exceed the four-hour scheduler window")
+
+    if generated is not None and recovery_mode == "late_cron_recovery":
+        effective_age = (generated - invocation).total_seconds()
+        if effective_age > (
+            SCHEDULE_LATE_EFFECTIVE_MAX_SECONDS + SCHEDULE_GENERATION_TOLERANCE_SECONDS
+        ):
+            errors.append("late recovery effective invocation exceeds the twelve-hour window")
 
 
 def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> None:

@@ -28,6 +28,19 @@ on:
     # Beijing 23:17 fallback for the 22:47 US-open checkpoint.
     - cron: "17 15 * * 1-5"
   workflow_dispatch:
+    inputs:
+      scheduler:
+        description: Scheduled dispatcher identity; leave blank for a manual run
+        required: false
+        type: string
+      cron:
+        description: UTC cron expression supplied by the scheduled dispatcher
+        required: false
+        type: string
+      scheduled_at:
+        description: Timezone-aware scheduler invocation timestamp
+        required: false
+        type: string
 
 permissions: {}
 
@@ -52,36 +65,43 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: Resolve workflow trigger mode
+        id: trigger_context
+        env:
+          SCHEDULED_LIKE: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.scheduler == 'cloudflare-cron-v1') }}
+        run: echo "scheduled_like=${SCHEDULED_LIKE}" >> "${GITHUB_OUTPUT}"
+
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Check scheduled time slot and source health
         id: schedule_gate
-        if: github.event_name == 'schedule'
+        if: steps.trigger_context.outputs.scheduled_like == 'true'
         run: python scripts/schedule_gate.py
         env:
           # Only deployed production state may suppress a recovery run. A
           # checked-out latest.json is not proof that deployment succeeded.
           SCHEDULE_GATE_STATUS_URL: https://xuangu.alixjd.com/api/latest
-          SCHEDULE_GATE_CRON: ${{ github.event.schedule }}
+          SCHEDULE_GATE_CRON: ${{ github.event.schedule || inputs.cron }}
+          SCHEDULE_GATE_SCHEDULED_AT: ${{ inputs.scheduled_at }}
 
       - uses: actions/setup-node@v7
-        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        if: steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true'
         with:
           node-version: "22"
           cache: npm
 
       - name: Install Python dependencies
-        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        if: steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true'
         run: pip install -r requirements.txt
 
       - name: Run Python unit tests
-        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        if: steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true'
         run: python -m unittest discover -s tests -v
 
       - name: Check Worker and browser JavaScript
-        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        if: steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true'
         run: |
           node --check src/index.js
           node --check static/app.js
@@ -96,7 +116,7 @@ jobs:
           --adopt-newer-live
 
       - name: Restore A-share daily K-line cache
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         uses: actions/cache/restore@v6
         with:
           path: data/runtime-cache/a_share_daily.json
@@ -105,7 +125,7 @@ jobs:
             a-share-d1-v2-
 
       - name: Restore HK/US dynamic recall cache
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         uses: actions/cache/restore@v6
         with:
           path: data/runtime-cache/hk_us_dynamic_recall.json
@@ -114,7 +134,7 @@ jobs:
             hk-us-dynamic-recall-v1-
 
       - name: Restore HK/US daily K-line cache
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         uses: actions/cache/restore@v6
         with:
           path: data/runtime-cache/hk_us_daily.json
@@ -123,11 +143,14 @@ jobs:
             hk-us-d1-v2-
 
       - name: Generate smart pick snapshot
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         env:
-          AUTOMATION_TRIGGER: ${{ github.event_name }}
+          AUTOMATION_TRIGGER: ${{ steps.trigger_context.outputs.scheduled_like == 'true' && 'schedule' || github.event_name }}
           SCHEDULED_SLOT: ${{ steps.schedule_gate.outputs.slot }}
           SCHEDULED_INVOCATION_SLOT: ${{ steps.schedule_gate.outputs.invocation_slot }}
+          SCHEDULED_SOURCE_INVOCATION_SLOT: ${{ steps.schedule_gate.outputs.source_invocation_slot }}
+          SCHEDULER_DELAY_SECONDS: ${{ steps.schedule_gate.outputs.scheduler_delay_seconds }}
+          SCHEDULE_RECOVERY_MODE: ${{ steps.schedule_gate.outputs.recovery_mode }}
           EVENT_SCAN_CANDIDATES_PER_MARKET: "16"
         run: |
           for attempt in 1 2 3; do
@@ -145,7 +168,7 @@ jobs:
           done
 
       - name: Update isolated outcome ledgers
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         run: |
           # Run after generation so eligible formal and research predictions are
           # registered as PENDING while mature outcomes settle idempotently.
@@ -162,32 +185,32 @@ jobs:
           done
 
       - name: Validate published snapshot schema
-        if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'
+        if: steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true'
         run: python scripts/validate_snapshot.py data/picks/latest.json
 
       - name: Enforce monotonic logical schedule order before deploy
         id: publish_guard
-        if: github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true'
+        if: steps.trigger_context.outputs.scheduled_like == 'true' && steps.schedule_gate.outputs.should_run == 'true'
         run: >-
           python scripts/deployment_order_guard.py data/picks/latest.json
           --base-url https://xuangu.alixjd.com
 
       - name: Save validated A-share daily K-line cache
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         uses: actions/cache/save@v6
         with:
           path: data/runtime-cache/a_share_daily.json
           key: a-share-d1-v2-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save validated HK/US dynamic recall cache
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         uses: actions/cache/save@v6
         with:
           path: data/runtime-cache/hk_us_dynamic_recall.json
           key: hk-us-dynamic-recall-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save validated HK/US daily K-line cache
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         uses: actions/cache/save@v6
         with:
           path: data/runtime-cache/hk_us_daily.json
@@ -195,7 +218,7 @@ jobs:
 
       - name: Prepare immutable snapshot recovery bundle
         id: snapshot_bundle
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.schedule_gate.outputs.should_run == 'true')
+        if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         env:
           RECOVERY_DIR: ${{ runner.temp }}/snapshot-recovery-${{ github.run_id }}
         run: |
@@ -275,16 +298,16 @@ jobs:
           retention-days: 30
 
       - name: Install Node dependencies
-        if: (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true') && (github.event_name != 'schedule' || steps.publish_guard.outputs.should_publish == 'true')
+        if: (steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true') && (steps.trigger_context.outputs.scheduled_like != 'true' || steps.publish_guard.outputs.should_publish == 'true')
         run: npm ci
 
       - name: Build Worker assets
-        if: (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true') && (github.event_name != 'schedule' || steps.publish_guard.outputs.should_publish == 'true')
+        if: (steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true') && (steps.trigger_context.outputs.scheduled_like != 'true' || steps.publish_guard.outputs.should_publish == 'true')
         run: npm run build
 
       - name: Capture exact production rollback target
         id: rollback_target
-        if: (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true') && (github.event_name != 'schedule' || steps.publish_guard.outputs.should_publish == 'true')
+        if: (steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true') && (steps.trigger_context.outputs.scheduled_like != 'true' || steps.publish_guard.outputs.should_publish == 'true')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
@@ -339,7 +362,7 @@ jobs:
 
       - name: Deploy Worker
         id: deploy_worker
-        if: (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true') && (github.event_name != 'schedule' || steps.publish_guard.outputs.should_publish == 'true')
+        if: (steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true') && (steps.trigger_context.outputs.scheduled_like != 'true' || steps.publish_guard.outputs.should_publish == 'true')
         run: >-
           npx wrangler deploy
           --message "github:${{ github.sha }} run:${{ github.run_id }}"
@@ -348,7 +371,7 @@ jobs:
 
       - name: Verify complete deployed contract
         id: verify_deployment
-        if: (github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true') && (github.event_name != 'schedule' || steps.publish_guard.outputs.should_publish == 'true')
+        if: (steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true') && (steps.trigger_context.outputs.scheduled_like != 'true' || steps.publish_guard.outputs.should_publish == 'true')
         run: >-
           python scripts/verify_deployment.py public/data/picks/latest.json
           --base-url https://xuangu.alixjd.com

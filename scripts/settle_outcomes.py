@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 import market_calendar  # noqa: E402
 import history_evaluation  # noqa: E402
 import model_observation_ledger  # noqa: E402
+import observation_outcome_ledger  # noqa: E402
 import server  # noqa: E402
 
 
@@ -676,7 +677,12 @@ def run(
     *,
     executable_outcomes_dir: pathlib.Path | None = None,
 ) -> dict[str, int]:
-    today = today or dt.datetime.now(dt.timezone.utc).date()
+    settlement_moment = (
+        dt.datetime.now(dt.timezone.utc)
+        if today is None
+        else dt.datetime.combine(today, dt.time.max, tzinfo=dt.timezone.utc)
+    )
+    today = today or settlement_moment.date()
     shadow = _settle_contracts(discover_contracts(picks_dir), outcomes_dir, today)
     executable_dir = executable_outcomes_dir or outcomes_dir / "executable"
     executable = _settle_contracts(discover_executable_contracts(picks_dir), executable_dir, today)
@@ -701,10 +707,40 @@ def run(
             observation["changed"] += 1
         else:
             observation["unchanged"] += 1
+    # MODEL_OBSERVATION settlement may require hundreds of independent market
+    # requests.  Keep production snapshot publication independent from that
+    # diagnostic workload; scripts/settle_observations.py and its dedicated
+    # workflow own all fetching and writes.  Preserve the existing counter
+    # contract by reporting the currently persisted settlement inventory.
+    observation_cohorts = model_observation_ledger.load_observation_cohorts(
+        observation_dir
+    )
+    observation_batches = observation_outcome_ledger.load_outcome_batches(
+        outcomes_dir / "observation-settlements"
+    )
+    observation_diagnostics = history_evaluation.evaluate_observation_performance(
+        observation_cohorts,
+        observation_batches,
+    )
+    observation_outcomes = {
+        "cohort_count": len(observation_cohorts),
+        "prediction_count": observation_diagnostics["prediction_count"],
+        "pending_maturity_count": observation_diagnostics["pending_maturity_count"],
+        "pending_data_count": observation_diagnostics["pending_data_count"],
+        "settled_count": observation_diagnostics["settled_count"],
+        "fetched_symbol_count": 0,
+        "changed_cohort_count": 0,
+        "unchanged_cohort_count": len(observation_batches),
+        "worker_limit": 0,
+        "authorizes_production": 0,
+    }
     counters = {key: shadow[key] + executable[key] for key in shadow}
     counters.update({f"shadow_{key}": value for key, value in shadow.items()})
     counters.update({f"executable_{key}": value for key, value in executable.items()})
     counters.update({f"observation_{key}": value for key, value in observation.items()})
+    counters.update(
+        {f"observation_outcome_{key}": value for key, value in observation_outcomes.items()}
+    )
     return counters
 
 

@@ -6,7 +6,13 @@ from functools import lru_cache
 import exchange_calendars as xcals
 
 
-CALENDAR_VERSION = "exchange-calendars-4.13.2"
+EXPECTED_EXCHANGE_CALENDARS_VERSION = "4.13.2"
+if xcals.__version__ != EXPECTED_EXCHANGE_CALENDARS_VERSION:
+    raise RuntimeError(
+        "exchange_calendars runtime version mismatch: "
+        f"expected {EXPECTED_EXCHANGE_CALENDARS_VERSION}, got {xcals.__version__}"
+    )
+CALENDAR_VERSION = f"exchange-calendars-{EXPECTED_EXCHANGE_CALENDARS_VERSION}"
 MARKET_CALENDAR_IDS = {
     "a_share": "XSHG",
     "hk": "XHKG",
@@ -46,6 +52,12 @@ def calendar_id(market: str) -> str:
         return MARKET_CALENDAR_IDS[market]
     except KeyError as exc:
         raise ValueError(f"unsupported market: {market}") from exc
+
+
+def market_local_date(market: str, value: dt.datetime | str) -> dt.date:
+    """Return an aware decision moment's date in the exchange timezone."""
+
+    return _as_open_anchor(value).astimezone(_calendar(market).tz).date()
 
 
 @lru_cache(maxsize=3)

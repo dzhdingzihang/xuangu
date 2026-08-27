@@ -5,9 +5,15 @@ import unittest
 from zoneinfo import ZoneInfo
 
 import market_calendar
+import exchange_calendars
 
 
 class MarketCalendarTests(unittest.TestCase):
+    def test_declared_calendar_version_matches_runtime_dependency(self) -> None:
+        self.assertEqual(
+            market_calendar.CALENDAR_VERSION,
+            f"exchange-calendars-{exchange_calendars.__version__}",
+        )
     def test_entry_is_first_regular_open_strictly_after_decision_time(self) -> None:
         shanghai = ZoneInfo("Asia/Shanghai")
         windows = market_calendar.market_trade_windows(

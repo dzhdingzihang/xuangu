@@ -969,6 +969,138 @@ class BuildWorkerAssetsTests(unittest.TestCase):
             self.assertNotIn(forbidden, encoded)
         self.assertLess(len(encoded.encode()), len(source_bytes) // 10)
 
+    def test_worker_ui_assets_are_identity_bound_bounded_and_split_by_tab(self) -> None:
+        snapshot = runtime_snapshot_fixture()
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+        latest_summary = {
+            "snapshot_key": snapshot["snapshot_key"],
+            "generated_at": snapshot["generated_at"],
+            "analysis_models": {"ten_day_return": {"status": "COLLECTING"}},
+        }
+
+        assets = build_worker_assets.build_worker_ui_assets(
+            snapshot,
+            latest_summary,
+            source_bytes,
+        )
+
+        expected_identity = {
+            "snapshot_key": snapshot["snapshot_key"],
+            "generated_at": snapshot["generated_at"],
+            "source_snapshot": {
+                "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "byte_size": len(source_bytes),
+            },
+        }
+        limits = {
+            "ui-bootstrap.json": 192 * 1024,
+            "ui-candidates.json": 768 * 1024,
+            "ui-events.json": 512 * 1024,
+        }
+        self.assertEqual(set(assets), set(limits))
+        for name, payload in assets.items():
+            with self.subTest(name=name):
+                for key, value in expected_identity.items():
+                    self.assertEqual(payload[key], value)
+                self.assertLessEqual(
+                    len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()),
+                    limits[name],
+                )
+
+        bootstrap = assets["ui-bootstrap.json"]
+        encoded_bootstrap = json.dumps(bootstrap, ensure_ascii=False)
+        for forbidden in (
+            '"evaluated_candidates"',
+            '"production_rule_inputs"',
+            '"point_in_time_universe"',
+            '"kline"',
+            '"events"',
+        ):
+            self.assertNotIn(forbidden, encoded_bootstrap)
+        self.assertEqual(bootstrap["production_decision"]["primary"]["code"], "PFE")
+        self.assertEqual(bootstrap["production_decision"]["qualified_candidate_count"], 1)
+
+        candidates = assets["ui-candidates.json"]
+        self.assertIn("PFE", {row["code"] for row in candidates["candidates"]})
+        self.assertTrue(any(row.get("kline") for row in candidates["candidates"]))
+        events = assets["ui-events.json"]
+        self.assertEqual(events["events"], snapshot["events"])
+
+    def test_worker_ui_events_keep_all_decision_evidence_and_trim_deterministically(self) -> None:
+        snapshot = runtime_snapshot_fixture()
+        bound_ids = ["evt-production", "evt-global-primary", "evt-global-research"]
+        snapshot["production_decision"]["primary"]["verified_positive_event_ids"] = [bound_ids[0]]
+        snapshot["production_decision"]["qualified_candidates"][0]["verified_positive_event_ids"] = [bound_ids[0]]
+        snapshot["global_decision"]["primary"]["verified_positive_event_ids"] = [bound_ids[1]]
+        snapshot["global_decision"]["research_priority"]["verified_positive_event_ids"] = [bound_ids[2]]
+        snapshot["global_decision"]["automatic_external_evidence_count"] = 3
+
+        def event(event_id: str, minute: int, *, padding: int = 0) -> dict:
+            return {
+                "event_id": event_id,
+                "event_type": "announcement",
+                "market": "us",
+                "symbol": "PFE",
+                "title": event_id,
+                "source": "SEC",
+                "url": f"https://example.test/{event_id}",
+                "published_at": f"2026-08-26T08:{minute % 60:02d}:00+00:00",
+                "effective_at": f"2026-08-26T09:{minute % 60:02d}:00+00:00",
+                "decision_eligible": True,
+                "ingestion_mode": "automatic",
+                "evidence_status": "verified",
+                "source_tier": "official",
+                "direction": "positive",
+                "padding": "x" * padding,
+            }
+
+        bound_events = [event(event_id, index) for index, event_id in enumerate(bound_ids)]
+        filler = [event(f"evt-filler-{index:03d}", index, padding=6_000) for index in range(140)]
+        snapshot["events"] = {
+            "generated_at": snapshot["generated_at"],
+            "stats": {"total": len(bound_events) + len(filler), "model_signals": 7, "automatic_external": 3},
+            "items": [*reversed(filler), *reversed(bound_events)],
+        }
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+        assets = build_worker_assets.build_worker_ui_assets(snapshot, {}, source_bytes)
+        bootstrap = assets["ui-bootstrap.json"]
+        events_payload = assets["ui-events.json"]
+        published_items = events_payload["events"]["items"]
+        published_ids = {item["event_id"] for item in published_items}
+
+        self.assertEqual(bootstrap["decision_evidence"]["bound_event_ids"], sorted(bound_ids))
+        self.assertEqual(
+            {item["event_id"] for item in bootstrap["decision_evidence"]["items"]},
+            set(bound_ids),
+        )
+        self.assertEqual(bootstrap["event_stats"]["total"], len(bound_events) + len(filler))
+        self.assertEqual(bootstrap["event_stats"]["model_signals"], 7)
+        self.assertTrue(set(bound_ids).issubset(published_ids))
+        self.assertGreater(events_payload["event_publication"]["truncated"], 0)
+        self.assertEqual(
+            events_payload["event_publication"]["total"],
+            events_payload["event_publication"]["published"]
+            + events_payload["event_publication"]["truncated"],
+        )
+        self.assertLessEqual(
+            len(json.dumps(events_payload, ensure_ascii=False, separators=(",", ":")).encode()),
+            build_worker_assets.MAX_WORKER_UI_EVENTS_BYTES,
+        )
+
+        reordered = copy.deepcopy(snapshot)
+        reordered["events"]["items"] = list(reversed(reordered["events"]["items"]))
+        reordered_bytes = json.dumps(reordered, ensure_ascii=False, separators=(",", ":")).encode()
+        reordered_payload = build_worker_assets.build_worker_ui_events(reordered, reordered_bytes)
+        self.assertEqual(reordered_payload["events"], events_payload["events"])
+        self.assertEqual(reordered_payload["event_publication"], events_payload["event_publication"])
+
+    def test_worker_ui_assets_fail_closed_when_bound_event_is_missing(self) -> None:
+        snapshot = runtime_snapshot_fixture()
+        snapshot["global_decision"]["primary"]["verified_positive_event_ids"] = ["evt-missing"]
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+        with self.assertRaisesRegex(ValueError, "decision-bound event evidence is missing"):
+            build_worker_assets.build_worker_ui_assets(snapshot, {}, source_bytes)
+
     def test_worker_live_index_collects_normalizes_and_deduplicates_visible_candidates(self) -> None:
         snapshot = runtime_snapshot_fixture()
         source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
@@ -1143,9 +1275,16 @@ class BuildWorkerAssetsTests(unittest.TestCase):
             runtime = json.loads((output / "runtime.json").read_text(encoding="utf-8"))
             live_index = json.loads((output / "live-index.json").read_text(encoding="utf-8"))
 
+            ui_bootstrap = json.loads((output / "ui-bootstrap.json").read_text(encoding="utf-8"))
+            ui_candidates = json.loads((output / "ui-candidates.json").read_text(encoding="utf-8"))
+            ui_events = json.loads((output / "ui-events.json").read_text(encoding="utf-8"))
+
         self.assertEqual(runtime["snapshot_key"], snapshot["snapshot_key"])
         self.assertEqual(live_index["snapshot_key"], snapshot["snapshot_key"])
         self.assertEqual(live_index["source_snapshot"], runtime["source_snapshot"])
+        self.assertEqual(ui_bootstrap["source_snapshot"], runtime["source_snapshot"])
+        self.assertEqual(ui_candidates["source_snapshot"], runtime["source_snapshot"])
+        self.assertEqual(ui_events["source_snapshot"], runtime["source_snapshot"])
         self.assertLess(len(json.dumps(runtime)), len(source_bytes) // 10)
         self.assertLess(len(json.dumps(live_index)), len(source_bytes) // 2)
 

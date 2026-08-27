@@ -840,6 +840,9 @@ class SnapshotContractTests(unittest.TestCase):
                 "AUTOMATION_TRIGGER": "schedule",
                 "SCHEDULED_SLOT": "2026-08-21T20:17:00+08:00",
                 "SCHEDULED_INVOCATION_SLOT": "2026-08-21T20:47:00+08:00",
+                "SCHEDULED_SOURCE_INVOCATION_SLOT": "2026-08-21T08:17:00+08:00",
+                "SCHEDULER_DELAY_SECONDS": "45000",
+                "SCHEDULE_RECOVERY_MODE": "late_cron_recovery",
                 "GENERATION_ATTEMPT": "2",
                 "GITHUB_RUN_ID": "123456",
             },
@@ -852,6 +855,9 @@ class SnapshotContractTests(unittest.TestCase):
                 "trigger": "schedule",
                 "scheduled_slot": "2026-08-21T20:17:00+08:00",
                 "scheduled_invocation_slot": "2026-08-21T20:47:00+08:00",
+                "source_invocation_slot": "2026-08-21T08:17:00+08:00",
+                "scheduler_delay_seconds": 45000,
+                "recovery_mode": "late_cron_recovery",
                 "generation_attempt": 2,
                 "run_id": "123456:2",
             },
@@ -886,6 +892,97 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertIn(
             "automation.scheduled_slot does not match its invocation checkpoint",
             validate_snapshot(mismatched),
+        )
+
+    def test_late_recovery_metadata_is_auditable_and_bounded(self) -> None:
+        valid = dynamic_hk_us_snapshot_fixture()
+        valid["model_version"] = server.MODEL_VERSION
+        valid["generated_at"] = "2026-08-27T17:54:00+08:00"
+        valid["automation"].update(
+            {
+                "trigger": "schedule",
+                "scheduled_slot": "2026-08-27T16:17+08:00",
+                "scheduled_invocation_slot": "2026-08-27T16:47+08:00",
+                "source_invocation_slot": "2026-08-27T08:17+08:00",
+                "scheduler_delay_seconds": 34500,
+                "recovery_mode": "late_cron_recovery",
+            }
+        )
+
+        errors = validate_snapshot(valid)
+        self.assertFalse(any("recovery" in error for error in errors), errors)
+        self.assertFalse(any("source_invocation_slot" in error for error in errors), errors)
+
+        future = copy.deepcopy(valid)
+        future["automation"]["source_invocation_slot"] = "2026-08-27T18:17+08:00"
+        self.assertIn(
+            "automation.source_invocation_slot cannot be in the future",
+            validate_snapshot(future),
+        )
+
+        negative = copy.deepcopy(valid)
+        negative["automation"]["scheduler_delay_seconds"] = -1
+        self.assertIn(
+            "automation.scheduler_delay_seconds must be a non-negative integer",
+            validate_snapshot(negative),
+        )
+
+        missing_mode = copy.deepcopy(valid)
+        missing_mode["automation"]["recovery_mode"] = "none"
+        self.assertIn(
+            "automation.recovery_mode is invalid",
+            validate_snapshot(missing_mode),
+        )
+
+        invocation_after_generation = copy.deepcopy(valid)
+        invocation_after_generation["automation"]["scheduled_slot"] = (
+            "2026-08-27T20:17+08:00"
+        )
+        invocation_after_generation["automation"]["scheduled_invocation_slot"] = (
+            "2026-08-27T20:47+08:00"
+        )
+        self.assertIn(
+            "automation.scheduled_invocation_slot cannot be after generated_at",
+            validate_snapshot(invocation_after_generation),
+        )
+
+        source_after_effective = copy.deepcopy(valid)
+        source_after_effective["automation"]["source_invocation_slot"] = (
+            "2026-08-27T17:17+08:00"
+        )
+        self.assertIn(
+            "late recovery source_invocation_slot cannot follow scheduled_invocation_slot",
+            validate_snapshot(source_after_effective),
+        )
+
+        inconsistent_delay = copy.deepcopy(valid)
+        inconsistent_delay["automation"]["scheduler_delay_seconds"] = 18000
+        self.assertIn(
+            "automation.scheduler_delay_seconds is inconsistent with generated_at",
+            validate_snapshot(inconsistent_delay),
+        )
+
+        falsely_on_time = copy.deepcopy(valid)
+        falsely_on_time["automation"].update(
+            {
+                "scheduled_slot": "2026-08-27T08:17+08:00",
+                "scheduled_invocation_slot": "2026-08-27T08:17+08:00",
+                "source_invocation_slot": "2026-08-27T08:17+08:00",
+                "scheduler_delay_seconds": 34620,
+                "recovery_mode": "on_time",
+            }
+        )
+        self.assertIn(
+            "on-time automation exceeds the four-hour scheduler window",
+            validate_snapshot(falsely_on_time),
+        )
+
+        ineffective_late_recovery = copy.deepcopy(valid)
+        ineffective_late_recovery["generated_at"] = "2026-08-28T06:00:00+08:00"
+        ineffective_late_recovery["automation"]["scheduler_delay_seconds"] = 78180
+        self.assertIn(
+            "late recovery effective invocation exceeds the twelve-hour window",
+            validate_snapshot(ineffective_late_recovery),
         )
 
     def test_three_markets_keep_old_fields_and_add_v2_contract(self) -> None:

@@ -13,6 +13,7 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "deploy-worker.yml"
+OBSERVATION_WORKFLOW = ROOT / ".github" / "workflows" / "settle-observations.yml"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_deployment.py"
 WRANGLER = ROOT / "wrangler.jsonc"
 README = ROOT / "README.md"
@@ -125,7 +126,180 @@ def live_payload_fixture(local: dict, market: str, code: str, quote: dict) -> di
     }
 
 
+def observation_performance_fixture(**overrides) -> dict:
+    payload = {
+        "schema_version": "model-observation-performance-v1",
+        "track": "MODEL_OBSERVATION",
+        "status": "NO_SAMPLE",
+        "cohort_count": 0,
+        "prediction_count": 0,
+        "pending_maturity_count": 0,
+        "pending_data_count": 0,
+        "settled_count": 0,
+        "untracked_count": 0,
+        "invalid_cohort_count": 0,
+        "invalid_batch_count": 0,
+        "invalid_outcome_count": 0,
+        "included_in_shadow_research": False,
+        "included_in_executable_performance": False,
+        "authorizes_production": False,
+        "authorization_status": "DIAGNOSTIC_ONLY_MANUAL_REVIEW_REQUIRED",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def ui_delivery_fixtures(
+    local: dict,
+    *,
+    current_allowed: bool = True,
+    freshness_state: str | None = None,
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    source_sha256, source_byte_size = source_snapshot_fixture(local)
+    production = local.get("production_decision") or {}
+    production_action = production.get("action") or "NO_QUALIFIED_PICK"
+    global_action = (local.get("global_decision") or {}).get("action") or "NO_VALID_PICK"
+    raw_count = production.get("qualified_candidate_count")
+    qualified_count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) else 0
+    historical_count = qualified_count if production_action == "QUALIFIED_PICK" else 0
+    snapshot_use = {
+        "contract_version": "snapshot-use-v1",
+        "mode": "CURRENT_RESEARCH" if current_allowed else "HISTORICAL_RESEARCH_ONLY",
+        "freshness_state": freshness_state or ("fresh" if current_allowed else "stale"),
+        "current_decision_allowed": current_allowed,
+        "execution_review_allowed": bool(
+            current_allowed and global_action == "REVIEW_EXECUTABLE_PICK"
+        ),
+        "blocker_codes": [] if current_allowed else ["SNAPSHOT_NOT_FRESH"],
+        "evaluated_at": "2026-08-21T07:08:00.000Z",
+        "snapshot_key": local["snapshot_key"],
+        "source_snapshot_sha256": source_sha256,
+        "source_snapshot_byte_size": source_byte_size,
+    }
+    effective = {
+        "production_action": production_action if current_allowed else "HISTORICAL_ONLY",
+        "global_action": global_action if current_allowed else "NO_VALID_PICK",
+        "current_qualified_candidate_count": historical_count if current_allowed else 0,
+        "historical_qualified_candidate_count": historical_count,
+    }
+
+    def asset(contract_version: str, **extra) -> dict:
+        return {
+            "contract_version": contract_version,
+            "snapshot_key": local["snapshot_key"],
+            "generated_at": local["generated_at"],
+            "source_snapshot": {
+                "sha256": source_sha256,
+                "byte_size": source_byte_size,
+            },
+            **extra,
+        }
+
+    static = {
+        "latest-summary": asset("ui-bootstrap-v1", markets={}),
+        "candidates": asset(
+            "ui-candidates-v1",
+            candidates=[],
+            candidate_count=0,
+        ),
+        "events": asset("ui-events-v1", events={"items": []}),
+    }
+    api = {
+        "latest-summary": {
+            "contract_version": "ui-bootstrap-v1",
+            "ok": True,
+            "snapshot_use": snapshot_use,
+            "effective_decisions": effective,
+            "status": {
+                "snapshot_use": snapshot_use,
+                "effective_decisions": effective,
+            },
+            "latest": {
+                **static["latest-summary"],
+                "snapshot_use": snapshot_use,
+                "effective_decisions": effective,
+            },
+        },
+        "candidates": {
+            **static["candidates"],
+            "snapshot_use": snapshot_use,
+            "effective_decisions": effective,
+        },
+        "events": {
+            **static["events"],
+            "snapshot_use": snapshot_use,
+            "effective_decisions": effective,
+        },
+    }
+    return api, static
+
+
 class WorkflowReliabilityTests(unittest.TestCase):
+    def test_isolated_observation_settlement_workflow_is_bounded_and_json_only(self) -> None:
+        self.assertTrue(OBSERVATION_WORKFLOW.is_file())
+        workflow = OBSERVATION_WORKFLOW.read_text(encoding="utf-8")
+        for token in (
+            'cron: "30 22 * * *"',
+            "workflow_dispatch:",
+            "group: xuangu-production",
+            "cancel-in-progress: false",
+            "permissions: {}",
+            "contents: write",
+            "actions/checkout@v7",
+            "actions/setup-python@v7",
+            'python-version: "3.12"',
+            "cache: pip",
+            "pip install -r requirements.txt",
+            "timeout-minutes: 40",
+            "python scripts/settle_observations.py --max-workers 12 --retries 0",
+            "observation_outcome_ledger.validate_outcome_batch",
+            "data/outcomes/observation-settlements",
+            "-name '*.json'",
+            "git fetch --prune origin main",
+            "rebase origin/main",
+            'validate_only "${settlement_tree}"',
+            "Observation settlement join changed after rebase",
+            "push origin HEAD:main",
+            "for attempt in 1 2 3",
+            "Observation settlement failed after 3 bounded attempts",
+            "[skip ci]",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, workflow)
+        self.assertGreaterEqual(workflow.count('validate_only "${settlement_tree}"'), 2)
+        self.assertNotIn("git add data\n", workflow)
+        self.assertNotIn("data/picks", workflow)
+        self.assertNotIn("wrangler", workflow.lower())
+        self.assertNotIn("npm ", workflow)
+        self.assertNotIn("continue-on-error", workflow)
+        self.assertNotIn("--retries 2", workflow)
+
+    def test_readme_documents_recovery_freshness_ui_and_observation_boundaries(self) -> None:
+        readme = README.read_text(encoding="utf-8")
+        for token in (
+            "late_cron_recovery",
+            "source_invocation_slot",
+            "scheduler_delay_seconds",
+            "最多 12 小时",
+            "HISTORICAL_RESEARCH_ONLY",
+            "current_decision_allowed=false",
+            "SNAPSHOT_NOT_FRESH",
+            "/api/candidates",
+            "/api/events",
+            "PENDING_MATURITY",
+            "PENDING_DATA",
+            "SETTLED",
+            "06:30",
+            "40 分钟",
+            "单轮行情请求",
+            "CLOUDFLARE_SCHEDULER_ENABLED=0",
+            "GITHUB_WORKFLOW_DISPATCH_TOKEN",
+            "Actions: write",
+            "不能自动授权生产概率模型",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, readme)
+
     def test_readme_describes_the_device_free_snapshot_schedule_truthfully(self) -> None:
         readme = README.read_text(encoding="utf-8")
         for token in (
@@ -166,7 +340,13 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertNotIn('cron: "28 1,2,3,5,6,7,16 * * 1-5"', workflow)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn("SCHEDULE_GATE_STATUS_URL: https://xuangu.alixjd.com/api/latest", workflow)
-        self.assertIn("SCHEDULE_GATE_CRON: ${{ github.event.schedule }}", workflow)
+        self.assertIn("scheduler:", workflow)
+        self.assertIn("cron:", workflow)
+        self.assertIn("scheduled_at:", workflow)
+        self.assertIn('echo "scheduled_like=${SCHEDULED_LIKE}"', workflow)
+        self.assertIn("inputs.scheduler == 'cloudflare-cron-v1'", workflow)
+        self.assertIn("SCHEDULE_GATE_CRON: ${{ github.event.schedule || inputs.cron }}", workflow)
+        self.assertIn("SCHEDULE_GATE_SCHEDULED_AT: ${{ inputs.scheduled_at }}", workflow)
         self.assertIn("--adopt-newer-live", workflow)
         self.assertIn("for attempt in 1 2 3", workflow)
         self.assertIn("python scripts/settle_outcomes.py", workflow)
@@ -178,13 +358,29 @@ class WorkflowReliabilityTests(unittest.TestCase):
             workflow.index("python scripts/settle_outcomes.py"),
             workflow.index("Prepare immutable snapshot recovery bundle"),
         )
-        self.assertIn("AUTOMATION_TRIGGER: ${{ github.event_name }}", workflow)
+        self.assertIn("AUTOMATION_TRIGGER: ${{ steps.trigger_context.outputs.scheduled_like == 'true' && 'schedule' || github.event_name }}", workflow)
         self.assertIn("SCHEDULED_SLOT: ${{ steps.schedule_gate.outputs.slot }}", workflow)
         self.assertIn(
             "SCHEDULED_INVOCATION_SLOT: ${{ steps.schedule_gate.outputs.invocation_slot }}",
             workflow,
         )
+        self.assertIn(
+            "SCHEDULED_SOURCE_INVOCATION_SLOT: ${{ steps.schedule_gate.outputs.source_invocation_slot }}",
+            workflow,
+        )
+        self.assertIn(
+            "SCHEDULER_DELAY_SECONDS: ${{ steps.schedule_gate.outputs.scheduler_delay_seconds }}",
+            workflow,
+        )
+        self.assertIn(
+            "SCHEDULE_RECOVERY_MODE: ${{ steps.schedule_gate.outputs.recovery_mode }}",
+            workflow,
+        )
         self.assertIn("python scripts/deployment_order_guard.py data/picks/latest.json", workflow)
+        self.assertIn(
+            "steps.trigger_context.outputs.scheduled_like == 'true' && steps.schedule_gate.outputs.should_run == 'true'",
+            workflow,
+        )
         self.assertIn("steps.publish_guard.outputs.should_publish == 'true'", workflow)
         self.assertIn("should_publish: ${{ steps.publish_guard.outputs.should_publish }}", workflow)
         self.assertIn('EVENT_SCAN_CANDIDATES_PER_MARKET: "16"', workflow)
@@ -273,7 +469,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
             workflow.rindex("- name:", 0, workflow.index(validation)) : workflow.index(validation) + len(validation)
         ]
         self.assertIn(
-            "if: github.event_name != 'schedule' || steps.schedule_gate.outputs.should_run == 'true'",
+            "if: steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true'",
             validation_step,
         )
 
@@ -517,8 +713,10 @@ class DeploymentVerifierTests(unittest.TestCase):
             "score_kind": "RULE_QUALIFICATION_SCORE",
             "action": "QUALIFIED_PICK",
             "primary": {"qualification_id": "qual_new"},
+            "qualified_candidate_count": 1,
         }
         source_sha256, source_byte_size = source_snapshot_fixture(local)
+        ui_api, ui_static = ui_delivery_fixtures(local)
         current_status = dict(
             self.status,
             production_action="QUALIFIED_PICK",
@@ -535,7 +733,11 @@ class DeploymentVerifierTests(unittest.TestCase):
         )
         history = {
             "ok": True,
-            "meta": {"view": "raw", "raw_run_count": 1},
+            "meta": {
+                "view": "raw",
+                "raw_run_count": 1,
+                "observation_performance": observation_performance_fixture(),
+            },
             "history": [{
                 "snapshot_key": local["snapshot_key"],
                 "generated_at": local["generated_at"],
@@ -558,6 +760,12 @@ class DeploymentVerifierTests(unittest.TestCase):
                 return old_status if status_reads <= 2 else current_status
             if parsed.path == "/api/latest":
                 return local
+            if parsed.path == "/api/latest-summary":
+                return ui_api["latest-summary"]
+            if parsed.path == "/api/candidates":
+                return ui_api["candidates"]
+            if parsed.path == "/api/events":
+                return ui_api["events"]
             if parsed.path == "/api/pick":
                 return local
             if parsed.path == "/api/history":
@@ -586,6 +794,16 @@ class DeploymentVerifierTests(unittest.TestCase):
         def response_fetcher(url: str, follow: bool):
             if url.startswith("http://"):
                 return 308, {"location": "https://selector.example.test/"}, b""
+            path = urllib.parse.urlsplit(url).path
+            by_path = {
+                "/data/picks/ui-bootstrap.json": ui_static["latest-summary"],
+                "/data/picks/ui-candidates.json": ui_static["candidates"],
+                "/data/picks/ui-events.json": ui_static["events"],
+            }
+            if path in by_path:
+                return 200, {"content-type": "application/json"}, json.dumps(
+                    by_path[path], separators=(",", ":")
+                ).encode()
             body = b'<main id="mainContent"><button id="tab-history"></button><script src="/static/app.js"></script>'
             return 200, html_headers, body
 
@@ -917,7 +1135,139 @@ class DeploymentVerifierTests(unittest.TestCase):
         self.assertTrue(any("realtime" in error for error in errors))
         self.assertEqual(calls, [])
 
+    def test_ui_api_contract_accepts_exact_identity_and_rejects_cross_snapshot_mix(self) -> None:
+        api, _static = ui_delivery_fixtures(self.local)
+        self.assertEqual(
+            self.module.ui_api_contract_errors(
+                self.local,
+                api,
+                source_snapshot_sha256=self.source_sha256,
+                source_snapshot_byte_size=self.source_byte_size,
+            ),
+            [],
+        )
+
+        mismatched = json.loads(json.dumps(api))
+        mismatched["candidates"]["source_snapshot"]["sha256"] = "0" * 64
+        mismatched["events"]["generated_at"] = "2026-08-21T14:58:00+08:00"
+        errors = self.module.ui_api_contract_errors(
+            self.local,
+            mismatched,
+            source_snapshot_sha256=self.source_sha256,
+            source_snapshot_byte_size=self.source_byte_size,
+        )
+        self.assertTrue(any("ui_api.candidates.source_snapshot.sha256" in error for error in errors))
+        self.assertTrue(any("ui_api.events.generated_at" in error for error in errors))
+
+    def test_ui_api_stale_snapshot_fails_closed_but_preserves_historical_count(self) -> None:
+        local = snapshot_fixture()
+        local["production_decision"] = {
+            "action": "QUALIFIED_PICK",
+            "qualified_candidate_count": 2,
+        }
+        api, _static = ui_delivery_fixtures(
+            local,
+            current_allowed=False,
+            freshness_state="updating",
+        )
+        source_sha256, source_byte_size = source_snapshot_fixture(local)
+        self.assertEqual(
+            self.module.ui_api_contract_errors(
+                local,
+                api,
+                source_snapshot_sha256=source_sha256,
+                source_snapshot_byte_size=source_byte_size,
+            ),
+            [],
+        )
+        for payload in api.values():
+            self.assertFalse(payload["snapshot_use"]["current_decision_allowed"])
+            self.assertEqual(
+                payload["snapshot_use"]["blocker_codes"],
+                ["SNAPSHOT_NOT_FRESH"],
+            )
+            self.assertEqual(payload["effective_decisions"]["current_qualified_candidate_count"], 0)
+            self.assertEqual(payload["effective_decisions"]["historical_qualified_candidate_count"], 2)
+
+        forged = json.loads(json.dumps(api))
+        forged["events"]["effective_decisions"]["current_qualified_candidate_count"] = 2
+        errors = self.module.ui_api_contract_errors(
+            local,
+            forged,
+            source_snapshot_sha256=source_sha256,
+            source_snapshot_byte_size=source_byte_size,
+        )
+        self.assertTrue(any(
+            "ui_api.events.effective_decisions.current_qualified_candidate_count" in error
+            for error in errors
+        ))
+
+    def test_ui_static_asset_byte_limits_are_inclusive_and_fail_at_limit_plus_one(self) -> None:
+        _api, static = ui_delivery_fixtures(self.local)
+        bodies: dict[str, bytes] = {}
+        for name, spec in self.module.UI_ASSET_SPECS.items():
+            encoded = json.dumps(static[name], separators=(",", ":")).encode()
+            limit = spec["max_bytes"]
+            self.assertLess(len(encoded), limit)
+            bodies[spec["static_path"]] = encoded + b" " * (limit - len(encoded))
+
+        def response_fetcher(url: str, _follow: bool):
+            return 200, {"content-type": "application/json"}, bodies[
+                urllib.parse.urlsplit(url).path
+            ]
+
+        self.assertEqual(
+            self.module.ui_static_asset_errors(
+                "https://selector.example.test",
+                response_fetcher,
+                local=self.local,
+                source_snapshot_sha256=self.source_sha256,
+                source_snapshot_byte_size=self.source_byte_size,
+            ),
+            [],
+        )
+
+        bootstrap_path = self.module.UI_ASSET_SPECS["latest-summary"]["static_path"]
+        bodies[bootstrap_path] += b" "
+        errors = self.module.ui_static_asset_errors(
+            "https://selector.example.test",
+            response_fetcher,
+            local=self.local,
+            source_snapshot_sha256=self.source_sha256,
+            source_snapshot_byte_size=self.source_byte_size,
+        )
+        self.assertTrue(any("ui_static.latest-summary.byte_size exceeds" in error for error in errors))
+
+    def test_history_observation_diagnostics_allow_untracked_but_never_authorize_production(self) -> None:
+        row = {
+            "snapshot_key": self.local["snapshot_key"],
+            "generated_at": self.local["generated_at"],
+            "target_date": self.local["target_date"],
+            "signal_date": self.local["signal_date"],
+            "global_decision": {"action": "NO_VALID_PICK"},
+        }
+        payload = {
+            "ok": True,
+            "meta": {
+                "view": "raw",
+                "raw_run_count": 1,
+                "observation_performance": observation_performance_fixture(
+                    status="UNSETTLED",
+                    cohort_count=1,
+                    prediction_count=12,
+                    untracked_count=12,
+                ),
+            },
+            "history": [row],
+        }
+        self.assertEqual(self.module.history_contract_errors(self.local, payload), [])
+
+        payload["meta"]["observation_performance"]["authorizes_production"] = True
+        errors = self.module.history_contract_errors(self.local, payload)
+        self.assertTrue(any("authorizes_production" in error for error in errors))
+
     def test_full_contract_checks_immutable_history_static_https_and_live(self) -> None:
+        ui_api, ui_static = ui_delivery_fixtures(self.local)
         history_row = {
             "snapshot_key": self.local["snapshot_key"],
             "generated_at": self.local["generated_at"],
@@ -927,7 +1277,16 @@ class DeploymentVerifierTests(unittest.TestCase):
         }
         history = {
             "ok": True,
-            "meta": {"view": "raw", "raw_run_count": 1},
+            "meta": {
+                "view": "raw",
+                "raw_run_count": 1,
+                "observation_performance": observation_performance_fixture(
+                    status="UNSETTLED",
+                    cohort_count=1,
+                    prediction_count=3,
+                    untracked_count=3,
+                ),
+            },
             "history": [history_row],
         }
         live_mode = {"provider_class": "SCHEDULED_SNAPSHOT"}
@@ -938,6 +1297,12 @@ class DeploymentVerifierTests(unittest.TestCase):
                 return self.status
             if parsed.path in {"/api/latest", "/api/pick"}:
                 return self.latest
+            if parsed.path == "/api/latest-summary":
+                return ui_api["latest-summary"]
+            if parsed.path == "/api/candidates":
+                return ui_api["candidates"]
+            if parsed.path == "/api/events":
+                return ui_api["events"]
             if parsed.path == "/api/history":
                 return history
             if parsed.path == "/api/live":
@@ -968,6 +1333,16 @@ class DeploymentVerifierTests(unittest.TestCase):
                 self.assertFalse(follow)
                 return 308, {"location": "https://selector.example.test/"}, b""
             self.assertTrue(follow)
+            path = urllib.parse.urlsplit(url).path
+            by_path = {
+                "/data/picks/ui-bootstrap.json": ui_static["latest-summary"],
+                "/data/picks/ui-candidates.json": ui_static["candidates"],
+                "/data/picks/ui-events.json": ui_static["events"],
+            }
+            if path in by_path:
+                return 200, {"content-type": "application/json"}, json.dumps(
+                    by_path[path], separators=(",", ":")
+                ).encode()
             body = b'<main id="mainContent"><button id="tab-history"></button><script src="/static/app.js"></script>'
             return 200, html_headers, body
 

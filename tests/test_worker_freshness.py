@@ -28,6 +28,36 @@ def run_node(script: str) -> None:
 
 
 class WorkerFreshnessTests(unittest.TestCase):
+    def test_snapshot_use_contract_fails_closed_for_every_non_fresh_state(self) -> None:
+        run_node(
+            f"""
+            import assert from "node:assert/strict";
+            const {{ snapshotUseContract }} = await import({json.dumps(WORKER_URI)} + "?snapshot-use-contract");
+            const runtime = {{
+              snapshot_key: "2026-08-27_fixture.json",
+              generated_at: "2026-08-27T08:16:00+08:00",
+              automation: {{ scheduled_slot: "2026-08-27T08:17:00+08:00" }},
+              source_snapshot: {{ sha256: "a".repeat(64), byte_size: 12345 }},
+              global_decision: {{ action: "REVIEW_EXECUTABLE_PICK" }},
+            }};
+            const stale = snapshotUseContract(runtime, new Date("2026-08-27T11:03:00+08:00"));
+            assert.equal(stale.mode, "HISTORICAL_RESEARCH_ONLY");
+            assert.equal(stale.current_decision_allowed, false);
+            assert.equal(stale.execution_review_allowed, false);
+            assert.deepEqual(stale.blocker_codes, ["SNAPSHOT_NOT_FRESH"]);
+            assert.equal(stale.snapshot_key, runtime.snapshot_key);
+            assert.equal(stale.source_snapshot_sha256, runtime.source_snapshot.sha256);
+            assert.equal(stale.source_snapshot_byte_size, runtime.source_snapshot.byte_size);
+
+            const freshRuntime = {{ ...runtime, generated_at: "2026-08-27T10:17:05+08:00", automation: {{ scheduled_slot: "2026-08-27T10:17:00+08:00" }} }};
+            const fresh = snapshotUseContract(freshRuntime, new Date("2026-08-27T10:20:00+08:00"));
+            assert.equal(fresh.mode, "CURRENT_RESEARCH");
+            assert.equal(fresh.current_decision_allowed, true);
+            assert.equal(fresh.execution_review_allowed, true);
+            assert.deepEqual(fresh.blocker_codes, []);
+            """
+        )
+
     def test_seven_weekday_checkpoints_and_45_minute_grace(self) -> None:
         run_node(
             f"""

@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://unpkg.com" />
     <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css" />
     <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260823-history-evaluation-v2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260827-lazy-stale-gate" />
   </head>
   <body>
     <a class="skip-link" href="#mainContent">跳到主内容</a>
@@ -69,6 +69,11 @@
           </div>
         </header>
 
+        <div id="snapshotExecutionBanner" class="snapshot-execution-banner snapshot-execution-banner-global" role="alert" hidden>
+          <i class="ph ph-warning-octagon" aria-hidden="true"></i>
+          <div><strong>快照非 fresh，暂停执行</strong><span>页面只展示历史研究结果，等待新快照发布。</span></div>
+        </div>
+
         <main id="mainContent" class="main-content" tabindex="-1">
           <section id="panel-decision" class="tab-panel is-active" role="tabpanel" aria-labelledby="tab-decision" data-tab="decision">
             <div id="decisionView" class="view-loading" aria-live="polite">
@@ -110,6 +115,6 @@
     </div>
 
     <div id="toastRegion" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
-    <script src="/static/app.js?v=20260823-history-evaluation-v2"></script>
+    <script src="/static/app.js?v=20260827-lazy-stale-gate"></script>
   </body>
 </html>

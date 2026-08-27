@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 import history_evaluation
 import model_observation_ledger
+import observation_outcome_ledger
 
 
 PUBLIC = ROOT / "public"
@@ -156,6 +157,9 @@ TEN_DAY_RANK_SUMMARY_FIELDS = (
 )
 WORKER_RUNTIME_CONTRACT_VERSION = "worker-runtime-v1"
 WORKER_LIVE_INDEX_CONTRACT_VERSION = "worker-live-index-v1"
+WORKER_UI_BOOTSTRAP_CONTRACT_VERSION = "ui-bootstrap-v1"
+WORKER_UI_CANDIDATES_CONTRACT_VERSION = "ui-candidates-v1"
+WORKER_UI_EVENTS_CONTRACT_VERSION = "ui-events-v1"
 WORKER_RUNTIME_IDENTITY_FIELDS = (
     "schema_version",
     "selector_mode",
@@ -202,6 +206,7 @@ GLOBAL_RUNTIME_PREDICTION_FIELDS = (
     "calendar_version",
     "entry_trade_date",
     "forecast_end_trade_date",
+    "verified_positive_event_ids",
 )
 LIVE_CANDIDATE_FIELDS = ("code", "symbol", "name", "currency", "realtime", "kline")
 LIVE_MARKETS = ("a_share", "hk", "us")
@@ -213,6 +218,9 @@ LIVE_MARKET_VOLUME_UNITS = {
 }
 MAX_WORKER_LIVE_CANDIDATES = 90
 MAX_WORKER_LIVE_INDEX_BYTES = 512 * 1024
+MAX_WORKER_UI_BOOTSTRAP_BYTES = 192 * 1024
+MAX_WORKER_UI_CANDIDATES_BYTES = 768 * 1024
+MAX_WORKER_UI_EVENTS_BYTES = 512 * 1024
 WORKER_LIVE_CODE_NORMALIZATION = "worker-facing-live-code-v1"
 RUNTIME_FORBIDDEN_KEYS = {
     "candidate_snapshot",
@@ -220,6 +228,34 @@ RUNTIME_FORBIDDEN_KEYS = {
     "production_rule_inputs",
     "events",
 }
+
+UI_MARKET_STAT_FIELDS = (
+    "universe_origin",
+    "eligible_discovery_size",
+    "broad_pool_size",
+    "raw_pool_size",
+    "universe_size",
+    "recall_target",
+    "recall_selected_size",
+    "valid_quote_size",
+    "base_scored_size",
+    "technical_attempted_size",
+    "technical_scored_size",
+    "technical_kline_complete_size",
+    "technical_kline_coverage",
+    "deep_eligible_size",
+    "deep_attempted_size",
+    "deep_scored_size",
+    "scored_size",
+)
+UI_MARKET_SECTION_FIELDS = (
+    "key",
+    "label",
+    "description",
+    "trade_window",
+    "market_regime",
+    "market_context",
+)
 
 
 def validate_required_assets() -> None:
@@ -1022,6 +1058,537 @@ def build_worker_live_index(snapshot: dict, source_snapshot_bytes: bytes) -> dic
     return payload
 
 
+def _ui_identity_envelope(
+    snapshot: dict,
+    source_snapshot_bytes: bytes,
+    contract_version: str,
+) -> dict:
+    snapshot_key, generated_at = _required_snapshot_identity(snapshot)
+    if not isinstance(source_snapshot_bytes, bytes) or not source_snapshot_bytes:
+        raise ValueError("worker UI asset source snapshot bytes are required")
+    return {
+        "contract_version": contract_version,
+        "snapshot_key": snapshot_key,
+        "generated_at": generated_at,
+        "source_snapshot": {
+            "sha256": hashlib.sha256(source_snapshot_bytes).hexdigest(),
+            "byte_size": len(source_snapshot_bytes),
+        },
+    }
+
+
+def _compact_ui_realtime(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    fields = (
+        "price",
+        "change_pct",
+        "previous_close",
+        "volume",
+        "volume_unit",
+        "currency",
+        "source",
+        "source_as_of",
+        "fetched_at",
+        "session",
+        "session_label",
+        "price_kind",
+        "stale",
+    )
+    return {key: copy.deepcopy(value[key]) for key in fields if key in value}
+
+
+def compact_ui_candidate(candidate: dict | None, market: str, *, detail: bool) -> dict | None:
+    candidate = _candidate_snapshot(candidate)
+    if not isinstance(candidate, dict):
+        return None
+    code = normalize_live_code(candidate.get("code") or candidate.get("symbol"), market)
+    if not code:
+        return None
+    if detail:
+        result = copy.deepcopy(candidate)
+        result["code"] = code
+        result["symbol"] = code
+        result["market"] = market
+        return result
+    fields = (
+        "name",
+        "role",
+        "reason_tags",
+        "theme_tags",
+        "recommendation_degree",
+        "confidence",
+        "score",
+        "entry_price",
+        "price",
+        "current_change_pct",
+        "legacy_rank",
+        "legacy_complete",
+        "execution_state",
+        "risk_flags",
+        "risk_items",
+        "decision_gates",
+        "candidate_lineage",
+    )
+    result = {key: copy.deepcopy(candidate[key]) for key in fields if key in candidate}
+    result.update({
+        "market": market,
+        "code": code,
+        "symbol": code,
+        "name": str(candidate.get("name") or code),
+        "realtime": _compact_ui_realtime(candidate.get("realtime")),
+    })
+    v2 = candidate.get("v2")
+    if isinstance(v2, dict):
+        result["v2"] = {
+            key: copy.deepcopy(v2[key])
+            for key in ("rank", "rank_universe_size", "rule_score")
+            if key in v2
+        }
+    quality = candidate.get("data_quality")
+    if isinstance(quality, dict):
+        result["data_quality"] = {
+            key: copy.deepcopy(quality[key])
+            for key in ("score", "status", "missing_fields")
+            if key in quality
+        }
+    projects = candidate.get("analysis_projects")
+    if isinstance(projects, dict) and isinstance(projects.get("dual_low"), dict):
+        dual = projects["dual_low"]
+        result["analysis_projects"] = {
+            "dual_low": {
+                key: copy.deepcopy(dual[key])
+                for key in (
+                    "status", "interpretation", "final_score", "rank",
+                    "rank_universe_size", "rank_percentile", "missing_fields",
+                )
+                if key in dual
+            }
+        }
+    shadow = candidate.get("shadow_model")
+    if isinstance(shadow, dict):
+        result["shadow_model"] = {
+            key: copy.deepcopy(shadow[key])
+            for key in (
+                "probability", "rank_eligible", "market_validation_status",
+                "model_id", "status",
+            )
+            if key in shadow
+        }
+    return result
+
+
+def _production_ui_summary(snapshot: dict) -> dict | None:
+    summary = summarize_production_decision(snapshot)
+    decision = snapshot.get("production_decision")
+    if not summary or not isinstance(decision, dict):
+        return None
+    source_rows = [
+        decision.get("primary"),
+        *((decision.get("qualified_candidates") or []) if isinstance(decision.get("qualified_candidates"), list) else []),
+    ]
+    candidates_by_id: dict[str, dict] = {}
+    for row in source_rows:
+        if not isinstance(row, dict) or row.get("market") not in LIVE_MARKETS:
+            continue
+        compact = compact_ui_candidate(row, str(row["market"]), detail=False)
+        qualification_id = row.get("qualification_id")
+        if compact is not None and isinstance(qualification_id, str):
+            candidates_by_id[qualification_id] = compact
+    for row in [summary.get("primary"), *(summary.get("qualified_candidates") or [])]:
+        if not isinstance(row, dict):
+            continue
+        compact = candidates_by_id.get(str(row.get("qualification_id") or ""))
+        if compact is not None:
+            row["candidate_snapshot"] = copy.deepcopy(compact)
+    return summary
+
+
+def _global_ui_summary(snapshot: dict) -> dict | None:
+    """Keep the bounded global contract usable without the full candidate pool."""
+
+    summary = summarize_runtime_global_decision(snapshot)
+    decision = snapshot.get("global_decision")
+    if not summary or not isinstance(decision, dict):
+        return summary
+    for role in ("primary", "research_priority"):
+        row = decision.get(role)
+        market = row.get("market") if isinstance(row, dict) else None
+        if market not in LIVE_MARKETS or not isinstance(summary.get(role), dict):
+            continue
+        candidate = compact_ui_candidate(row, str(market), detail=False)
+        if candidate is not None:
+            summary[role]["candidate_snapshot"] = candidate
+    return summary
+
+
+def _compact_ui_market(snapshot: dict, market: str) -> dict:
+    section = ((snapshot.get("markets") or {}).get(market) or {})
+    result = {
+        key: compact_runtime_value(section[key])
+        for key in UI_MARKET_SECTION_FIELDS
+        if key in section
+    }
+    result.setdefault("key", market)
+    decision = section.get("decision") or {}
+    result["decision"] = {
+        key: copy.deepcopy(decision[key])
+        for key in ("action", "title", "message", "data_state", "blocker_codes")
+        if key in decision
+    }
+    for role in ("primary", "blocked_candidate"):
+        compact = compact_ui_candidate(decision.get(role), market, detail=False)
+        if compact is not None:
+            result["decision"][role] = compact
+    result["pool_health"] = compact_runtime_value(section.get("pool_health") or {})
+    result["quote_health"] = compact_runtime_value(section.get("quote_health") or {})
+    stats = section.get("stats") or {}
+    result["stats"] = {
+        key: copy.deepcopy(stats[key])
+        for key in UI_MARKET_STAT_FIELDS
+        if key in stats
+    }
+    return result
+
+
+def _snapshot_event_items(snapshot: dict) -> list[dict]:
+    raw_events = snapshot.get("events")
+    items = raw_events.get("items") if isinstance(raw_events, dict) else raw_events
+    return [item for item in (items or []) if isinstance(item, dict)]
+
+
+def _decision_bound_event_ids(snapshot: dict) -> tuple[str, ...]:
+    """Return every event id explicitly bound by either published decision track."""
+
+    production = snapshot.get("production_decision") or {}
+    global_decision = snapshot.get("global_decision") or {}
+    rows = [
+        production.get("primary"),
+        *((production.get("qualified_candidates") or [])
+          if isinstance(production.get("qualified_candidates"), list) else []),
+        global_decision.get("primary"),
+        global_decision.get("research_priority"),
+    ]
+    return tuple(sorted({
+        str(event_id)
+        for row in rows
+        if isinstance(row, dict)
+        for event_id in (row.get("verified_positive_event_ids") or [])
+        if event_id
+    }))
+
+
+def _event_sort_key(item: dict) -> tuple:
+    """Newest published/effective evidence first with a canonical tie-breaker."""
+
+    def timestamp(*keys: str) -> float:
+        for key in keys:
+            parsed = _aware_datetime(item.get(key))
+            if parsed is not None:
+                return parsed.timestamp()
+        return float("-inf")
+
+    return (
+        -timestamp("published_at", "released_at"),
+        -timestamp("effective_at"),
+        -timestamp("ingested_at"),
+        str(item.get("event_id") or ""),
+        json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _event_stats(snapshot: dict) -> dict:
+    """Publish tab-independent event counts in the bootstrap asset."""
+
+    raw_events = snapshot.get("events")
+    source_stats = raw_events.get("stats") if isinstance(raw_events, dict) else {}
+    source_stats = source_stats if isinstance(source_stats, dict) else {}
+    items = _snapshot_event_items(snapshot)
+
+    def nonnegative_count(key: str, fallback: int) -> int:
+        value = source_stats.get(key)
+        return int(value) if isinstance(value, int) and value >= 0 else fallback
+
+    model_signals = sum(item.get("event_type") == "model_signal" for item in items)
+    automatic_external = sum(
+        item.get("event_type") not in {"model_signal", "manual_external"}
+        and str(item.get("ingestion_mode") or "").lower() == "automatic"
+        for item in items
+    )
+    global_decision = snapshot.get("global_decision") or {}
+    return {
+        "total": len(items),
+        "model_signals": nonnegative_count("model_signals", model_signals),
+        "automatic_external": nonnegative_count("automatic_external", automatic_external),
+        "decision_eligible": sum(item.get("decision_eligible") is True for item in items),
+        "decision_bound": len(_decision_bound_event_ids(snapshot)),
+        "pipeline_status": global_decision.get("event_pipeline_status"),
+        "pipeline_scanned": global_decision.get("event_pipeline_scanned") is True,
+    }
+
+
+def _decision_evidence(snapshot: dict) -> dict:
+    wanted_ids = _decision_bound_event_ids(snapshot)
+    wanted_set = set(wanted_ids)
+    items = _snapshot_event_items(snapshot)
+    available_ids = {
+        str(item.get("event_id"))
+        for item in items
+        if item.get("event_id")
+    }
+    missing_ids = sorted(wanted_set - available_ids)
+    if missing_ids:
+        raise ValueError(
+            "decision-bound event evidence is missing from snapshot: "
+            + ", ".join(missing_ids)
+        )
+    selected = sorted(
+        (
+            compact_runtime_value(item)
+            for item in items
+            if str(item.get("event_id") or "") in wanted_set
+        ),
+        key=_event_sort_key,
+    )
+    return {
+        "automatic_external_evidence_count": int(
+            (snapshot.get("global_decision") or {}).get("automatic_external_evidence_count") or 0
+        ),
+        "bound_event_ids": list(wanted_ids),
+        "bound_event_count": len(wanted_ids),
+        "items": selected,
+    }
+
+
+def _candidate_role_maps(snapshot: dict) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str], int]]:
+    roles: dict[tuple[str, str], str] = {}
+    ranks: dict[tuple[str, str], int] = {}
+    priority = {"qualified": 0, "primary": 1, "research": 2, "watchlist": 3, "blocked": 4}
+
+    def remember(market: str, candidate: dict | None, role: str, rank: int | None = None) -> None:
+        compact = compact_ui_candidate(candidate, market, detail=False)
+        if compact is None:
+            return
+        identity = (market, compact["code"])
+        if identity not in roles or priority[role] < priority[roles[identity]]:
+            roles[identity] = role
+        if rank is not None:
+            ranks.setdefault(identity, rank)
+
+    for market in LIVE_MARKETS:
+        decision = ((((snapshot.get("markets") or {}).get(market) or {}).get("decision") or {}))
+        remember(market, decision.get("primary"), "primary", 1)
+        remember(market, decision.get("blocked_candidate"), "blocked", 1)
+        for index, row in enumerate(decision.get("watchlist") or [], start=1):
+            remember(market, row, "watchlist", index)
+    global_priority = (snapshot.get("global_decision") or {}).get("research_priority")
+    if isinstance(global_priority, dict) and global_priority.get("market") in LIVE_MARKETS:
+        remember(str(global_priority["market"]), global_priority, "research")
+    production = snapshot.get("production_decision") or {}
+    for row in [production.get("primary"), *(production.get("qualified_candidates") or [])]:
+        if isinstance(row, dict) and row.get("market") in LIVE_MARKETS:
+            remember(str(row["market"]), row, "qualified")
+    return roles, ranks
+
+
+def build_worker_ui_bootstrap(
+    snapshot: dict,
+    latest_summary: dict,
+    source_snapshot_bytes: bytes,
+) -> dict:
+    payload = {
+        **_ui_identity_envelope(snapshot, source_snapshot_bytes, WORKER_UI_BOOTSTRAP_CONTRACT_VERSION),
+        **{
+            key: copy.deepcopy(snapshot.get(key))
+            for key in (
+                "target_date", "signal_date", "generated_label", "forecast_end_date",
+                "forecast_horizon", "schema_version", "selector_mode", "model_version",
+                "weights_version", "universe_version", "calendar_version",
+            )
+            if key in snapshot
+        },
+        "global_decision": _global_ui_summary(snapshot),
+        "production_decision": _production_ui_summary(snapshot),
+        "decision_evidence": _decision_evidence(snapshot),
+        "event_stats": _event_stats(snapshot),
+        "markets": {market: _compact_ui_market(snapshot, market) for market in LIVE_MARKETS},
+        "analysis_models": summarize_analysis_models(snapshot),
+        "history_summary": {
+            key: compact_runtime_value(latest_summary[key])
+            for key in ("formal_sample_status", "outcome_validation")
+            if key in latest_summary
+        },
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    if len(encoded) > MAX_WORKER_UI_BOOTSTRAP_BYTES:
+        raise ValueError(
+            f"worker UI bootstrap byte-size limit exceeded: {len(encoded)} > {MAX_WORKER_UI_BOOTSTRAP_BYTES}"
+        )
+    forbidden = (
+        '"evaluated_candidates"',
+        '"production_rule_inputs"',
+        '"point_in_time_universe"',
+        '"kline"',
+        '"events"',
+    )
+    encoded_text = encoded.decode("utf-8")
+    for key in forbidden:
+        if key in encoded_text:
+            raise ValueError(f"worker UI bootstrap unexpectedly contains {key}")
+    return payload
+
+
+def build_worker_ui_candidates(snapshot: dict, source_snapshot_bytes: bytes) -> dict:
+    roles, ranks = _candidate_role_maps(snapshot)
+    candidates: dict[tuple[str, str], dict] = {}
+    for market, raw_candidate in iter_live_candidates(snapshot):
+        candidate = compact_ui_candidate(raw_candidate, market, detail=True)
+        if candidate is None:
+            continue
+        identity = (market, candidate["code"])
+        current = candidates.get(identity)
+        if current is None or len(json.dumps(candidate, ensure_ascii=False)) > len(json.dumps(current, ensure_ascii=False)):
+            candidates[identity] = candidate
+    production = snapshot.get("production_decision") or {}
+    qualifications: dict[tuple[str, str], dict] = {}
+    for row in [production.get("primary"), *(production.get("qualified_candidates") or [])]:
+        if not isinstance(row, dict) or row.get("market") not in LIVE_MARKETS:
+            continue
+        market = str(row["market"])
+        code = normalize_live_code(row.get("code") or row.get("symbol"), market)
+        if code:
+            qualifications[(market, code)] = summarize_production_candidate(row) or {}
+    rows = []
+    for identity in sorted(candidates, key=lambda item: (LIVE_MARKETS.index(item[0]), ranks.get(item, 10_000), item[1])):
+        candidate = candidates[identity]
+        candidate["decision_role"] = roles.get(identity, "watchlist")
+        if identity in ranks:
+            candidate["legacy_rank"] = ranks[identity]
+        if identity in qualifications:
+            candidate["production_qualification"] = qualifications[identity]
+        rows.append(candidate)
+    payload = {
+        **_ui_identity_envelope(snapshot, source_snapshot_bytes, WORKER_UI_CANDIDATES_CONTRACT_VERSION),
+        "candidates": rows,
+        "candidate_count": len(rows),
+        "dual_low_model": compact_runtime_value(((snapshot.get("analysis_models") or {}).get("dual_low") or {})),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    if len(encoded) > MAX_WORKER_UI_CANDIDATES_BYTES:
+        raise ValueError(
+            f"worker UI candidates byte-size limit exceeded: {len(encoded)} > {MAX_WORKER_UI_CANDIDATES_BYTES}"
+        )
+    return payload
+
+
+def build_worker_ui_events(snapshot: dict, source_snapshot_bytes: bytes) -> dict:
+    raw_events = snapshot.get("events")
+    original_items = _snapshot_event_items(snapshot)
+    sorted_items = sorted(original_items, key=_event_sort_key)
+    bound_ids = _decision_bound_event_ids(snapshot)
+    bound_set = set(bound_ids)
+    available_ids = {
+        str(item.get("event_id"))
+        for item in sorted_items
+        if item.get("event_id")
+    }
+    missing_ids = sorted(bound_set - available_ids)
+    if missing_ids:
+        raise ValueError(
+            "decision-bound event evidence is missing from UI event source: "
+            + ", ".join(missing_ids)
+        )
+    bound_items = [
+        item for item in sorted_items
+        if str(item.get("event_id") or "") in bound_set
+    ]
+    other_items = [
+        item for item in sorted_items
+        if str(item.get("event_id") or "") not in bound_set
+    ]
+    identity = _ui_identity_envelope(
+        snapshot,
+        source_snapshot_bytes,
+        WORKER_UI_EVENTS_CONTRACT_VERSION,
+    )
+    event_metadata = {
+        key: copy.deepcopy(value)
+        for key, value in (raw_events.items() if isinstance(raw_events, dict) else [])
+        if key != "items"
+    }
+
+    def candidate_payload(other_count: int) -> dict:
+        selected = sorted(
+            [*bound_items, *other_items[:other_count]],
+            key=_event_sort_key,
+        )
+        events = copy.deepcopy(event_metadata)
+        if isinstance(raw_events, dict):
+            events["items"] = copy.deepcopy(selected)
+        else:
+            events = copy.deepcopy(selected)
+        published = len(selected)
+        total = len(original_items)
+        return {
+            **identity,
+            "events": events,
+            "event_publication": {
+                "total": total,
+                "published": published,
+                "truncated": total - published,
+                "is_truncated": published < total,
+                "decision_bound_event_count": len(bound_ids),
+                "decision_bound_record_count": len(bound_items),
+            },
+        }
+
+    def encoded_size(other_count: int) -> int:
+        return len(json.dumps(
+            candidate_payload(other_count),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode())
+
+    if encoded_size(0) > MAX_WORKER_UI_EVENTS_BYTES:
+        raise ValueError(
+            "decision-bound events exceed worker UI event byte-size limit: "
+            f"{encoded_size(0)} > {MAX_WORKER_UI_EVENTS_BYTES}"
+        )
+    low, high = 0, len(other_items)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if encoded_size(middle) <= MAX_WORKER_UI_EVENTS_BYTES:
+            low = middle
+        else:
+            high = middle - 1
+    payload = candidate_payload(low)
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    if len(encoded) > MAX_WORKER_UI_EVENTS_BYTES:
+        raise ValueError(
+            f"worker UI events byte-size limit exceeded: {len(encoded)} > {MAX_WORKER_UI_EVENTS_BYTES}"
+        )
+    published_ids = {
+        str(item.get("event_id"))
+        for item in _snapshot_event_items({"events": payload["events"]})
+        if item.get("event_id")
+    }
+    if not bound_set.issubset(published_ids):
+        raise ValueError("worker UI events silently dropped decision-bound evidence")
+    return payload
+
+
+def build_worker_ui_assets(
+    snapshot: dict,
+    latest_summary: dict,
+    source_snapshot_bytes: bytes,
+) -> dict[str, dict]:
+    return {
+        "ui-bootstrap.json": build_worker_ui_bootstrap(snapshot, latest_summary, source_snapshot_bytes),
+        "ui-candidates.json": build_worker_ui_candidates(snapshot, source_snapshot_bytes),
+        "ui-events.json": build_worker_ui_events(snapshot, source_snapshot_bytes),
+    }
+
+
 def write_worker_runtime_assets(
     snapshot: dict,
     latest_summary: dict,
@@ -1032,6 +1599,7 @@ def write_worker_runtime_assets(
     assets = {
         "runtime.json": build_worker_runtime(snapshot, latest_summary, source_snapshot_bytes),
         "live-index.json": build_worker_live_index(snapshot, source_snapshot_bytes),
+        **build_worker_ui_assets(snapshot, latest_summary, source_snapshot_bytes),
     }
     for name, payload in assets.items():
         (output_dir / name).write_text(
@@ -1273,10 +1841,31 @@ def main() -> None:
         shadow_inventory,
         executable_inventory,
     )
+    observation_cohorts = model_observation_ledger.load_observation_cohorts(
+        outcome_root / "observations"
+    )
+    observation_batches = observation_outcome_ledger.load_outcome_batches(
+        outcome_root / "observation-settlements"
+    )
+    observation_performance = history_evaluation.evaluate_observation_performance(
+        observation_cohorts,
+        observation_batches,
+    )
     observation_summary = model_observation_ledger.summarize_observation_cohorts(
-        model_observation_ledger.load_observation_cohorts(outcome_root / "observations")
+        observation_cohorts
+    )
+    observation_summary.update(
+        {
+            "settlement_status": observation_performance["status"],
+            "outcome_prediction_count": observation_performance["prediction_count"],
+            "pending_maturity_count": observation_performance["pending_maturity_count"],
+            "pending_data_count": observation_performance["pending_data_count"],
+            "settled_count": observation_performance["settled_count"],
+            "untracked_count": observation_performance["untracked_count"],
+        }
     )
     evaluation["observation_ledger"] = observation_summary
+    evaluation["observation_performance"] = observation_performance
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "schema_version": latest_summary.get("schema_version"),
@@ -1293,6 +1882,7 @@ def main() -> None:
         "shadow_ledger": evaluation["shadow_ledger"],
         "executable_ledger": evaluation["executable_ledger"],
         "observation_ledger": observation_summary,
+        "observation_performance": observation_performance,
     }
     (public_picks / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),

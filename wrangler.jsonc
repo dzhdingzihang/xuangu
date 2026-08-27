@@ -4,6 +4,15 @@
   "main": "./src/index.js",
   "compatibility_date": "2026-05-29",
   "workers_dev": false,
+  "vars": {
+    "CLOUDFLARE_SCHEDULER_ENABLED": "0"
+  },
+  "triggers": {
+    "crons": [
+      "17 0,2,4,7,8,12,15 * * MON-FRI",
+      "47 0,2,4,7,8,12,14 * * MON-FRI"
+    ]
+  },
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",

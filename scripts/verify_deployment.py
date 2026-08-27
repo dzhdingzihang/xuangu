@@ -56,6 +56,28 @@ ERROR_BODY_PREVIEW_BYTES = 512
 LIVE_CONTRACT_REQUEST_BUDGET = 90
 WORKER_RUNTIME_CONTRACT_VERSION = "worker-runtime-v1"
 WORKER_LIVE_INDEX_CONTRACT_VERSION = "worker-live-index-v1"
+SNAPSHOT_USE_CONTRACT_VERSION = "snapshot-use-v1"
+OBSERVATION_PERFORMANCE_CONTRACT_VERSION = "model-observation-performance-v1"
+UI_ASSET_SPECS = {
+    "latest-summary": {
+        "api_path": "/api/latest-summary",
+        "static_path": "/data/picks/ui-bootstrap.json",
+        "contract_version": "ui-bootstrap-v1",
+        "max_bytes": 192 * 1024,
+    },
+    "candidates": {
+        "api_path": "/api/candidates",
+        "static_path": "/data/picks/ui-candidates.json",
+        "contract_version": "ui-candidates-v1",
+        "max_bytes": 768 * 1024,
+    },
+    "events": {
+        "api_path": "/api/events",
+        "static_path": "/data/picks/ui-events.json",
+        "contract_version": "ui-events-v1",
+        "max_bytes": 512 * 1024,
+    },
+}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -570,6 +592,57 @@ def history_contract_errors(local: dict, history_payload: dict) -> list[str]:
     if not isinstance(meta.get("raw_run_count"), int) or meta.get("raw_run_count", 0) < 1:
         errors.append("history.meta.raw_run_count is invalid")
 
+    observation = meta.get("observation_performance")
+    if not isinstance(observation, dict):
+        errors.append("history.meta.observation_performance is not an object")
+    else:
+        required_observation_values = {
+            "schema_version": OBSERVATION_PERFORMANCE_CONTRACT_VERSION,
+            "track": "MODEL_OBSERVATION",
+            "included_in_shadow_research": False,
+            "included_in_executable_performance": False,
+            "authorizes_production": False,
+            "authorization_status": "DIAGNOSTIC_ONLY_MANUAL_REVIEW_REQUIRED",
+        }
+        for field, expected in required_observation_values.items():
+            actual = observation.get(field)
+            matches = actual is expected if isinstance(expected, bool) else actual == expected
+            if not matches:
+                errors.append(
+                    f"history.meta.observation_performance.{field}: "
+                    f"expected {expected!r}, got {actual!r}"
+                )
+        status = observation.get("status")
+        if status not in {
+            "NO_SAMPLE",
+            "OBSERVING",
+            "EARLY_SAMPLE",
+            "PENDING_DATA",
+            "PENDING_MATURITY",
+            "UNSETTLED",
+        }:
+            errors.append(
+                "history.meta.observation_performance.status is invalid: "
+                f"{status!r}"
+            )
+        for field in (
+            "cohort_count",
+            "prediction_count",
+            "pending_maturity_count",
+            "pending_data_count",
+            "settled_count",
+            "untracked_count",
+            "invalid_cohort_count",
+            "invalid_batch_count",
+            "invalid_outcome_count",
+        ):
+            value = observation.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                errors.append(
+                    f"history.meta.observation_performance.{field} "
+                    "is not a non-negative integer"
+                )
+
     key = local.get("snapshot_key")
     row = next((item for item in history if item.get("snapshot_key") == key), None)
     if row is None:
@@ -592,6 +665,265 @@ def history_contract_errors(local: dict, history_payload: dict) -> list[str]:
                 f"history[{key}].production_decision.action: expected {expected_production_action!r}, "
                 f"got {actual_production_action!r}"
             )
+    return errors
+
+
+def _ui_identity_errors(
+    prefix: str,
+    payload: object,
+    *,
+    local: dict,
+    contract_version: str,
+    source_snapshot_sha256: str,
+    source_snapshot_byte_size: int,
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return [f"{prefix} is not an object"]
+    expected_values = {
+        "contract_version": contract_version,
+        "snapshot_key": local.get("snapshot_key"),
+        "generated_at": local.get("generated_at"),
+    }
+    for field, expected in expected_values.items():
+        actual = payload.get(field)
+        if actual != expected:
+            errors.append(f"{prefix}.{field}: expected {expected!r}, got {actual!r}")
+    source = payload.get("source_snapshot")
+    if not isinstance(source, dict):
+        errors.append(f"{prefix}.source_snapshot is not an object")
+        source = {}
+    expected_source = {
+        "sha256": source_snapshot_sha256,
+        "byte_size": source_snapshot_byte_size,
+    }
+    for field, expected in expected_source.items():
+        actual = source.get(field)
+        if actual != expected:
+            errors.append(
+                f"{prefix}.source_snapshot.{field}: expected {expected!r}, got {actual!r}"
+            )
+    return errors
+
+
+def _effective_decision_expectations(local: dict, *, current_allowed: bool) -> dict:
+    production = local.get("production_decision")
+    production = production if isinstance(production, dict) else {}
+    global_decision = local.get("global_decision")
+    global_decision = global_decision if isinstance(global_decision, dict) else {}
+    production_action = production.get("action") or "NO_QUALIFIED_PICK"
+    global_action = global_decision.get("action") or "NO_VALID_PICK"
+    raw_count = production.get("qualified_candidate_count")
+    qualified_count = (
+        raw_count
+        if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count >= 0
+        else 0
+    )
+    historical_count = qualified_count if production_action == "QUALIFIED_PICK" else 0
+    return {
+        "production_action": production_action if current_allowed else "HISTORICAL_ONLY",
+        "global_action": global_action if current_allowed else "NO_VALID_PICK",
+        "current_qualified_candidate_count": historical_count if current_allowed else 0,
+        "historical_qualified_candidate_count": historical_count,
+    }
+
+
+def _snapshot_use_errors(
+    prefix: str,
+    snapshot_use: object,
+    effective_decisions: object,
+    *,
+    local: dict,
+    source_snapshot_sha256: str,
+    source_snapshot_byte_size: int,
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(snapshot_use, dict):
+        return [f"{prefix}.snapshot_use is not an object"]
+    required_identity = {
+        "contract_version": SNAPSHOT_USE_CONTRACT_VERSION,
+        "snapshot_key": local.get("snapshot_key"),
+        "source_snapshot_sha256": source_snapshot_sha256,
+        "source_snapshot_byte_size": source_snapshot_byte_size,
+    }
+    for field, expected in required_identity.items():
+        actual = snapshot_use.get(field)
+        if actual != expected:
+            errors.append(
+                f"{prefix}.snapshot_use.{field}: expected {expected!r}, got {actual!r}"
+            )
+
+    allowed = snapshot_use.get("current_decision_allowed")
+    if type(allowed) is not bool:
+        errors.append(f"{prefix}.snapshot_use.current_decision_allowed is not a boolean")
+        return errors
+    freshness_state = snapshot_use.get("freshness_state")
+    blocker_codes = snapshot_use.get("blocker_codes")
+    if allowed:
+        if snapshot_use.get("mode") != "CURRENT_RESEARCH":
+            errors.append(f"{prefix}.snapshot_use.mode must be 'CURRENT_RESEARCH' when fresh")
+        if freshness_state != "fresh":
+            errors.append(f"{prefix}.snapshot_use.freshness_state must be 'fresh' when current")
+        if blocker_codes != []:
+            errors.append(f"{prefix}.snapshot_use.blocker_codes must be empty when current")
+    else:
+        if snapshot_use.get("mode") != "HISTORICAL_RESEARCH_ONLY":
+            errors.append(
+                f"{prefix}.snapshot_use.mode must be 'HISTORICAL_RESEARCH_ONLY' when not fresh"
+            )
+        if freshness_state == "fresh" or freshness_state not in {"updating", "stale", "unknown"}:
+            errors.append(
+                f"{prefix}.snapshot_use.freshness_state is invalid for historical-only mode: "
+                f"{freshness_state!r}"
+            )
+        if blocker_codes != ["SNAPSHOT_NOT_FRESH"]:
+            errors.append(
+                f"{prefix}.snapshot_use.blocker_codes must be ['SNAPSHOT_NOT_FRESH'] "
+                "when not fresh"
+            )
+    global_action = ((local.get("global_decision") or {}).get("action"))
+    expected_review_allowed = bool(allowed and global_action == "REVIEW_EXECUTABLE_PICK")
+    if snapshot_use.get("execution_review_allowed") is not expected_review_allowed:
+        errors.append(
+            f"{prefix}.snapshot_use.execution_review_allowed: "
+            f"expected {expected_review_allowed!r}, got "
+            f"{snapshot_use.get('execution_review_allowed')!r}"
+        )
+
+    if not isinstance(effective_decisions, dict):
+        errors.append(f"{prefix}.effective_decisions is not an object")
+        return errors
+    expected_effective = _effective_decision_expectations(local, current_allowed=allowed)
+    for field, expected in expected_effective.items():
+        actual = effective_decisions.get(field)
+        matches = (
+            type(actual) is int and actual == expected
+            if isinstance(expected, int) and not isinstance(expected, bool)
+            else actual == expected
+        )
+        if not matches:
+            errors.append(
+                f"{prefix}.effective_decisions.{field}: expected {expected!r}, got {actual!r}"
+            )
+    return errors
+
+
+def ui_api_contract_errors(
+    local: dict,
+    payloads: Mapping[str, dict],
+    *,
+    source_snapshot_sha256: str,
+    source_snapshot_byte_size: int,
+) -> list[str]:
+    errors: list[str] = []
+    for name, spec in UI_ASSET_SPECS.items():
+        prefix = f"ui_api.{name}"
+        payload = payloads.get(name)
+        if not isinstance(payload, dict):
+            errors.append(f"{prefix} is not an object")
+            continue
+        if name == "latest-summary":
+            if payload.get("ok") is not True:
+                errors.append(f"{prefix}.ok is not true")
+            if payload.get("contract_version") != spec["contract_version"]:
+                errors.append(
+                    f"{prefix}.contract_version: expected {spec['contract_version']!r}, "
+                    f"got {payload.get('contract_version')!r}"
+                )
+            asset = payload.get("latest")
+        else:
+            asset = payload
+        errors.extend(_ui_identity_errors(
+            prefix,
+            asset,
+            local=local,
+            contract_version=str(spec["contract_version"]),
+            source_snapshot_sha256=source_snapshot_sha256,
+            source_snapshot_byte_size=source_snapshot_byte_size,
+        ))
+        errors.extend(_snapshot_use_errors(
+            prefix,
+            payload.get("snapshot_use"),
+            payload.get("effective_decisions"),
+            local=local,
+            source_snapshot_sha256=source_snapshot_sha256,
+            source_snapshot_byte_size=source_snapshot_byte_size,
+        ))
+        if isinstance(asset, dict):
+            if asset.get("snapshot_use") != payload.get("snapshot_use"):
+                errors.append(f"{prefix}.latest.snapshot_use does not match the API envelope")
+            if asset.get("effective_decisions") != payload.get("effective_decisions"):
+                errors.append(f"{prefix}.latest.effective_decisions does not match the API envelope")
+        if name == "latest-summary":
+            status = payload.get("status")
+            if not isinstance(status, dict):
+                errors.append(f"{prefix}.status is not an object")
+            else:
+                if status.get("snapshot_use") != payload.get("snapshot_use"):
+                    errors.append(f"{prefix}.status.snapshot_use does not match the API envelope")
+                if status.get("effective_decisions") != payload.get("effective_decisions"):
+                    errors.append(
+                        f"{prefix}.status.effective_decisions does not match the API envelope"
+                    )
+        if name == "candidates":
+            candidates = payload.get("candidates")
+            count = payload.get("candidate_count")
+            if not isinstance(candidates, list):
+                errors.append(f"{prefix}.candidates is not an array")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                errors.append(f"{prefix}.candidate_count is not a non-negative integer")
+            elif isinstance(candidates, list) and count != len(candidates):
+                errors.append(
+                    f"{prefix}.candidate_count: expected {len(candidates)}, got {count}"
+                )
+    return errors
+
+
+def ui_static_asset_errors(
+    base_url: str,
+    response_fetcher: Callable[[str, bool], ResponsePayload],
+    *,
+    local: dict,
+    source_snapshot_sha256: str,
+    source_snapshot_byte_size: int,
+) -> list[str]:
+    errors: list[str] = []
+    for name, spec in UI_ASSET_SPECS.items():
+        prefix = f"ui_static.{name}"
+        url = endpoint_url(base_url, str(spec["static_path"]))
+        status, _headers, body = response_fetcher(url, True)
+        if status != 200:
+            errors.append(f"{prefix} returned HTTP {status}")
+            continue
+        max_bytes = int(spec["max_bytes"])
+        if len(body) > max_bytes:
+            errors.append(
+                f"{prefix}.byte_size exceeds {max_bytes}: got {len(body)}"
+            )
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            errors.append(f"{prefix} is not valid UTF-8 JSON: {exc}")
+            continue
+        errors.extend(_ui_identity_errors(
+            prefix,
+            payload,
+            local=local,
+            contract_version=str(spec["contract_version"]),
+            source_snapshot_sha256=source_snapshot_sha256,
+            source_snapshot_byte_size=source_snapshot_byte_size,
+        ))
+        if name == "candidates" and isinstance(payload, dict):
+            candidates = payload.get("candidates")
+            count = payload.get("candidate_count")
+            if not isinstance(candidates, list):
+                errors.append(f"{prefix}.candidates is not an array")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                errors.append(f"{prefix}.candidate_count is not a non-negative integer")
+            elif isinstance(candidates, list) and count != len(candidates):
+                errors.append(
+                    f"{prefix}.candidate_count: expected {len(candidates)}, got {count!r}"
+                )
     return errors
 
 
@@ -810,6 +1142,17 @@ def full_deployment_errors(
     if errors:
         return latest, errors
 
+    ui_payloads = {
+        name: json_fetcher(endpoint_url(base_url, str(spec["api_path"])))
+        for name, spec in UI_ASSET_SPECS.items()
+    }
+    errors.extend(ui_api_contract_errors(
+        local,
+        ui_payloads,
+        source_snapshot_sha256=source_snapshot_sha256,
+        source_snapshot_byte_size=source_snapshot_byte_size,
+    ))
+
     snapshot_key = _validate_snapshot_key(local.get("snapshot_key"))
     snapshot_query = urllib.parse.urlencode({"snapshot": snapshot_key})
     immutable = json_fetcher(endpoint_url(base_url, f"/api/pick?{snapshot_query}"))
@@ -822,6 +1165,13 @@ def full_deployment_errors(
     history = json_fetcher(endpoint_url(base_url, "/api/history?view=raw&limit=1000"))
     errors.extend(history_contract_errors(local, history))
     errors.extend(static_contract_errors(base_url, response_fetcher))
+    errors.extend(ui_static_asset_errors(
+        base_url,
+        response_fetcher,
+        local=local,
+        source_snapshot_sha256=source_snapshot_sha256,
+        source_snapshot_byte_size=source_snapshot_byte_size,
+    ))
     errors.extend(live_contract_errors(
         local,
         base_url=base_url,

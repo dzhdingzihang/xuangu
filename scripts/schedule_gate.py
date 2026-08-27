@@ -48,6 +48,7 @@ EARLY_GRACE_SECONDS = 5 * 60
 # delayed start as belonging to the latest intended checkpoint instead of
 # silently skipping the trading snapshot.
 MAX_DELAY_SECONDS = 4 * 60 * 60
+LATE_RECOVERY_MAX_SECONDS = 12 * 60 * 60
 RECOVERABLE_SOURCE_REASON_CODES = {
     "BOARD_QUOTA_PARTIAL",
     "BROAD_POOL_BELOW_MINIMUM",
@@ -132,6 +133,87 @@ def select_cron_invocation(now: dt.datetime, cron: str | None) -> dt.datetime | 
     ]
     eligible = [slot for slot in candidates if slot <= now]
     return max(eligible) if eligible else None
+
+
+def select_latest_configured_invocation(now: dt.datetime) -> dt.datetime | None:
+    """Return the latest legal primary or fallback invocation at or before now."""
+    now = as_cn_time(now)
+    clocks = sorted(
+        {
+            clock
+            for configured in CRON_INVOCATION_SLOTS.values()
+            for clock in configured
+        }
+    )
+    candidates = [
+        dt.datetime.combine(day, dt.time(hour, minute), tzinfo=CN_TZ)
+        for day in (now.date(), (now - dt.timedelta(days=1)).date())
+        if day.weekday() < 5
+        for hour, minute in clocks
+    ]
+    eligible = [slot for slot in candidates if slot <= now]
+    return max(eligible) if eligible else None
+
+
+def parse_scheduled_invocation(value: str, cron: str | None) -> dt.datetime:
+    """Validate an explicit scheduler timestamp against its declared cron."""
+    try:
+        parsed = dt.datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("scheduled_at must be an aware ISO datetime") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("scheduled_at must be an aware ISO datetime")
+    local = as_cn_time(parsed)
+    configured = CRON_INVOCATION_SLOTS.get(str(cron or "").strip())
+    if (
+        not configured
+        or local.weekday() >= 5
+        or (local.hour, local.minute) not in configured
+        or local.second != 0
+        or local.microsecond != 0
+    ):
+        raise ValueError("scheduled_at does not match its configured cron invocation")
+    return local
+
+
+def resolve_schedule_intent(
+    now: dt.datetime,
+    cron: str | None,
+    *,
+    scheduled_at: str | None = None,
+) -> dict[str, object | None]:
+    """Resolve an auditable source invocation and a legal effective recovery."""
+    now = as_cn_time(now)
+    source_invocation = (
+        parse_scheduled_invocation(scheduled_at, cron)
+        if scheduled_at
+        else select_cron_invocation(now, cron)
+    )
+    if scheduled_at and source_invocation is not None and source_invocation > now:
+        raise ValueError("scheduled_at cannot be in the future")
+    if source_invocation is None and not cron:
+        source_invocation = select_checkpoint(now)
+
+    if source_invocation and checkpoint_is_within_window(now, source_invocation):
+        effective_invocation = source_invocation
+        mode = "on_time"
+    elif cron:
+        effective_invocation = select_latest_configured_invocation(now)
+        mode = "late_cron_recovery"
+    else:
+        effective_invocation = source_invocation
+        mode = "on_time"
+
+    return {
+        "mode": mode,
+        "source_invocation": source_invocation,
+        "effective_invocation": effective_invocation,
+        "checkpoint": (
+            checkpoint_for_invocation(effective_invocation)
+            if effective_invocation is not None
+            else None
+        ),
+    }
 
 
 def checkpoint_for_invocation(invocation: dt.datetime) -> dt.datetime:
@@ -539,9 +621,19 @@ def main() -> int:
                 time.sleep(wait_seconds)
                 now = dt.datetime.now(CN_TZ)
 
-    cron_invocation = select_cron_invocation(now, cron)
-    nearest = checkpoint_for_invocation(cron_invocation) if cron_invocation else select_checkpoint(now)
-    invocation = cron_invocation or nearest
+    scheduled_at = os.environ.get("SCHEDULE_GATE_SCHEDULED_AT") or None
+    try:
+        intent = resolve_schedule_intent(now, cron, scheduled_at=scheduled_at)
+    except ValueError as exc:
+        write_output(should_run="false", reason=f"invalid_schedule_intent:{exc}")
+        # An explicit scheduler timestamp is an authenticated dispatch contract,
+        # not an ordinary healthy skip.  Mark malformed/future dispatches red so
+        # the scheduler defect cannot disappear as a successful no-op.
+        return 1
+    source_invocation = intent["source_invocation"]
+    invocation = intent["effective_invocation"]
+    nearest = intent["checkpoint"]
+    recovery_mode = str(intent["mode"] or "none")
     if nearest is None:
         write_output(
             should_run="false",
@@ -550,7 +642,30 @@ def main() -> int:
         return 0
 
     delta = (now - invocation).total_seconds() if invocation else float("inf")
-    if checkpoint_is_within_window(now, invocation):
+    source_delta = (
+        (now - source_invocation).total_seconds()
+        if isinstance(source_invocation, dt.datetime)
+        else float("inf")
+    )
+    output_metadata = {
+        "slot": nearest.isoformat(timespec="minutes"),
+        "invocation_slot": invocation.isoformat(timespec="minutes"),
+        "source_invocation_slot": (
+            source_invocation.isoformat(timespec="minutes")
+            if isinstance(source_invocation, dt.datetime)
+            else ""
+        ),
+        "scheduler_delay_seconds": (
+            str(max(0, int(source_delta))) if math.isfinite(source_delta) else ""
+        ),
+        "recovery_mode": recovery_mode,
+    }
+    within_window = (
+        checkpoint_is_within_window(now, invocation)
+        if recovery_mode == "on_time"
+        else 0 <= delta <= LATE_RECOVERY_MAX_SECONDS
+    )
+    if within_window:
         status_url = os.environ.get("SCHEDULE_GATE_STATUS_URL") or None
         published_source = published_checkpoint_source(
             nearest,
@@ -560,27 +675,31 @@ def main() -> int:
             write_output(
                 should_run="false",
                 reason="slot_already_published",
-                slot=nearest.isoformat(timespec="minutes"),
-                invocation_slot=invocation.isoformat(timespec="minutes"),
                 published_source=published_source,
+                **output_metadata,
             )
             return 0
 
         write_output(
             should_run="true",
-            reason=f"slot_ok:{nearest:%Y-%m-%d_%H:%M}:delta_seconds={int(delta)}",
-            slot=nearest.isoformat(timespec="minutes"),
-            invocation_slot=invocation.isoformat(timespec="minutes"),
+            reason=(
+                "late_cron_recovery"
+                if recovery_mode == "late_cron_recovery"
+                else f"slot_ok:{nearest:%Y-%m-%d_%H:%M}:delta_seconds={int(delta)}"
+            ),
+            **output_metadata,
         )
         return 0
 
     write_output(
         should_run="false",
         reason=(
-            f"outside_allowed_slots:now={now:%Y-%m-%d_%H:%M:%S}:"
+            f"{'outside_late_recovery_window' if recovery_mode == 'late_cron_recovery' else 'outside_allowed_slots'}:"
+            f"now={now:%Y-%m-%d_%H:%M:%S}:"
             f"nearest={nearest:%Y-%m-%d_%H:%M}:"
             f"invocation={invocation:%Y-%m-%d_%H:%M}:delta_seconds={int(delta)}"
         ),
+        **output_metadata,
     )
     return 0
 
