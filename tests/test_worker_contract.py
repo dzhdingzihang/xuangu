@@ -120,9 +120,12 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(status.schedule_time_zone, "Asia/Shanghai");
             assert.deepEqual(status.schedule_primary_checkpoints, ["08:17", "10:17", "12:17", "15:17", "16:17", "20:17", "22:47"]);
             assert.deepEqual(status.schedule_fallback_checkpoints, ["08:47", "10:47", "12:47", "15:47", "16:47", "20:47", "23:17"]);
-            assert.equal(status.scheduler_primary_enabled, false);
-            assert.equal(status.active_refresh_mode, "github_watchdog_only");
-            assert.equal(status.next_active_refresh, module.nextActiveRefresh(new Date(status.time), false));
+            assert.equal(status.scheduler_primary_enabled, true);
+            assert.equal(status.scheduler_primary_provider, "github_actions");
+            assert.equal(status.cloudflare_dispatch_enabled, false);
+            assert.equal(status.cloudflare_dispatch_optional, true);
+            assert.equal(status.active_refresh_mode, "github_actions_primary_with_30m_watchdog");
+            assert.equal(status.next_active_refresh, module.nextActiveRefresh(new Date(status.time), true));
             assert.equal(status.schedule_us_post_close.contract_version, "us-post-close-schedule-v1");
             assert.deepEqual(status.schedule_us_post_close.watchdog_beijing_variants, ["04:47 夏令时", "05:47 冬令时"]);
             assert.equal(status.snapshot_as_of, latest.generated_at);
@@ -130,6 +133,11 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(status.qualification_id, null);
             assert.equal(status.calibrated_action, "NO_VALID_PICK");
             assert.equal(status.prediction_id, null);
+            assert.equal(status.readiness_contract_version, "production-readiness-v1");
+            assert.equal(status.research_decision_ready, false);
+            assert.equal(status.checkpoint_evidence_ready, false);
+            assert.equal(status.unattended_refresh_ready, false);
+            assert.equal(status.calibrated_execution_ready, false);
             assert.equal(status.next_refresh, module.nextScheduledRefresh(new Date(status.time)));
             assert.equal(
               module.nextActiveRefresh(new Date("2026-08-31T08:00:00+08:00"), false),
@@ -439,8 +447,50 @@ class WorkerApiContractTests(unittest.TestCase):
               global_decision: runtime.global_decision,
               markets: {{}},
             }});
-            const candidates = ui("ui-candidates-v1", {{ candidates: [], candidate_count: 0 }});
-            const events = ui("ui-events-v1", {{ events: {{ items: [] }} }});
+            const candidateId = "cand_00000000000000000004";
+            const productionSelection = {{
+              role_contract_version: "candidate-role-v1",
+              action: "QUALIFIED_PICK",
+              primary_candidate_id: candidateId,
+              qualified_candidate_ids: [candidateId],
+              qualified_candidate_count: 1,
+            }};
+            const candidates = ui("ui-candidates-v2", {{
+              role_contract_version: "candidate-role-v1",
+              production_selection: productionSelection,
+              candidates: [{{
+                id: candidateId, market: "us", code: "VZ", name: "Verizon",
+                role_contract_version: "candidate-role-v1",
+                decision_roles: {{ production: "PRIMARY", legacy: "NONE", research: "NONE" }},
+                decision_role: "production_primary", production_rank: 1,
+              }}],
+              candidate_count: 1,
+            }});
+            const fallbackEventId = "evt-fallback-bound";
+            const events = ui("ui-events-v2", {{
+              event_publication: {{
+                total: 1,
+                published: 1,
+                truncated: 0,
+                is_truncated: false,
+                ordering_contract_version: "decision-bound-first-then-published-desc-v1",
+                decision_bound_event_ids: [fallbackEventId],
+                production_bound_event_ids: [fallbackEventId],
+                decision_bound_event_count: 1,
+                decision_bound_record_count: 1,
+              }},
+              events: {{ items: [{{
+                event_id: fallbackEventId,
+                market: "us",
+                symbol: "VZ",
+                issuer: "Verizon",
+                title: "Fallback bound evidence",
+                event_type: "announcement",
+                direction: "positive",
+                decision_eligible: true,
+                decision_bound: true,
+              }}] }},
+            }});
             const calls = [];
             const response = (payload) => new Response(JSON.stringify(payload), {{ headers: {{ "content-type": "application/json" }} }});
             const env = {{ ASSETS: {{ async fetch(input) {{
@@ -467,7 +517,9 @@ class WorkerApiContractTests(unittest.TestCase):
 
             calls.length = 0;
             const candidatePayload = await (await worker.fetch(new Request("https://xuangu.test/api/candidates"), env)).json();
-            assert.equal(candidatePayload.contract_version, "ui-candidates-v1");
+            assert.equal(candidatePayload.contract_version, "ui-candidates-v2");
+            assert.equal(candidatePayload.role_contract_version, "candidate-role-v1");
+            assert.deepEqual(candidatePayload.production_selection, productionSelection);
             assert.equal(candidatePayload.snapshot_use.snapshot_key, snapshotKey);
             assert.deepEqual(calls, [
               "/data/latest-manifest.json", "/data/latest-manifest.json",
@@ -477,7 +529,12 @@ class WorkerApiContractTests(unittest.TestCase):
 
             calls.length = 0;
             const eventPayload = await (await worker.fetch(new Request("https://xuangu.test/api/events"), env)).json();
-            assert.equal(eventPayload.contract_version, "ui-events-v1");
+            assert.equal(eventPayload.contract_version, "event-list-v2");
+            assert.equal(eventPayload.total, 1);
+            assert.equal(eventPayload.returned_count, 1);
+            assert.equal(eventPayload.events[0].event_id, fallbackEventId);
+            assert.equal(eventPayload.published_event_count, 1);
+            assert.equal(eventPayload.decision_bound.returned, 1);
             assert.deepEqual(calls, [
               "/data/latest-manifest.json", "/data/latest-manifest.json",
               "/data/latest-manifest.json", "/data/picks/runtime.json",
@@ -523,20 +580,43 @@ class WorkerApiContractTests(unittest.TestCase):
             }};
             const liveIndex = {{ contract_version: "worker-live-index-v1", ...identity }};
             const summary = {{ contract_version: "ui-bootstrap-v1", ...identity, markets: {{}} }};
+            const productionSelection = {{
+              role_contract_version: "candidate-role-v1",
+              action: "NO_QUALIFIED_PICK",
+              primary_candidate_id: null,
+              qualified_candidate_ids: [],
+              qualified_candidate_count: 0,
+            }};
+            const candidateRole = (legacy, research = "NONE") => ({{
+              role_contract_version: "candidate-role-v1",
+              decision_roles: {{ production: "NONE", legacy, research }},
+              decision_role: research === "PRIORITY"
+                ? "research_priority"
+                : legacy === "PRIMARY" ? "legacy_market_primary" : "legacy_watchlist",
+            }});
             const candidates = {{
-              contract_version: "candidate-list-v1", ...identity,
+              contract_version: "candidate-list-v2", ...identity,
+              role_contract_version: "candidate-role-v1",
+              production_selection: productionSelection,
               scanned_count: 800, evaluated_count: 799,
               candidates: [
-                {{ id: "cand_00000000000000000001", market: "us", code: "AAPL", name: "Apple", decision_role: "qualified" }},
-                {{ id: "cand_00000000000000000002", market: "us", code: "AMD", name: "Advanced Micro Devices", decision_role: "watchlist" }},
-                {{ id: "cand_00000000000000000003", market: "hk", code: "0700.HK", name: "Tencent", decision_role: "watchlist" }},
+                {{ id: "cand_00000000000000000001", market: "us", code: "AAPL", name: "Apple", ...candidateRole("PRIMARY") }},
+                {{ id: "cand_00000000000000000002", market: "us", code: "AMD", name: "Advanced Micro Devices", ...candidateRole("WATCHLIST") }},
+                {{ id: "cand_00000000000000000003", market: "hk", code: "0700.HK", name: "Tencent", ...candidateRole("WATCHLIST", "PRIORITY") }},
               ],
             }};
             const events = {{
-              contract_version: "event-list-v1", ...identity,
+              contract_version: "event-list-v2", ...identity,
+              event_publication: {{
+                total: 3, published: 3, truncated: 0, is_truncated: false,
+                ordering_contract_version: "decision-bound-first-then-published-desc-v1",
+                decision_bound_event_ids: ["evt-1"], production_bound_event_ids: ["evt-1"],
+                decision_bound_event_count: 1, decision_bound_record_count: 1,
+              }},
               events: [
-                {{ event_id: "evt-1", market: "us", issuer: "Apple Inc", title: "Product event" }},
-                {{ event_id: "evt-2", market: "hk", issuer: "Tencent", title: "Results" }},
+                {{ event_id: "evt-newer", market: "us", symbol: "MSFT", issuer: "Microsoft", title: "Newer filing", event_type: "announcement", direction: "neutral", decision_eligible: false, decision_bound: false }},
+                {{ event_id: "evt-1", market: "us", symbol: "AAPL", issuer: "Apple Inc", title: "Product event", event_type: "announcement", direction: "positive", decision_eligible: true, decision_bound: true }},
+                {{ event_id: "evt-2", market: "hk", symbol: "0700.HK", issuer: "Tencent", title: "Results", event_type: "results", direction: "negative", decision_eligible: true, decision_bound: false }},
               ],
             }};
             const history = {{
@@ -548,9 +628,14 @@ class WorkerApiContractTests(unittest.TestCase):
               history_evaluation: {{}}, rule_outcome_tracking: {{ status: "TRACKING" }},
             }};
             const detail = {{
-              contract_version: "candidate-detail-v1", ...identity,
+              contract_version: "candidate-detail-v2", ...identity,
               id: "cand_00000000000000000001",
-              candidate: {{ market: "us", code: "AAPL", name: "Apple", kline: [{{ close: 230 }}] }},
+              role_contract_version: "candidate-role-v1",
+              production_selection: productionSelection,
+              candidate: {{
+                id: "cand_00000000000000000001", market: "us", code: "AAPL", name: "Apple",
+                ...candidateRole("PRIMARY"), kline: [{{ close: 230 }}],
+              }},
             }};
             const payloads = {{ runtime, live_index: liveIndex, summary, candidates, events, history }};
             const prefixes = {{ runtime: "runtime", live_index: "live-index", summary: "summary", candidates: "candidates", events: "events", history: "history" }};
@@ -586,9 +671,25 @@ class WorkerApiContractTests(unittest.TestCase):
                 scheduler_start_delay_seconds: 4,
                 generation_delay_seconds: 180,
                 publication_delay_seconds: 60,
+                publication_slo_seconds: 2700,
+                publication_within_slo: true,
                 missed_checkpoints_24h: 0,
                 checkpoint_coverage_status: "COMPLETE_24H_LEDGER",
                 checkpoint_evidence_contract_version: "scheduler-checkpoint-ledger-v1",
+                checkpoint_evidence_ready: true,
+                scheduler_readiness: "READY",
+                expected_checkpoints_24h: 8,
+                published_on_time_24h: 8,
+                late_recoveries_24h: 0,
+                ledger_started_at: "2026-08-28T02:17:00+00:00",
+                evidence_lag_batches: 1,
+                scheduler_slo: {{
+                  contract_version: "scheduler-slo-v1",
+                  guaranteed: false,
+                  public_data_source_sla: false,
+                  target_publication_within_minutes: 45,
+                  coverage_window_hours: 24,
+                }},
                 recovery_mode: "on_time",
                 generation_started_at: "2026-08-29T10:17:04+08:00",
               }},
@@ -613,6 +714,8 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(list.scanned_count, 800);
             assert.equal(list.evaluated_count, 799);
             assert.equal(list.candidates[0].code, "AAPL");
+            assert.equal(list.role_contract_version, "candidate-role-v1");
+            assert.deepEqual(list.production_selection, productionSelection);
             assert.deepEqual(list.source_snapshot, source);
             assert.equal(listResponse.headers.get("etag"), null);
             const unchanged = await worker.fetch(new Request(listRequest, {{ headers: {{ "if-none-match": '"stale"' }} }}), env);
@@ -633,6 +736,8 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(detailPayload.snapshot_key, snapshotKey);
             assert.deepEqual(detailPayload.source_snapshot, source);
             assert.equal(detailPayload.candidate.code, "AAPL");
+            assert.equal(detailPayload.role_contract_version, "candidate-role-v1");
+            assert.deepEqual(detailPayload.production_selection, productionSelection);
 
             const eventResponse = await worker.fetch(
               new Request("https://xuangu.test/api/events?page=1&limit=1&market=us&issuer=APPLE"), env,
@@ -640,8 +745,38 @@ class WorkerApiContractTests(unittest.TestCase):
             const eventPayload = await eventResponse.json();
             assert.equal(eventPayload.total, 1);
             assert.equal(eventPayload.events[0].event_id, "evt-1");
+            assert.equal(eventPayload.contract_version, "event-list-v2");
+            assert.equal(eventPayload.ordering_contract_version, "decision-bound-first-then-published-desc-v1");
+            assert.equal(eventPayload.decision_bound.returned, 1);
             assert.deepEqual(eventPayload.source_snapshot, source);
             assert.equal(eventResponse.headers.get("etag"), null);
+            const defaultEventPayload = await (await worker.fetch(new Request(
+              "https://xuangu.test/api/events?page=1&limit=1",
+            ), env)).json();
+            assert.equal(defaultEventPayload.events[0].event_id, "evt-1", "decision-bound evidence is first by default");
+            assert.equal(defaultEventPayload.decision_bound.total, 1);
+            assert.equal(defaultEventPayload.decision_bound.returned, 1);
+            const boundEventPayload = await (await worker.fetch(new Request(
+              "https://xuangu.test/api/events?scope=decision_bound&decision_eligible=true&event_id=evt-1&symbol=AAPL&event_type=announcement&direction=positive&q=product",
+            ), env)).json();
+            assert.equal(boundEventPayload.total, 1);
+            assert.equal(boundEventPayload.events[0].event_id, "evt-1");
+            assert.equal(boundEventPayload.decision_bound.all_matched_returned, true);
+            const unboundEventPayload = await (await worker.fetch(new Request(
+              "https://xuangu.test/api/events?decision_bound=false",
+            ), env)).json();
+            assert.deepEqual(unboundEventPayload.events.map((row) => row.event_id), ["evt-newer", "evt-2"]);
+            const negativeEventPayload = await (await worker.fetch(new Request(
+              "https://xuangu.test/api/events?market=hk&event_type=results&direction=negative&q=tencent",
+            ), env)).json();
+            assert.deepEqual(negativeEventPayload.events.map((row) => row.event_id), ["evt-2"]);
+            for (const invalidQuery of [
+              "scope=unknown", "decision_bound=maybe", "scope=decision_bound&decision_bound=false", "decision_eligible=maybe", "direction=sideways",
+            ]) {{
+              const invalid = await worker.fetch(new Request(`https://xuangu.test/api/events?${{invalidQuery}}`), env);
+              assert.equal(invalid.status, 400, invalidQuery);
+              assert.equal((await invalid.json()).error, "INVALID_EVENT_FILTER");
+            }}
             const eventVariant = await worker.fetch(new Request(
               "https://xuangu.test/api/events?page=1&limit=1&market=hk",
               {{ headers: {{ "if-none-match": '"stale"' }} }},
@@ -666,10 +801,35 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(historyVariant.status, 200);
             assert.equal(historyVariant.headers.get("etag"), null);
 
+            for (const [path, field] of [
+              ["/api/candidates?page=0", "page"],
+              ["/api/candidates?limit=101", "limit"],
+              ["/api/events?page=1.5", "page"],
+              ["/api/events?limit=51", "limit"],
+              ["/api/history?page=-1", "page"],
+              ["/api/history?limit=6", "limit"],
+            ]) {{
+              const invalidPagination = await worker.fetch(
+                new Request(`https://xuangu.test${{path}}`), env,
+              );
+              assert.equal(invalidPagination.status, 400, path);
+              const invalidPayload = await invalidPagination.json();
+              assert.equal(invalidPayload.error, "INVALID_PAGINATION", path);
+              assert.equal(invalidPayload.field, field, path);
+            }}
+
             const gateResponse = await worker.fetch(new Request("https://xuangu.test/api/gate-status"), env);
             const gate = await gateResponse.json();
-            assert.equal(gate.scheduler_enabled, false);
-            assert.equal(gate.scheduler_gap, "GITHUB_WORKFLOW_DISPATCH_TOKEN_NOT_PROVISIONED");
+            assert.equal(gate.contract_version, "scheduler-health-v2");
+            assert.equal(gate.scheduler_enabled, true);
+            assert.equal(gate.scheduler_primary_enabled, true);
+            assert.equal(gate.scheduler_primary_provider, "github_actions");
+            assert.equal(gate.scheduler_gap, null);
+            assert.equal(gate.cloudflare_dispatch_enabled, false);
+            assert.equal(gate.cloudflare_dispatch_gap, "OPTIONAL_DISPATCH_TOKEN_NOT_PROVISIONED");
+            assert.equal(gate.checkpoint_evidence_ready, true);
+            assert.equal(gate.scheduler_readiness, "READY");
+            assert.equal(gate.unattended_refresh_ready, true);
             assert.equal(gate.source_invocation_slot, "2026-08-29T10:17:00+08:00");
             assert.equal(gate.generation_delay_seconds, 180);
             assert.equal(gate.publication_delay_seconds, 60);
@@ -695,7 +855,10 @@ class WorkerApiContractTests(unittest.TestCase):
               {{ headers: {{ "if-none-match": gateResponse.headers.get("etag") }} }},
             ), {{ ...env, GITHUB_WORKFLOW_DISPATCH_TOKEN: "provisioned" }});
             assert.equal(enabledGate.status, 200);
-            assert.equal((await enabledGate.json()).scheduler_enabled, true);
+            const enabledGatePayload = await enabledGate.json();
+            assert.equal(enabledGatePayload.scheduler_enabled, true);
+            assert.equal(enabledGatePayload.cloudflare_dispatch_enabled, true);
+            assert.equal(enabledGatePayload.cloudflare_dispatch_gap, null);
 
             const immutableRequest = new Request(`https://xuangu.test/api/data/${{encodeURIComponent(assets.candidates.key)}}`);
             const immutable = await worker.fetch(immutableRequest, env);
@@ -1740,7 +1903,7 @@ class WorkerApiContractTests(unittest.TestCase):
             }};
 
             const response = await worker.fetch(
-              new Request("https://xuangu.alixjd.com/api/history?limit=120"),
+              new Request("https://xuangu.alixjd.com/api/history?limit=5"),
               env,
             );
             assert.equal(response.status, 200);
@@ -1875,7 +2038,7 @@ class WorkerApiContractTests(unittest.TestCase):
             }};
             manifest.summaries = [invalidSettlement, laterNoPickSameDay];
             const invalidResponse = await worker.fetch(
-              new Request("https://xuangu.alixjd.com/api/history?limit=120"),
+              new Request("https://xuangu.alixjd.com/api/history?limit=5"),
               env,
             );
             const invalidPayload = await invalidResponse.json();
@@ -1886,7 +2049,7 @@ class WorkerApiContractTests(unittest.TestCase):
             invalidSettlement.outcome.exit_at = "2026-09-03T18:00:00Z";
             invalidSettlement.outcome.settled_at = "2026-09-03T19:00:00Z";
             const validResponse = await worker.fetch(
-              new Request("https://xuangu.alixjd.com/api/history?limit=120"),
+              new Request("https://xuangu.alixjd.com/api/history?limit=5"),
               env,
             );
             const validPayload = await validResponse.json();
@@ -1894,7 +2057,7 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(validPayload.meta.missing_outcome_count, 0);
 
             const unavailableResponse = await worker.fetch(
-              new Request("https://xuangu.alixjd.com/api/history?limit=120"),
+              new Request("https://xuangu.alixjd.com/api/history?limit=5"),
               {{ ASSETS: {{ fetch: async () => new Response("missing", {{ status: 404 }}) }} }},
             );
             assert.equal(unavailableResponse.status, 503);

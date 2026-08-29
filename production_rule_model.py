@@ -12,6 +12,7 @@ score, never a probability or expected return.
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import hashlib
 import json
 import math
@@ -28,7 +29,15 @@ ACTION_PICK = "QUALIFIED_PICK"
 ACTION_NONE = "NO_QUALIFIED_PICK"
 TRACK_EVENT_CATALYST = "event_catalyst"
 TRACK_QUALITY_TECHNICAL = "quality_technical"
-RULE_INPUTS_CONTRACT_VERSION = "production-rule-inputs-v2"
+RULE_INPUTS_CONTRACT_VERSION = "production-rule-inputs-v3"
+LEGACY_RULE_INPUTS_CONTRACT_VERSION = "production-rule-inputs-v2"
+SUPPORTED_RULE_INPUTS_CONTRACT_VERSIONS = frozenset(
+    {LEGACY_RULE_INPUTS_CONTRACT_VERSION, RULE_INPUTS_CONTRACT_VERSION}
+)
+HORIZON_RANGE_CONTRACT_VERSION = "horizon-range-v1"
+HORIZON_RANGE_METHOD_ID = "realized-vol-drift-shadow-v1"
+TEN_DAY_TRADE_PLAN_CONTRACT_VERSION = "ten-day-trade-plan-v2"
+LEGACY_TEN_DAY_TRADE_PLAN_CONTRACT_VERSION = "ten-day-trade-plan-v1"
 
 MARKET_POLICY = {
     "a_share": {"minimum_legacy": 64.0, "maximum_downside": 8.0, "minimum_upside": 5.0},
@@ -117,6 +126,66 @@ def _text(value: Any) -> str | None:
     return text or None
 
 
+def _horizon_range_text(low_pct: float, high_pct: float) -> str:
+    return f"{float(low_pct):+.1f}% ~ {float(high_pct):+.1f}%"
+
+
+def _valid_iso_date(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return dt.date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
+def _canonical_horizon_range(value: Any) -> dict[str, Any] | None:
+    """Validate and normalize the auditable ten-session scenario contract."""
+
+    if not isinstance(value, Mapping):
+        return None
+    low_pct = value.get("low_pct")
+    high_pct = value.get("high_pct")
+    observations = value.get("source_observations")
+    if (
+        value.get("contract_version") != HORIZON_RANGE_CONTRACT_VERSION
+        or value.get("horizon_trade_days") != HORIZON_TRADE_DAYS
+        or value.get("method_id") != HORIZON_RANGE_METHOD_ID
+        or value.get("calibrated") is not False
+        or not _finite_number(low_pct)
+        or not _finite_number(high_pct)
+        or not float(low_pct) < 0 < float(high_pct)
+        or type(observations) is not int
+        or not 0 <= observations <= 20
+        or value.get("text") != _horizon_range_text(float(low_pct), float(high_pct))
+    ):
+        return None
+    start = value.get("source_window_start_date")
+    end = value.get("source_window_end_date")
+    if (start is None) != (end is None):
+        return None
+    if start is not None and (
+        not _valid_iso_date(start)
+        or not _valid_iso_date(end)
+        or start > end
+    ):
+        return None
+    result = {
+        "contract_version": HORIZON_RANGE_CONTRACT_VERSION,
+        "low_pct": _round_rule_number(float(low_pct), 2),
+        "high_pct": _round_rule_number(float(high_pct), 2),
+        "text": _horizon_range_text(float(low_pct), float(high_pct)),
+        "horizon_trade_days": HORIZON_TRADE_DAYS,
+        "method_id": HORIZON_RANGE_METHOD_ID,
+        "calibrated": False,
+        "source_observations": observations,
+    }
+    if start is not None:
+        result["source_window_start_date"] = start
+        result["source_window_end_date"] = end
+    return result
+
+
 def _candidate_rows(section: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     decision = section.get("decision") or {}
     rows: list[Any] = [
@@ -196,6 +265,7 @@ def _ten_day_trade_plan(
     row: Mapping[str, Any],
     candidate: Mapping[str, Any] | None,
     qualification_track: str | None,
+    input_contract_version: str,
 ) -> dict[str, Any] | None:
     """Build a deterministic review plan from already-frozen evidence.
 
@@ -236,8 +306,13 @@ def _ten_day_trade_plan(
         target_source = "ten_day_scenario_upper_bound"
     currency = {"a_share": "CNY", "hk": "HKD", "us": "USD"}.get(_text(row.get("market")))
     review_end = _text(row.get("forecast_end_trade_date"))
-    return {
-        "contract_version": "ten-day-trade-plan-v1",
+    current_provenance = input_contract_version == RULE_INPUTS_CONTRACT_VERSION
+    plan = {
+        "contract_version": (
+            TEN_DAY_TRADE_PLAN_CONTRACT_VERSION
+            if current_provenance
+            else LEGACY_TEN_DAY_TRADE_PLAN_CONTRACT_VERSION
+        ),
         "status": "REVIEW_REQUIRED",
         "horizon_trade_days": HORIZON_TRADE_DAYS,
         "reference_quote": {
@@ -277,9 +352,19 @@ def _ten_day_trade_plan(
         ],
         "is_personalized_advice": False,
     }
+    if current_provenance:
+        scenario_range = _canonical_horizon_range(estimated_range)
+        if scenario_range is None:
+            return None
+        plan["scenario_range"] = scenario_range
+    return plan
 
 
-def freeze_production_rule_input_row(row: Mapping[str, Any], index: int) -> dict[str, Any]:
+def freeze_production_rule_input_row(
+    row: Mapping[str, Any],
+    index: int,
+    contract_version: str = RULE_INPUTS_CONTRACT_VERSION,
+) -> dict[str, Any]:
     """Project one global row to exactly the fields consumed by current V4."""
 
     result = {
@@ -297,9 +382,19 @@ def freeze_production_rule_input_row(row: Mapping[str, Any], index: int) -> dict
         }
     estimated_range = row.get("estimated_10d_range")
     if isinstance(estimated_range, Mapping):
+        range_fields = (
+            ("low_pct", "high_pct")
+            if contract_version == LEGACY_RULE_INPUTS_CONTRACT_VERSION
+            else (
+                "contract_version", "low_pct", "high_pct", "text",
+                "horizon_trade_days", "method_id", "calibrated",
+                "source_observations", "source_window_start_date",
+                "source_window_end_date",
+            )
+        )
         result["estimated_10d_range"] = {
             key: copy.deepcopy(estimated_range.get(key))
-            for key in ("low_pct", "high_pct")
+            for key in range_fields
             if key in estimated_range
         }
     return result
@@ -311,6 +406,7 @@ def _evaluate_candidate(
     *,
     source_candidate_override: Any = _SOURCE_FROM_SNAPSHOT,
     qualified_candidate_snapshot: Any = _CANDIDATE_SNAPSHOT_FROM_SOURCE,
+    input_contract_version: str = RULE_INPUTS_CONTRACT_VERSION,
 ) -> dict[str, Any]:
     source_blockers = row.get("blocker_codes")
     shared_source_blockers = (
@@ -411,6 +507,11 @@ def _evaluate_candidate(
     low_pct = estimated_range.get("low_pct") if isinstance(estimated_range, Mapping) else None
     high_pct = estimated_range.get("high_pct") if isinstance(estimated_range, Mapping) else None
     range_valid = _finite_number(low_pct) and _finite_number(high_pct) and float(low_pct) < 0 < float(high_pct)
+    canonical_range = (
+        _canonical_horizon_range(estimated_range)
+        if input_contract_version == RULE_INPUTS_CONTRACT_VERSION
+        else None
+    )
     if not range_valid:
         low_value = high_value = downside = ratio = None
         risk_reward_strength = 0.0
@@ -433,6 +534,8 @@ def _evaluate_candidate(
         if ratio < QUALITY_MIN_RISK_REWARD_RATIO:
             quality_blockers.append("QUALITY_RISK_REWARD_BELOW_THRESHOLD")
         risk_reward_strength = _clamp(ratio / 2.0 * 100.0)
+        if input_contract_version == RULE_INPUTS_CONTRACT_VERSION and canonical_range is None:
+            block_both("TEN_DAY_RANGE_PROVENANCE_INVALID")
 
     components = {
         "legacy_recommendation": _round_rule_number(recommendation_value * 0.30, 2),
@@ -493,7 +596,7 @@ def _evaluate_candidate(
         "calendar_version": _text(row.get("calendar_version")),
         "entry_trade_date": _text(row.get("entry_trade_date")),
         "forecast_end_trade_date": _text(row.get("forecast_end_trade_date")),
-        "estimated_10d_range": {
+        "estimated_10d_range": copy.deepcopy(canonical_range) if canonical_range is not None else {
             "low_pct": _round_rule_number(low_value, 2) if low_value is not None else None,
             "high_pct": _round_rule_number(high_value, 2) if high_value is not None else None,
             "horizon_trade_days": HORIZON_TRADE_DAYS,
@@ -518,6 +621,7 @@ def _evaluate_candidate(
             result,
             result.get("candidate_snapshot") or source_candidate,
             qualification_track,
+            input_contract_version,
         )
     return result
 
@@ -561,7 +665,11 @@ def build_production_rule_inputs(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     for index, row in enumerate(source_rows):
         if not isinstance(row, Mapping):
             continue
-        entry = freeze_production_rule_input_row(row, index)
+        entry = freeze_production_rule_input_row(
+            row,
+            index,
+            RULE_INPUTS_CONTRACT_VERSION,
+        )
         market = entry.get("market")
         code = entry.get("code")
         source_candidate = _source_candidate(snapshot, market, code)
@@ -569,7 +677,11 @@ def build_production_rule_inputs(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             "source_candidate_present": source_candidate is not None,
             "source_data_quality_score": _source_data_quality(source_candidate),
         })
-        evaluated = _evaluate_candidate(snapshot, entry)
+        evaluated = _evaluate_candidate(
+            snapshot,
+            entry,
+            input_contract_version=RULE_INPUTS_CONTRACT_VERSION,
+        )
         if evaluated.get("status") == "QUALIFIED":
             entry["candidate_snapshot"] = copy.deepcopy(evaluated.get("candidate_snapshot"))
         rows.append(entry)
@@ -593,6 +705,7 @@ def _evaluate_from_rule_input(
     snapshot: Mapping[str, Any],
     entry: Mapping[str, Any] | None,
     index: int,
+    input_contract_version: str,
 ) -> dict[str, Any]:
     row = entry if isinstance(entry, Mapping) else {}
     identity_matches = bool(isinstance(entry, Mapping) and entry.get("input_index") == index)
@@ -612,6 +725,7 @@ def _evaluate_from_rule_input(
         row,
         source_candidate_override=source_candidate,
         qualified_candidate_snapshot=candidate_snapshot,
+        input_contract_version=input_contract_version,
     )
 
 
@@ -623,11 +737,13 @@ def build_production_decision(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     input_ledger = _rule_input_ledger(snapshot)
     input_rows = input_ledger.get("rows")
     input_rows = input_rows if isinstance(input_rows, list) else []
+    input_contract_version = _text(input_ledger.get("contract_version")) or RULE_INPUTS_CONTRACT_VERSION
     evaluated = [
         _evaluate_from_rule_input(
             snapshot,
             entry,
             index,
+            input_contract_version,
         )
         for index, entry in enumerate(input_rows)
         if isinstance(entry, Mapping)
@@ -713,6 +829,10 @@ __all__ = [
     "ACTION_PICK",
     "CONTRACT_VERSION",
     "RULE_INPUTS_CONTRACT_VERSION",
+    "SUPPORTED_RULE_INPUTS_CONTRACT_VERSIONS",
+    "HORIZON_RANGE_CONTRACT_VERSION",
+    "HORIZON_RANGE_METHOD_ID",
+    "TEN_DAY_TRADE_PLAN_CONTRACT_VERSION",
     "RULE_MODEL_ID",
     "SCORE_KIND",
     "TRACK_EVENT_CATALYST",

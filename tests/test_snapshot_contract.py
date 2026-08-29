@@ -19,6 +19,21 @@ from scripts.validate_snapshot import (
 from tests.test_selector_v2 import fixture_candidate
 
 
+def audited_horizon_range(low_pct=-4.0, high_pct=8.0) -> dict:
+    return {
+        "contract_version": "horizon-range-v1",
+        "low_pct": low_pct,
+        "high_pct": high_pct,
+        "text": f"{float(low_pct):+.1f}% ~ {float(high_pct):+.1f}%",
+        "horizon_trade_days": 10,
+        "method_id": "realized-vol-drift-shadow-v1",
+        "calibrated": False,
+        "source_observations": 20,
+        "source_window_start_date": "2026-07-22",
+        "source_window_end_date": "2026-08-19",
+    }
+
+
 def snapshot_fixture() -> dict:
     markets = {}
     targets = {"a_share": 300, "hk": 200, "us": 300}
@@ -149,7 +164,7 @@ def qualify_current_v3_row(
             "v2_rank_universe_size": 100,
             "event_candidate_scanned": True,
             "verified_positive_event_ids": ["evt-qualified"] if with_positive_event else [],
-            "estimated_10d_range": {"low_pct": -4.0, "high_pct": 8.0},
+            "estimated_10d_range": audited_horizon_range(),
             "blocker_codes": [] if with_positive_event else ["VERIFIED_POSITIVE_EVENT_MISSING"],
         }
     )
@@ -1201,7 +1216,7 @@ class SnapshotContractTests(unittest.TestCase):
                 "v2_rank_universe_size": 100,
                 "event_candidate_scanned": True,
                 "verified_positive_event_ids": [],
-                "estimated_10d_range": {"low_pct": -4.0, "high_pct": 8.0},
+                "estimated_10d_range": audited_horizon_range(),
                 "blocker_codes": ["VERIFIED_POSITIVE_EVENT_MISSING"],
                 "source_data_quality_score": 100.0,
                 "candidate_snapshot": copy.deepcopy(
@@ -1383,7 +1398,11 @@ class SnapshotContractTests(unittest.TestCase):
         primary = snapshot["production_decision"]["primary"]
         self.assertEqual(primary["qualification_track"], "quality_technical")
         self.assertFalse(primary["event_candidate_scanned"])
-        self.assertEqual(primary["ten_day_trade_plan"]["contract_version"], "ten-day-trade-plan-v1")
+        self.assertEqual(primary["ten_day_trade_plan"]["contract_version"], "ten-day-trade-plan-v2")
+        self.assertEqual(
+            primary["ten_day_trade_plan"]["scenario_range"],
+            primary["estimated_10d_range"],
+        )
         production_errors = [
             error for error in validate_snapshot(snapshot) if error.startswith("production")
         ]
@@ -1396,6 +1415,20 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertIn(
             "production_decision.evaluated_candidates[0].ten_day_trade_plan.entry_zone currency is inconsistent",
             validate_snapshot(tampered),
+        )
+
+        provenance_tamper = copy.deepcopy(snapshot)
+        provenance_tamper["production_decision"]["evaluated_candidates"][0][
+            "ten_day_trade_plan"
+        ]["scenario_range"]["method_id"] = "untrusted-method"
+        provenance_errors = validate_snapshot(provenance_tamper)
+        self.assertIn(
+            "production_decision.evaluated_candidates[0].ten_day_trade_plan.scenario_range.method_id is invalid",
+            provenance_errors,
+        )
+        self.assertIn(
+            "production_decision.evaluated_candidates[0].ten_day_trade_plan.scenario_range must exactly match the qualified range",
+            provenance_errors,
         )
 
     def test_new_model_rejects_v2_pair_but_archived_v2_contract_remains_supported(self) -> None:

@@ -159,6 +159,54 @@ def observation_performance_fixture(**overrides) -> dict:
     return payload
 
 
+def scheduler_gate_fixture(local: dict, status: dict, **overrides) -> dict:
+    payload = {
+        "ok": True,
+        "contract_version": "scheduler-health-v2",
+        "snapshot_key": local["snapshot_key"],
+        "generated_at": local["generated_at"],
+        "generation_started_at": None,
+        "published_at": "2026-08-21T07:08:00+00:00",
+        "publication_backend": "embedded",
+        "source_invocation_slot": None,
+        "effective_checkpoint": None,
+        "effective_invocation_slot": None,
+        "scheduler_start_delay_seconds": None,
+        "generation_delay_seconds": None,
+        "publication_delay_seconds": 60,
+        "publication_slo_seconds": 2700,
+        "publication_within_slo": None,
+        "missed_checkpoints_24h": None,
+        "checkpoint_coverage_status": "INITIALIZING_24H_LEDGER",
+        "checkpoint_evidence_contract_version": "scheduler-checkpoint-ledger-v1",
+        "checkpoint_evidence_ready": False,
+        "scheduler_readiness": "INITIALIZING",
+        "expected_checkpoints_24h": 8,
+        "published_on_time_24h": 0,
+        "late_recoveries_24h": 0,
+        "ledger_started_at": None,
+        "evidence_lag_batches": 1,
+        "scheduler_slo": {
+            "contract_version": "scheduler-slo-v1",
+            "guaranteed": False,
+            "public_data_source_sla": False,
+            "target_publication_within_minutes": 45,
+            "coverage_window_hours": 24,
+        },
+        "recovery_mode": "none",
+        "scheduler_enabled": True,
+        "scheduler_primary_enabled": True,
+        "scheduler_primary_provider": "github_actions",
+        "cloudflare_dispatch_enabled": False,
+        "cloudflare_dispatch_optional": True,
+        "cloudflare_dispatch_gap": "OPTIONAL_DISPATCH_DISABLED",
+        "unattended_refresh_ready": status["unattended_refresh_ready"],
+        "scheduler_gap": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def ui_delivery_fixtures(
     local: dict,
     *,
@@ -205,14 +253,96 @@ def ui_delivery_fixtures(
             **extra,
         }
 
+    candidate_role_contract_version = "candidate-role-v1"
+    candidate_rows = []
+    if production_action == "QUALIFIED_PICK":
+        for index in range(historical_count):
+            candidate_id = "cand_" + hashlib.sha256(
+                f"{local['snapshot_key']}:{index}".encode()
+            ).hexdigest()[:20]
+            production_role = "PRIMARY" if index == 0 else "QUALIFIED"
+            candidate_rows.append({
+                "id": candidate_id,
+                "market": "us",
+                "code": f"FIXTURE{index + 1:02d}",
+                "role_contract_version": candidate_role_contract_version,
+                "decision_roles": {
+                    "production": production_role,
+                    "legacy": "NONE",
+                    "research": "NONE",
+                },
+                "decision_role": (
+                    "production_primary" if index == 0 else "production_qualified"
+                ),
+            })
+    qualified_candidate_ids = [row["id"] for row in candidate_rows]
+    production_selection = {
+        "role_contract_version": candidate_role_contract_version,
+        "action": production_action,
+        "primary_candidate_id": (
+            qualified_candidate_ids[0] if qualified_candidate_ids else None
+        ),
+        "qualified_candidate_ids": qualified_candidate_ids,
+        "qualified_candidate_count": len(qualified_candidate_ids),
+    }
+
+    ordering_contract_version = "decision-bound-first-then-published-desc-v1"
+    decision_bound_event_ids = ["evt-fixture-bound"]
+    event_rows = [
+        {
+            "event_id": "evt-fixture-bound",
+            "market": "us",
+            "symbol": "NTNX",
+            "issuer": "Nutanix",
+            "title": "Fixture decision-bound event",
+            "event_type": "announcement",
+            "direction": "positive",
+            "decision_eligible": True,
+            "decision_bound": True,
+            "published_at": "2026-08-21T06:00:00Z",
+        },
+        {
+            "event_id": "evt-fixture-unbound",
+            "market": "hk",
+            "symbol": "00700",
+            "issuer": "Tencent",
+            "title": "Fixture research-only event",
+            "event_type": "news",
+            "direction": "neutral",
+            "decision_eligible": False,
+            "decision_bound": False,
+            "published_at": "2026-08-21T05:00:00Z",
+        },
+    ]
+    event_publication = {
+        "total": len(event_rows),
+        "published": len(event_rows),
+        "truncated": 0,
+        "ordering_contract_version": ordering_contract_version,
+        "decision_bound_event_ids": decision_bound_event_ids,
+        "production_bound_event_ids": decision_bound_event_ids,
+        "decision_bound_event_count": len(decision_bound_event_ids),
+        "decision_bound_record_count": len(decision_bound_event_ids),
+    }
+
     static = {
         "latest-summary": asset("ui-bootstrap-v1", markets={}),
         "candidates": asset(
-            "ui-candidates-v1",
-            candidates=[],
-            candidate_count=0,
+            "ui-candidates-v2",
+            role_contract_version=candidate_role_contract_version,
+            production_selection=dict(production_selection),
+            candidates=[
+                {**row, "decision_roles": dict(row["decision_roles"])}
+                for row in candidate_rows
+            ],
+            candidate_count=len(candidate_rows),
         ),
-        "events": asset("ui-events-v1", events={"items": []}),
+        "events": asset(
+            "ui-events-v2",
+            events=[dict(row) for row in event_rows],
+            event_count=len(event_rows),
+            event_publication=dict(event_publication),
+        ),
     }
     api = {
         "latest-summary": {
@@ -232,14 +362,19 @@ def ui_delivery_fixtures(
         },
         "candidates": {
             **asset(
-                "candidate-list-v1",
-                candidates=[],
-                candidate_count=0,
+                "candidate-list-v2",
+                role_contract_version=candidate_role_contract_version,
+                production_selection=dict(production_selection),
+                candidates=[
+                    {**row, "decision_roles": dict(row["decision_roles"])}
+                    for row in candidate_rows
+                ],
+                candidate_count=len(candidate_rows),
                 scanned_count=0,
                 page=1,
-                limit=25,
-                total=0,
-                returned_count=0,
+                limit=max(25, len(candidate_rows)),
+                total=len(candidate_rows),
+                returned_count=len(candidate_rows),
                 has_more=False,
             ),
             "snapshot_use": snapshot_use,
@@ -247,14 +382,23 @@ def ui_delivery_fixtures(
         },
         "events": {
             **asset(
-                "event-list-v1",
-                events=[],
-                event_count=0,
+                "event-list-v2",
+                ordering_contract_version=ordering_contract_version,
+                events=[dict(row) for row in event_rows],
+                event_count=len(event_rows),
                 page=1,
                 limit=25,
-                total=0,
-                returned_count=0,
+                total=len(event_rows),
+                returned_count=len(event_rows),
                 has_more=False,
+                event_publication=dict(event_publication),
+                decision_bound={
+                    "total": len(decision_bound_event_ids),
+                    "matched": len(decision_bound_event_ids),
+                    "returned": len(decision_bound_event_ids),
+                    "all_matched_returned": True,
+                    "ids": list(decision_bound_event_ids),
+                },
             ),
             "snapshot_use": snapshot_use,
             "effective_decisions": effective,
@@ -303,6 +447,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
         workflow = OBSERVATION_WORKFLOW.read_text(encoding="utf-8")
         for token in (
             'cron: "30 22 * * *"',
+            'cron: "30 4 * * *"',
             "workflow_dispatch:",
             "group: xuangu-production",
             "cancel-in-progress: false",
@@ -430,15 +575,18 @@ class WorkflowReliabilityTests(unittest.TestCase):
 
     def test_workflow_has_source_aware_fallbacks_and_stale_push_guard(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertEqual(workflow.count("- cron:"), 9)
+        self.assertEqual(workflow.count("- cron:"), 18)
+        for hour in ("0", "2", "4", "7", "8", "12"):
+            self.assertIn(f'cron: "17 {hour} * * 1-5"', workflow)
+        self.assertIn('cron: "47 14 * * 1-5"', workflow)
+        self.assertIn('cron: "17 20 * * 1-5"', workflow)
+        self.assertIn('cron: "17 21 * * 1-5"', workflow)
         for hour in ("0", "2", "4", "7", "8", "12"):
             self.assertIn(f'cron: "47 {hour} * * 1-5"', workflow)
         self.assertIn('cron: "17 15 * * 1-5"', workflow)
         self.assertIn('cron: "47 20 * * 1-5"', workflow)
         self.assertIn('cron: "47 21 * * 1-5"', workflow)
         self.assertNotIn('cron: "47 12 * * 0"', workflow)
-        self.assertNotIn('cron: "17 0 * * 1-5"', workflow)
-        self.assertNotIn('cron: "47 14 * * 1-5"', workflow)
         self.assertNotIn('cron: "58 0,1,2,4,5,6,15 * * 1-5"', workflow)
         self.assertNotIn('cron: "28 1,2,3,5,6,7,16 * * 1-5"', workflow)
         self.assertIn("cancel-in-progress: false", workflow)
@@ -514,13 +662,13 @@ class WorkflowReliabilityTests(unittest.TestCase):
     def test_workflow_actions_use_node24_runtime_generations(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         expected_counts = {
-            PINNED_ACTIONS["checkout"]: 2,
-            PINNED_ACTIONS["setup-python"]: 2,
+            PINNED_ACTIONS["checkout"]: 3,
+            PINNED_ACTIONS["setup-python"]: 3,
             PINNED_ACTIONS["setup-node"]: 1,
             PINNED_ACTIONS["cache-restore"]: 3,
             PINNED_ACTIONS["cache-save"]: 3,
-            PINNED_ACTIONS["upload-artifact"]: 1,
-            PINNED_ACTIONS["download-artifact"]: 1,
+            PINNED_ACTIONS["upload-artifact"]: 2,
+            PINNED_ACTIONS["download-artifact"]: 2,
         }
         for action, count in expected_counts.items():
             with self.subTest(action=action):
@@ -549,7 +697,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertIn('archive_add_status="$?"', workflow)
         self.assertIn("Archive staging failed on attempt ${attempt}", workflow)
         self.assertIn("push_archive_with_scoped_token", workflow)
-        self.assertEqual(workflow.count("persist-credentials: false"), 2)
+        self.assertEqual(workflow.count("persist-credentials: false"), 3)
         self.assertIn("Archive failed after 3 bounded attempts", workflow)
         self.assertIn("[skip ci]", workflow)
         self.assertIn("from scripts.snapshot_archive_policy import ARCHIVE_POLICY, archive_reasons", workflow)
@@ -559,6 +707,34 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertIn("needs.deploy.outputs.should_publish != 'false'", workflow)
         self.assertNotIn("continue-on-error", workflow)
         self.assertNotIn("git-auto-commit-action", workflow)
+
+    def test_verified_checkpoint_receipt_is_small_post_deploy_evidence_only(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        verify = workflow.index("Verify complete deployed contract")
+        create = workflow.index("Create verified scheduler checkpoint receipt")
+        upload = workflow.index("Upload verified scheduler checkpoint receipt")
+        ledger_job = workflow.index("  checkpoint-ledger:")
+        self.assertLess(verify, create)
+        self.assertLess(create, upload)
+        self.assertLess(upload, ledger_job)
+        for token in (
+            "scripts/scheduler_checkpoint_ledger.py create",
+            "scripts/scheduler_checkpoint_ledger.py validate",
+            "scripts/scheduler_checkpoint_ledger.py\" install",
+            "needs.deploy.outputs.has_checkpoint_receipt == 'true'",
+            "data/outcomes/scheduler-checkpoints/${receipt_name}",
+            "Scheduler receipt push attempt ${attempt}/3",
+            "Scheduler receipt persistence failed after 3 bounded attempts",
+            "[skip ci]",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, workflow)
+        receipt_section = workflow[ledger_job:]
+        self.assertNotIn("snapshot-recovery-", receipt_section)
+        self.assertNotIn("merge_archive_payload.py", receipt_section)
+        self.assertNotIn("git add -- data", receipt_section)
+        self.assertIn('git -C "${receipt_tree}" add -- "${target_relative}"', receipt_section)
+        self.assertIn("contents: write", receipt_section)
 
     def test_workflow_uses_least_privilege_jobs_and_full_post_deploy_verifier(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -649,7 +825,15 @@ class DeploymentVerifierTests(unittest.TestCase):
             ],
             "snapshot_as_of": self.local["generated_at"],
             "scheduler_primary_enabled": True,
-            "active_refresh_mode": "cloudflare_primary_with_github_watchdog",
+            "scheduler_primary_provider": "github_actions",
+            "cloudflare_dispatch_enabled": False,
+            "cloudflare_dispatch_optional": True,
+            "active_refresh_mode": "github_actions_primary_with_30m_watchdog",
+            "readiness_contract_version": "production-readiness-v1",
+            "research_decision_ready": False,
+            "checkpoint_evidence_ready": False,
+            "unattended_refresh_ready": False,
+            "calibrated_execution_ready": False,
             "next_refresh": "2026-08-24T08:17:00+08:00",
             "next_active_refresh": "2026-08-24T08:17:00+08:00",
             "schedule_us_post_close": {
@@ -687,7 +871,7 @@ class DeploymentVerifierTests(unittest.TestCase):
             [],
         )
 
-    def test_workflow_utc_crons_are_watchdogs_plus_post_close_variants(self) -> None:
+    def test_workflow_utc_crons_are_github_primary_plus_watchdogs(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         actual: set[tuple[int, int]] = set()
         for minute, hours in re.findall(r'cron: "(\d+) ([\d,]+) \* \* 1-5"', workflow):
@@ -695,11 +879,13 @@ class DeploymentVerifierTests(unittest.TestCase):
                 local_minutes = (int(hour) * 60 + int(minute) + 8 * 60) % (24 * 60)
                 actual.add(divmod(local_minutes, 60))
 
-        expected_watchdogs = {
+        expected_primary_and_watchdogs = {
+            (8, 17), (10, 17), (12, 17), (15, 17), (16, 17), (20, 17), (22, 47),
+            (4, 17), (5, 17),
             (8, 47), (10, 47), (12, 47), (15, 47), (16, 47), (20, 47), (23, 17),
             (4, 47), (5, 47),
         }
-        self.assertEqual(actual, expected_watchdogs)
+        self.assertEqual(actual, expected_primary_and_watchdogs)
         self.assertEqual(
             self.module.GITHUB_WATCHDOG_UTC_SCHEDULES,
             (
@@ -752,7 +938,7 @@ class DeploymentVerifierTests(unittest.TestCase):
             [],
         )
 
-    def test_scheduled_snapshot_status_uses_active_watchdog_path_when_primary_is_disabled(self) -> None:
+    def test_scheduled_snapshot_status_rejects_disabled_github_primary(self) -> None:
         watchdog = dict(
             self.status,
             time="2026-08-29T17:13:45+08:00",
@@ -761,10 +947,21 @@ class DeploymentVerifierTests(unittest.TestCase):
             next_refresh="2026-08-31T08:47:00+08:00",
             next_active_refresh="2026-08-31T08:47:00+08:00",
         )
-        self.assertEqual(
-            self.module.scheduled_snapshot_status_errors(self.local, watchdog),
-            [],
-        )
+        errors = self.module.scheduled_snapshot_status_errors(self.local, watchdog)
+        self.assertTrue(any("scheduler_primary_enabled" in error for error in errors))
+        self.assertTrue(any("active_refresh_mode" in error for error in errors))
+
+    def test_scheduler_gate_accepts_initializing_but_rejects_fake_evidence(self) -> None:
+        gate = scheduler_gate_fixture(self.local, self.status)
+        self.assertEqual(self.module.scheduler_gate_errors(self.local, self.status, gate), [])
+
+        fake_zero = dict(gate, missed_checkpoints_24h=0)
+        errors = self.module.scheduler_gate_errors(self.local, self.status, fake_zero)
+        self.assertTrue(any("missed_checkpoints_24h" in error for error in errors))
+
+        unsafe_slo = dict(gate, scheduler_slo=dict(gate["scheduler_slo"], guaranteed=True))
+        errors = self.module.scheduler_gate_errors(self.local, self.status, unsafe_slo)
+        self.assertTrue(any("guaranteed" in error for error in errors))
 
     def test_mismatch_reports_snapshot_key_and_sha(self) -> None:
         latest = dict(self.latest, snapshot_key="old.json")
@@ -912,6 +1109,8 @@ class DeploymentVerifierTests(unittest.TestCase):
             if parsed.path == "/api/status":
                 status_reads += 1
                 return old_status if status_reads <= 2 else current_status
+            if parsed.path == "/api/gate-status":
+                return scheduler_gate_fixture(local, current_status)
             if parsed.path == "/api/latest":
                 return local
             if parsed.path == "/api/latest-summary":
@@ -976,8 +1175,8 @@ class DeploymentVerifierTests(unittest.TestCase):
         self.assertEqual(result["snapshot_key"], local["snapshot_key"])
         self.assertEqual(sleeps, [0.25, 0.25])
         self.assertEqual(
-            calls[:5],
-            ["/api/status"] * 4 + ["/api/latest"],
+            calls[:6],
+            ["/api/status"] * 4 + ["/api/gate-status", "/api/latest"],
         )
         first_live = calls.index("/api/live")
         self.assertNotIn("/api/live", calls[:first_live])
@@ -1449,6 +1648,8 @@ class DeploymentVerifierTests(unittest.TestCase):
             parsed = urllib.parse.urlsplit(url)
             if parsed.path == "/api/status":
                 return self.status
+            if parsed.path == "/api/gate-status":
+                return scheduler_gate_fixture(self.local, self.status)
             if parsed.path in {"/api/latest", "/api/pick"}:
                 return self.latest
             if parsed.path == "/api/latest-summary":

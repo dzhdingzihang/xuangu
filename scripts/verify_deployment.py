@@ -36,7 +36,7 @@ ALLOWED_PRODUCTION_ACTIONS = {"NO_QUALIFIED_PICK", "QUALIFIED_PICK"}
 DEFAULT_BASE_URL = "https://xuangu.alixjd.com"
 SHANGHAI_TIME_ZONE = ZoneInfo("Asia/Shanghai")
 NEW_YORK_TIME_ZONE = ZoneInfo("America/New_York")
-CLOUDFLARE_PRIMARY_UTC_SCHEDULES = (
+GITHUB_PRIMARY_UTC_SCHEDULES = (
     (17, (0, 2, 4, 7, 8, 12), None),
     (47, (14,), None),
     (17, (20, 21), 16),
@@ -64,15 +64,15 @@ UI_ASSET_SPECS = {
     "candidates": {
         "api_path": "/api/candidates",
         "static_path": "/data/picks/ui-candidates.json",
-        "contract_version": "ui-candidates-v1",
-        "api_contract_version": "candidate-list-v1",
+        "contract_version": "ui-candidates-v2",
+        "api_contract_version": "candidate-list-v2",
         "max_bytes": 768 * 1024,
     },
     "events": {
         "api_path": "/api/events",
         "static_path": "/data/picks/ui-events.json",
-        "contract_version": "ui-events-v1",
-        "api_contract_version": "event-list-v1",
+        "contract_version": "ui-events-v2",
+        "api_contract_version": "event-list-v2",
         "max_bytes": 512 * 1024,
     },
 }
@@ -195,7 +195,7 @@ def next_scheduled_refresh(
         raise ValueError("current time must be timezone-aware")
     current_utc = current.astimezone(dt.timezone.utc)
     schedules = (
-        CLOUDFLARE_PRIMARY_UTC_SCHEDULES
+        GITHUB_PRIMARY_UTC_SCHEDULES
         if primary_enabled
         else GITHUB_WATCHDOG_UTC_SCHEDULES
     )
@@ -467,8 +467,19 @@ def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
     """Require the deployed Worker to advertise the device-free snapshot mode."""
     errors: list[str] = []
     primary_enabled = status.get("scheduler_primary_enabled")
-    if type(primary_enabled) is not bool:
-        errors.append("status.scheduler_primary_enabled is not a boolean")
+    if primary_enabled is not True:
+        errors.append("status.scheduler_primary_enabled must be true for the GitHub primary path")
+    for field in (
+        "research_decision_ready",
+        "checkpoint_evidence_ready",
+        "unattended_refresh_ready",
+        "calibrated_execution_ready",
+        "cloudflare_dispatch_enabled",
+    ):
+        if type(status.get(field)) is not bool:
+            errors.append(f"status.{field} is not a boolean")
+    if status.get("unattended_refresh_ready") is True and status.get("checkpoint_evidence_ready") is not True:
+        errors.append("status.unattended_refresh_ready cannot be true without checkpoint evidence")
     required_values = {
         "data_mode": "scheduled_snapshot",
         "quote_delivery_mode": "scheduled_snapshot",
@@ -493,11 +504,10 @@ def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
             "23:17",
         ],
         "snapshot_as_of": local.get("generated_at"),
-        "active_refresh_mode": (
-            "cloudflare_primary_with_github_watchdog"
-            if primary_enabled is True
-            else "github_watchdog_only"
-        ),
+        "readiness_contract_version": "production-readiness-v1",
+        "scheduler_primary_provider": "github_actions",
+        "cloudflare_dispatch_optional": True,
+        "active_refresh_mode": "github_actions_primary_with_30m_watchdog",
         "schedule_us_post_close": {
             "contract_version": "us-post-close-schedule-v1",
             "market_time_zone": "America/New_York",
@@ -526,7 +536,7 @@ def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
             parsed[field] = _parse_moment(status.get(field))
         except (TypeError, ValueError):
             errors.append(f"status.{field} is not a timezone-aware timestamp")
-    if "time" in parsed and type(primary_enabled) is bool:
+    if "time" in parsed and primary_enabled is True:
         expected = next_scheduled_refresh(
             parsed["time"],
             primary_enabled=primary_enabled,
@@ -541,6 +551,132 @@ def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
                     f"status.{field}: expected {expected.isoformat()}, "
                     f"got {status.get(field)!r}"
                 )
+    return errors
+
+
+def scheduler_gate_errors(local: dict, status: dict, gate: dict) -> list[str]:
+    """Validate the auditable scheduler-health-v2 gate without requiring READY."""
+    errors: list[str] = []
+    required = {
+        "ok": True,
+        "contract_version": "scheduler-health-v2",
+        "snapshot_key": local.get("snapshot_key"),
+        "generated_at": local.get("generated_at"),
+        "scheduler_enabled": True,
+        "scheduler_primary_enabled": True,
+        "scheduler_primary_provider": "github_actions",
+        "cloudflare_dispatch_optional": True,
+        "scheduler_gap": None,
+    }
+    for field, expected in required.items():
+        actual = gate.get(field)
+        matches = actual is expected if isinstance(expected, (bool, type(None))) else actual == expected
+        if not matches:
+            errors.append(f"gate.{field}: expected {expected!r}, got {actual!r}")
+
+    if gate.get("publication_backend") not in {"embedded", "r2"}:
+        errors.append("gate.publication_backend is invalid")
+    for field in ("cloudflare_dispatch_enabled", "checkpoint_evidence_ready", "unattended_refresh_ready"):
+        if type(gate.get(field)) is not bool:
+            errors.append(f"gate.{field} is not a boolean")
+    for field in (
+        "published_at",
+        "generation_started_at",
+        "source_invocation_slot",
+        "effective_checkpoint",
+        "effective_invocation_slot",
+        "ledger_started_at",
+    ):
+        value = gate.get(field)
+        if value is None:
+            continue
+        try:
+            _parse_moment(value)
+        except (TypeError, ValueError):
+            errors.append(f"gate.{field} is not a timezone-aware timestamp or null")
+    for field in (
+        "scheduler_start_delay_seconds",
+        "generation_delay_seconds",
+        "publication_delay_seconds",
+        "checkpoint_publication_delay_seconds",
+    ):
+        value = gate.get(field)
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+        ):
+            errors.append(f"gate.{field} is not a non-negative integer or null")
+
+    readiness = gate.get("scheduler_readiness")
+    if readiness not in {"INITIALIZING", "READY", "DEGRADED"}:
+        errors.append(f"gate.scheduler_readiness is invalid: {readiness!r}")
+    for field in (
+        "expected_checkpoints_24h",
+        "published_on_time_24h",
+        "late_recoveries_24h",
+        "evidence_lag_batches",
+        "publication_slo_seconds",
+    ):
+        value = gate.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            errors.append(f"gate.{field} is not a non-negative integer")
+    if gate.get("publication_slo_seconds") == 0:
+        errors.append("gate.publication_slo_seconds must be positive")
+
+    initializing = readiness == "INITIALIZING"
+    expected_evidence = readiness in {"READY", "DEGRADED"}
+    if gate.get("checkpoint_evidence_ready") is not expected_evidence:
+        errors.append("gate.checkpoint_evidence_ready does not match scheduler_readiness")
+    expected_coverage = "INITIALIZING_24H_LEDGER" if initializing else "COMPLETE_24H_LEDGER"
+    if gate.get("checkpoint_coverage_status") != expected_coverage:
+        errors.append(
+            f"gate.checkpoint_coverage_status: expected {expected_coverage!r}, "
+            f"got {gate.get('checkpoint_coverage_status')!r}"
+        )
+    if gate.get("checkpoint_evidence_contract_version") != "scheduler-checkpoint-ledger-v1":
+        errors.append("gate.checkpoint_evidence_contract_version is invalid")
+    missed = gate.get("missed_checkpoints_24h")
+    if initializing:
+        if missed is not None:
+            errors.append("gate.missed_checkpoints_24h must be null while initializing")
+        if gate.get("publication_within_slo") is not None:
+            errors.append("gate.publication_within_slo must be null while initializing")
+    else:
+        if not isinstance(missed, int) or isinstance(missed, bool) or missed < 0:
+            errors.append("gate.missed_checkpoints_24h is not a non-negative integer")
+        if type(gate.get("publication_within_slo")) is not bool:
+            errors.append("gate.publication_within_slo is not a boolean")
+
+    slo = gate.get("scheduler_slo")
+    if not isinstance(slo, dict):
+        errors.append("gate.scheduler_slo is not an object")
+    else:
+        expected_slo = {
+            "contract_version": "scheduler-slo-v1",
+            "guaranteed": False,
+            "public_data_source_sla": False,
+            "coverage_window_hours": 24,
+        }
+        for field, expected in expected_slo.items():
+            actual = slo.get(field)
+            matches = actual is expected if isinstance(expected, bool) else actual == expected
+            if not matches:
+                errors.append(f"gate.scheduler_slo.{field}: expected {expected!r}, got {actual!r}")
+        minutes = slo.get("target_publication_within_minutes")
+        if not isinstance(minutes, int) or isinstance(minutes, bool) or minutes <= 0:
+            errors.append("gate.scheduler_slo.target_publication_within_minutes is invalid")
+        elif minutes * 60 != gate.get("publication_slo_seconds"):
+            errors.append("gate.scheduler_slo target does not match publication_slo_seconds")
+
+    expected_unattended = bool(
+        readiness == "READY"
+        and gate.get("checkpoint_evidence_ready") is True
+        and gate.get("publication_within_slo") is True
+    )
+    if gate.get("unattended_refresh_ready") is not expected_unattended:
+        errors.append("gate.unattended_refresh_ready does not match scheduler evidence")
+    for field in ("checkpoint_evidence_ready", "unattended_refresh_ready"):
+        if type(status.get(field)) is bool and gate.get(field) is not status.get(field):
+            errors.append(f"gate.{field} does not match status.{field}")
     return errors
 
 
@@ -892,6 +1028,103 @@ def _paged_api_errors(prefix: str, payload: Mapping[str, object], rows: object) 
     return errors
 
 
+def _candidate_role_contract_errors(
+    prefix: str,
+    payload: Mapping[str, object],
+    candidates: object,
+    *,
+    local: Mapping[str, object],
+) -> list[str]:
+    errors: list[str] = []
+    if payload.get("role_contract_version") != "candidate-role-v1":
+        errors.append(f"{prefix}.role_contract_version is invalid")
+    if not isinstance(candidates, list):
+        return errors
+    rows_by_id: dict[str, dict] = {}
+    production_ids: list[str] = []
+    production_primary_ids: list[str] = []
+    allowed = {
+        "production": {"PRIMARY", "QUALIFIED", "NONE"},
+        "legacy": {"PRIMARY", "BLOCKED", "WATCHLIST", "NONE"},
+        "research": {"PRIORITY", "NONE"},
+    }
+    effective = {
+        ("PRIMARY", "NONE", "NONE"): "production_primary",
+        ("QUALIFIED", "NONE", "NONE"): "production_qualified",
+    }
+    for index, row in enumerate(candidates):
+        row_prefix = f"{prefix}.candidates[{index}]"
+        if not isinstance(row, dict):
+            continue
+        candidate_id = row.get("id")
+        if not isinstance(candidate_id, str) or not re.fullmatch(r"cand_[0-9a-f]{20}", candidate_id):
+            errors.append(f"{row_prefix}.id is invalid")
+            continue
+        if candidate_id in rows_by_id:
+            errors.append(f"{row_prefix}.id is duplicated")
+        rows_by_id[candidate_id] = row
+        if row.get("role_contract_version") != "candidate-role-v1":
+            errors.append(f"{row_prefix}.role_contract_version is invalid")
+        roles = row.get("decision_roles")
+        if not isinstance(roles, dict) or set(roles) != set(allowed):
+            errors.append(f"{row_prefix}.decision_roles is invalid")
+            continue
+        for family, values in allowed.items():
+            if roles.get(family) not in values:
+                errors.append(f"{row_prefix}.decision_roles.{family} is invalid")
+        production_role = roles.get("production")
+        if production_role in {"PRIMARY", "QUALIFIED"}:
+            production_ids.append(candidate_id)
+        if production_role == "PRIMARY":
+            production_primary_ids.append(candidate_id)
+        expected_role = effective.get(
+            (production_role, roles.get("legacy"), roles.get("research"))
+        )
+        if production_role == "PRIMARY":
+            expected_role = "production_primary"
+        elif production_role == "QUALIFIED":
+            expected_role = "production_qualified"
+        elif roles.get("research") == "PRIORITY":
+            expected_role = "research_priority"
+        else:
+            expected_role = {
+                "PRIMARY": "legacy_market_primary",
+                "BLOCKED": "legacy_blocked",
+                "WATCHLIST": "legacy_watchlist",
+                "NONE": "legacy_watchlist",
+            }.get(roles.get("legacy"))
+        if row.get("decision_role") != expected_role:
+            errors.append(f"{row_prefix}.decision_role does not match decision_roles")
+
+    selection = payload.get("production_selection")
+    if not isinstance(selection, dict):
+        errors.append(f"{prefix}.production_selection is not an object")
+        return errors
+    if selection.get("role_contract_version") != "candidate-role-v1":
+        errors.append(f"{prefix}.production_selection.role_contract_version is invalid")
+    qualified_ids = selection.get("qualified_candidate_ids")
+    if not isinstance(qualified_ids, list) or any(not isinstance(value, str) for value in qualified_ids):
+        errors.append(f"{prefix}.production_selection.qualified_candidate_ids is invalid")
+        qualified_ids = []
+    if selection.get("qualified_candidate_count") != len(qualified_ids):
+        errors.append(f"{prefix}.production_selection qualified count does not match ids")
+    if selection.get("primary_candidate_id") != (qualified_ids[0] if qualified_ids else None):
+        errors.append(f"{prefix}.production_selection primary is not the first qualified id")
+    local_production = local.get("production_decision")
+    local_production = local_production if isinstance(local_production, dict) else {}
+    if selection.get("action") != (local_production.get("action") or "NO_QUALIFIED_PICK"):
+        errors.append(f"{prefix}.production_selection.action does not match latest")
+    # The unfiltered static list and a one-page API response must contain every
+    # role identity referenced by production_selection.
+    total = payload.get("total", len(candidates))
+    if isinstance(total, int) and total == len(candidates):
+        if set(qualified_ids) != set(production_ids):
+            errors.append(f"{prefix}.production_selection ids do not match production roles")
+        if production_primary_ids != ([qualified_ids[0]] if qualified_ids else []):
+            errors.append(f"{prefix}.production primary role is ambiguous")
+    return errors
+
+
 def ui_api_contract_errors(
     local: dict,
     payloads: Mapping[str, dict],
@@ -961,6 +1194,12 @@ def ui_api_contract_errors(
                     f"{prefix}.total: expected candidate_count {count}, got {payload.get('total')!r}"
                 )
             errors.extend(_paged_api_errors(prefix, payload, candidates))
+            errors.extend(_candidate_role_contract_errors(
+                prefix,
+                payload,
+                candidates,
+                local=local,
+            ))
         if name == "events":
             events = payload.get("events")
             count = payload.get("event_count")
@@ -973,6 +1212,41 @@ def ui_api_contract_errors(
                     f"{prefix}.total: expected event_count {count}, got {payload.get('total')!r}"
                 )
             errors.extend(_paged_api_errors(prefix, payload, events))
+            publication = payload.get("event_publication")
+            bound = payload.get("decision_bound")
+            bound_ids = (
+                publication.get("decision_bound_event_ids")
+                if isinstance(publication, dict) else None
+            )
+            if payload.get("ordering_contract_version") != "decision-bound-first-then-published-desc-v1":
+                errors.append(f"{prefix}.ordering_contract_version is invalid")
+            if not isinstance(bound_ids, list) or any(not isinstance(value, str) or not value for value in bound_ids):
+                errors.append(f"{prefix}.event_publication.decision_bound_event_ids is invalid")
+                bound_ids = []
+            elif publication.get("decision_bound_event_count") != len(bound_ids):
+                errors.append(f"{prefix}.event_publication decision-bound count does not match ids")
+            if not isinstance(bound, dict):
+                errors.append(f"{prefix}.decision_bound is not an object")
+            else:
+                if bound.get("total") != len(bound_ids):
+                    errors.append(f"{prefix}.decision_bound.total does not match ids")
+                if not isinstance(bound.get("returned"), int) or isinstance(bound.get("returned"), bool):
+                    errors.append(f"{prefix}.decision_bound.returned is not an integer")
+            if isinstance(events, list):
+                row_bound_ids = [
+                    row.get("event_id") for row in events
+                    if isinstance(row, dict) and row.get("decision_bound") is True
+                ]
+                if any(not isinstance(row, dict) or type(row.get("decision_bound")) is not bool for row in events):
+                    errors.append(f"{prefix}.events has a row without boolean decision_bound")
+                if len(bound_ids) <= int(payload.get("limit") or 0) and not set(bound_ids).issubset(row_bound_ids):
+                    errors.append(f"{prefix}.events first page does not contain every decision-bound id")
+                first_unbound = next(
+                    (index for index, row in enumerate(events) if isinstance(row, dict) and row.get("decision_bound") is not True),
+                    len(events),
+                )
+                if any(row.get("decision_bound") is True for row in events[first_unbound:] if isinstance(row, dict)):
+                    errors.append(f"{prefix}.events is not decision-bound-first")
     return errors
 
 
@@ -1021,6 +1295,12 @@ def ui_static_asset_errors(
                 errors.append(
                     f"{prefix}.candidate_count: expected {len(candidates)}, got {count!r}"
                 )
+            errors.extend(_candidate_role_contract_errors(
+                prefix,
+                payload,
+                candidates,
+                local=local,
+            ))
     return errors
 
 
@@ -1234,6 +1514,11 @@ def full_deployment_errors(
     if errors:
         return {}, errors
 
+    gate = json_fetcher(endpoint_url(base_url, "/api/gate-status"))
+    errors.extend(scheduler_gate_errors(local, status, gate))
+    if errors:
+        return {}, errors
+
     latest = json_fetcher(endpoint_url(base_url, "/api/latest"))
     errors.extend(deployment_mismatches(local, status, latest))
     if errors:
@@ -1259,7 +1544,7 @@ def full_deployment_errors(
     except (TypeError, ValueError) as exc:
         errors.append(f"immutable snapshot sha256 unavailable: {exc}")
 
-    history = json_fetcher(endpoint_url(base_url, "/api/history?view=raw&limit=1000"))
+    history = json_fetcher(endpoint_url(base_url, "/api/history?view=raw&limit=5"))
     errors.extend(history_contract_errors(local, history))
     errors.extend(static_contract_errors(base_url, response_fetcher))
     errors.extend(ui_static_asset_errors(

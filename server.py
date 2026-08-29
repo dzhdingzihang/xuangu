@@ -89,6 +89,7 @@ TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
 SHADOW_TEN_DAY_MODEL_ID = "ten-day-rule-shadow-v1"
 SHADOW_TEN_DAY_LABEL_VERSION = "shadow-net-return-10-session-v1"
 HORIZON_RANGE_METHOD_ID = "realized-vol-drift-shadow-v1"
+HORIZON_RANGE_CONTRACT_VERSION = "horizon-range-v1"
 SERENITY_SKILL_DIR = pathlib.Path.home() / ".agents" / "skills" / "serenity-skill"
 SCHEMA_VERSION = "selector-snapshot-v2"
 SELECTOR_MODE = "legacy_active_v2_dual_low_shadow"
@@ -7148,8 +7149,13 @@ def estimate_horizon_range(
 
     if horizon_trade_days not in {2, 10}:
         raise ValueError("horizon_trade_days must be 2 or 10")
-    closes = [safe_float(row.get("close")) for row in (kline or [])]
-    closes = [value for value in closes if value > 0]
+    close_points = [
+        (str(row.get("date") or "").strip() or None, safe_float(row.get("close")))
+        for row in (kline or [])
+        if isinstance(row, dict)
+    ]
+    close_points = [(date, value) for date, value in close_points if value > 0]
+    closes = [value for _, value in close_points]
     returns = [pct_change(current, previous) for previous, current in zip(closes, closes[1:]) if previous > 0]
     recent = returns[-20:]
     default_daily_vol = {"a_share": 1.8, "hk": 1.6, "us": 2.2}.get(market_key, 2.0)
@@ -7172,7 +7178,8 @@ def estimate_horizon_range(
     high = clamp(max(center + width, 0.35 * width), -market_cap, market_cap)
     if high <= low:
         high = min(market_cap, low + 0.1)
-    return {
+    result = {
+        "contract_version": HORIZON_RANGE_CONTRACT_VERSION,
         "low_pct": round(low, 1),
         "high_pct": round(high, 1),
         "text": f"{low:+.1f}% ~ {high:+.1f}%",
@@ -7181,6 +7188,20 @@ def estimate_horizon_range(
         "calibrated": False,
         "source_observations": len(recent),
     }
+    # One return observation spans two closes. Publish the exact date window
+    # only when every required source point carries a valid ISO trade date;
+    # an unavailable date is omitted rather than guessed from generation time.
+    if recent:
+        source_points = close_points[-(len(recent) + 1):]
+        source_dates = [date for date, _ in source_points]
+        try:
+            parsed_dates = [dt.date.fromisoformat(date or "") for date in source_dates]
+        except ValueError:
+            parsed_dates = []
+        if len(parsed_dates) == len(source_points) and parsed_dates == sorted(parsed_dates):
+            result["source_window_start_date"] = parsed_dates[0].isoformat()
+            result["source_window_end_date"] = parsed_dates[-1].isoformat()
+    return result
 
 
 def attach_horizon_ranges(candidate: dict, market_key: str) -> dict:

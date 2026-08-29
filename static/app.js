@@ -22,11 +22,11 @@ const HISTORICAL_PRODUCTION_RULE_CONTRACTS = {
   },
 };
 const RESOURCE_CONTRACT_VERSIONS = {
-  candidates: new Set(["candidate-list-v1", "ui-candidates-v1"]),
-  events: new Set(["event-list-v1", "ui-events-v1"]),
+  candidates: new Set(["candidate-list-v2", "ui-candidates-v2", "candidate-list-v1", "ui-candidates-v1"]),
+  events: new Set(["event-list-v2", "event-list-v1", "ui-events-v2", "ui-events-v1"]),
   history: new Set(["history-list-v1"]),
-  candidateDetail: new Set(["candidate-detail-v1"]),
-  scheduler: new Set(["scheduler-health-v1"]),
+  candidateDetail: new Set(["candidate-detail-v2", "candidate-detail-v1"]),
+  scheduler: new Set(["scheduler-health-v2", "scheduler-health-v1"]),
 };
 const PRODUCTION_QUALIFICATION_TRACKS = ["event_catalyst", "quality_technical"];
 const PRODUCTION_EVENT_POLICY = {
@@ -456,7 +456,10 @@ function snapshotUseTruth(snapshot = state.snapshot, status = state.status) {
 }
 
 function researchCandidateSnapshot(snapshot, market) {
-  const lazy = state.candidates.find((candidate) => candidate.market === market && candidate.decision_role === "research");
+  const lazy = state.candidates.find((candidate) => candidate.market === market && (
+    candidate?.decision_roles?.research === "PRIORITY"
+    || ["research", "research_priority"].includes(candidate.decision_role)
+  ));
   if (lazy) return lazy;
   const priority = snapshot?.global_decision?.research_priority;
   const candidate = priority?.candidate_snapshot;
@@ -594,7 +597,7 @@ function dedupeRuleStrings(values) {
   return result;
 }
 
-function frozenCurrentInputMatchesSource(source, input, index) {
+function frozenCurrentInputMatchesSource(source, input, index, inputContractVersion = "production-rule-inputs-v2") {
   if (!source || typeof source !== "object" || Array.isArray(source)
     || !input || typeof input !== "object" || Array.isArray(input)
     || input.input_index !== index
@@ -618,8 +621,15 @@ function frozenCurrentInputMatchesSource(source, input, index) {
   if (Boolean(expectedPriority) !== Object.hasOwn(input, "priority_components")
     || (expectedPriority && !normalizedFullJsonEqual(input.priority_components, expectedPriority))) return false;
   const sourceRange = source?.estimated_10d_range;
+  const rangeFields = inputContractVersion === "production-rule-inputs-v3"
+    ? [
+      "contract_version", "low_pct", "high_pct", "text",
+      "horizon_trade_days", "method_id", "calibrated",
+      "source_observations", "source_window_start_date", "source_window_end_date",
+    ]
+    : ["low_pct", "high_pct"];
   const expectedRange = sourceRange && typeof sourceRange === "object"
-    ? Object.fromEntries(["low_pct", "high_pct"]
+    ? Object.fromEntries(rangeFields
       .filter((field) => Object.hasOwn(sourceRange, field))
       .map((field) => [field, sourceRange[field]]))
     : null;
@@ -633,7 +643,7 @@ function currentRuleInputContext(snapshot, decision) {
   const inputRows = inputs?.rows;
   if (!Array.isArray(sources)
     || !inputs || typeof inputs !== "object" || Array.isArray(inputs)
-    || inputs.contract_version !== "production-rule-inputs-v2"
+    || !["production-rule-inputs-v2", "production-rule-inputs-v3"].includes(inputs.contract_version)
     || inputs.action_basis !== "dual_track_candidate_qualification_v4"
     || inputs.rule_model_id !== "ten-day-audited-rule-ensemble-v4"
     || typeof inputs.ledger_sha256 !== "string"
@@ -653,7 +663,7 @@ function currentRuleInputContext(snapshot, decision) {
     const identity = candidateIdentity(market, code);
     if (!market || !code || !identity
       || !MARKET_ORDER.includes(market)
-      || !frozenCurrentInputMatchesSource(source, input, index)
+      || !frozenCurrentInputMatchesSource(source, input, index, inputs.contract_version)
       || typeof input.source_candidate_present !== "boolean"
       || (input.source_data_quality_score !== null
         && (!finiteRuleNumber(input.source_data_quality_score)
@@ -663,10 +673,10 @@ function currentRuleInputContext(snapshot, decision) {
     if (byIdentity.has(identity)) return null;
     byIdentity.set(identity, { source, input });
   }
-  return { sources, inputRows, byIdentity };
+  return { sources, inputRows, byIdentity, inputContractVersion: inputs.contract_version };
 }
 
-function expectedCurrentQualification(source, input) {
+function expectedCurrentQualification(source, input, inputContractVersion = "production-rule-inputs-v2") {
   const market = ruleText(source?.market);
   const code = ruleText(source?.code || source?.symbol);
   const eventPolicy = PRODUCTION_EVENT_POLICY[market];
@@ -736,6 +746,9 @@ function expectedCurrentQualification(source, input) {
   const low = source?.estimated_10d_range?.low_pct;
   const high = source?.estimated_10d_range?.high_pct;
   const rangeValid = finiteRuleNumber(low) && finiteRuleNumber(high) && low < 0 && high > 0;
+  const canonicalRange = inputContractVersion === "production-rule-inputs-v3"
+    ? canonicalHorizonRangeView(source?.estimated_10d_range)
+    : null;
   const downside = rangeValid ? Math.abs(low) : null;
   const ratio = rangeValid ? high / downside : null;
   let riskRewardStrength = 0;
@@ -748,6 +761,9 @@ function expectedCurrentQualification(source, input) {
     if (downside > qualityPolicy.maximumDownside) qualityBlockers.push("QUALITY_TEN_DAY_DOWNSIDE_ABOVE_LIMIT");
     if (ratio < 1.50) qualityBlockers.push("QUALITY_RISK_REWARD_BELOW_THRESHOLD");
     riskRewardStrength = Math.max(0, Math.min(100, ratio / 2 * 100));
+    if (inputContractVersion === "production-rule-inputs-v3" && !canonicalRange) {
+      blockBoth("TEN_DAY_RANGE_PROVENANCE_INVALID");
+    }
   }
   const components = {
     legacy_recommendation: roundRuleNumber(legacy * 0.30),
@@ -778,6 +794,7 @@ function expectedCurrentQualification(source, input) {
     dataQuality: roundRuleNumber(dataQuality),
     eventScanned,
     eventIds,
+    range: canonicalRange,
     low: rangeValid ? roundRuleNumber(low) : null,
     high: rangeValid ? roundRuleNumber(high) : null,
     downside: rangeValid ? roundRuleNumber(downside) : null,
@@ -800,7 +817,9 @@ function validCurrentEvaluatedRow(row, decision, context) {
   const code = ruleText(row.code || row.symbol);
   const identity = candidateIdentity(market, code);
   const sourceContext = identity ? context?.byIdentity.get(identity) : null;
-  const expected = sourceContext ? expectedCurrentQualification(sourceContext.source, sourceContext.input) : null;
+  const expected = sourceContext
+    ? expectedCurrentQualification(sourceContext.source, sourceContext.input, context?.inputContractVersion)
+    : null;
   if (!expected
     || row.status !== (expected.qualificationTrack ? "QUALIFIED" : "REJECTED")
     || row.market !== expected.market
@@ -827,6 +846,8 @@ function validCurrentEvaluatedRow(row, decision, context) {
     || row.qualification_track !== expected.qualificationTrack
     || !normalizedFullJsonEqual(row.blocker_codes, expected.blockerCodes)
     || row?.estimated_10d_range?.horizon_trade_days !== 10
+    || (context?.inputContractVersion === "production-rule-inputs-v3"
+      && expected.range && !normalizedFullJsonEqual(row.estimated_10d_range, expected.range))
     || !sameNullableRuleNumber(row?.estimated_10d_range?.low_pct, expected.low)
     || !sameNullableRuleNumber(row?.estimated_10d_range?.high_pct, expected.high)
     || !sameNullableRuleNumber(row?.risk_reward?.upside_pct, expected.high)
@@ -842,7 +863,10 @@ function validCurrentEvaluatedRow(row, decision, context) {
   const candidateSnapshot = row.candidate_snapshot;
   const candidateCode = normalizeCandidateCode(market, candidateSnapshot?.code || candidateSnapshot?.symbol);
   const evaluatedCode = normalizeCandidateCode(market, code);
-  return qualityWaivesOnlyPositiveEnrichment
+  const planValid = context?.inputContractVersion !== "production-rule-inputs-v3"
+    || validateTenDayTradePlan(row.ten_day_trade_plan, row, candidateSnapshot).valid;
+  return planValid
+    && qualityWaivesOnlyPositiveEnrichment
     && typeof row.qualification_id === "string"
     && /^qual_[0-9a-f]{24}$/.test(row.qualification_id)
     && normalizedFullJsonEqual(candidateSnapshot, sourceContext.input.candidate_snapshot)
@@ -866,7 +890,11 @@ function deterministicCurrentOrder(context, evaluated) {
     const identity = candidateIdentity(row?.market, row?.code || row?.symbol);
     const sourceContext = identity ? context.byIdentity.get(identity) : null;
     const expected = sourceContext
-      ? expectedCurrentQualification(sourceContext.source, sourceContext.input)
+      ? expectedCurrentQualification(
+        sourceContext.source,
+        sourceContext.input,
+        context.inputContractVersion,
+      )
       : null;
     if (!identity || seen.has(identity) || !expected
       || row.market !== expected.market || row.code !== expected.code
@@ -1041,7 +1069,56 @@ function candidatesFor(snapshot, market) {
   return result;
 }
 
+function explicitCandidateDecisionRole(candidate, market) {
+  if (candidate?.role_contract_version !== "candidate-role-v1" || !isRecord(candidate.decision_roles)) return null;
+  const roles = candidate.decision_roles;
+  if (!["PRIMARY", "QUALIFIED", "NONE"].includes(roles.production)
+    || !["PRIMARY", "BLOCKED", "WATCHLIST", "NONE"].includes(roles.legacy)
+    || !["PRIORITY", "NONE"].includes(roles.research)) return null;
+  const key = candidateId(candidate, market);
+  const productionRows = productionQualifiedRows(state.snapshot, market);
+  const publishedQualified = productionRows.some((row) => candidateId(row.candidate, market) === key);
+  const primary = state.snapshot?.production_decision?.primary;
+  const publishedPrimary = publishedQualified
+    && candidateId(primary?.candidate_snapshot || primary, market) === key;
+  if ((roles.production === "PRIMARY" && publishedPrimary)
+    || (roles.production === "QUALIFIED" && publishedQualified && !publishedPrimary)) {
+    const current = currentProductionContractValid(state.snapshot) && snapshotUseTruth().currentDecisionAllowed;
+    if (roles.production === "PRIMARY") return current ? "production_primary" : "historical_production_primary";
+    return current ? "production_qualified" : "historical_production_qualified";
+  }
+  if (roles.research === "PRIORITY") return "research_priority";
+  return ({
+    PRIMARY: "legacy_market_primary",
+    BLOCKED: "legacy_blocked",
+    WATCHLIST: "legacy_watchlist",
+    NONE: "legacy_watchlist",
+  })[roles.legacy];
+}
+
+function isProductionCandidateRole(role) {
+  return [
+    "production_primary", "production_qualified",
+    "historical_production_primary", "historical_production_qualified",
+    "qualified", "historical_qualified",
+  ].includes(role);
+}
+
+function isHistoricalProductionCandidateRole(role) {
+  return ["historical_production_primary", "historical_production_qualified", "historical_qualified"].includes(role);
+}
+
+function isLegacyPrimaryRole(role) {
+  return ["legacy_market_primary", "primary"].includes(role);
+}
+
+function isLegacyBlockedRole(role) {
+  return ["legacy_blocked", "blocked"].includes(role);
+}
+
 function candidateDecisionRole(candidate, market) {
+  const explicitRole = explicitCandidateDecisionRole(candidate, market);
+  if (explicitRole) return explicitRole;
   const key = candidateId(candidate, market);
   const publishedQualified = productionQualifiedRows(state.snapshot, market)
     .some((row) => candidateId(row.candidate, market) === key);
@@ -1050,7 +1127,9 @@ function candidateDecisionRole(candidate, market) {
       ? "qualified"
       : "historical_qualified";
   }
-  if (candidate?.decision_role && candidate.decision_role !== "qualified") return candidate.decision_role;
+  if (["primary", "blocked", "research", "watchlist"].includes(candidate?.decision_role)) {
+    return candidate.decision_role;
+  }
   const decision = marketDecision(state.snapshot, market);
   if (decision.primary && candidateId(decision.primary, market) === key) return "primary";
   if (decision.blocked_candidate && candidateId(decision.blocked_candidate, market) === key) return "blocked";
@@ -1060,7 +1139,22 @@ function candidateDecisionRole(candidate, market) {
 }
 
 function decisionRoleLabel(role) {
-  return ({ qualified: "规则合格", historical_qualified: "历史合格·不可执行", primary: "Legacy首选", blocked: "门槛未过", research: "研究优先", watchlist: "观察候选" })[role] || "观察候选";
+  return ({
+    production_primary: "规则主候选",
+    production_qualified: "规则合格",
+    historical_production_primary: "历史规则主候选·不可执行",
+    historical_production_qualified: "历史规则合格·不可执行",
+    qualified: "规则合格",
+    historical_qualified: "历史合格·不可执行",
+    legacy_market_primary: "Legacy首选",
+    primary: "Legacy首选",
+    legacy_blocked: "Legacy门槛未过",
+    blocked: "门槛未过",
+    research_priority: "研究优先",
+    research: "研究优先",
+    legacy_watchlist: "Legacy观察",
+    watchlist: "观察候选",
+  })[role] || "观察候选";
 }
 
 function qualificationTrackLabel(track) {
@@ -1167,13 +1261,23 @@ function productionDecisionTruth(snapshot = state.snapshot, status = state.statu
 
 function publishedEventItems() {
   const lazy = state.eventsPayload?.events;
-  if (Array.isArray(lazy)) return lazy;
-  if (Array.isArray(lazy?.items)) return lazy.items;
   const full = state.snapshot?.events;
-  if (Array.isArray(full)) return full;
-  if (Array.isArray(full?.items)) return full.items;
-  const evidence = state.snapshot?.decision_evidence?.items;
-  return Array.isArray(evidence) ? evidence : [];
+  const evidence = decisionEvidenceItems();
+  const lazyItems = Array.isArray(lazy) ? lazy : Array.isArray(lazy?.items) ? lazy.items : [];
+  const fullItems = Array.isArray(full) ? full : Array.isArray(full?.items) ? full.items : [];
+  const result = new Map();
+  for (const item of evidence) {
+    if (!item?.event_id) continue;
+    result.set(item.event_id, { ...item, decision_bound: true });
+  }
+  for (const item of [...lazyItems, ...fullItems]) {
+    if (!item?.event_id) continue;
+    const bound = result.get(item.event_id);
+    result.set(item.event_id, bound
+      ? { ...item, ...bound, decision_bound: true }
+      : { ...item, decision_bound: item.decision_bound === true });
+  }
+  return [...result.values()];
 }
 
 function decisionEvidenceItems(snapshot = state.snapshot) {
@@ -1930,10 +2034,12 @@ function resourceQueryKey(resource) {
   if (resource === "events") {
     return JSON.stringify([
       state.eventFilters.market === "all" ? "" : state.eventFilters.market,
+      state.eventFilters.type === "all" ? "" : state.eventFilters.type,
+      state.eventFilters.direction === "all" ? "" : state.eventFilters.direction,
       normalizedServerQuery(state.eventFilters.query),
     ]);
   }
-  if (resource === "scheduler") return "scheduler:gate-status-v1";
+  if (resource === "scheduler") return "scheduler:gate-status-v2";
   return "history:daily";
 }
 
@@ -1948,9 +2054,13 @@ function resourceListUrl(resource, page = 1) {
     if (query) url.searchParams.set("q", query);
   } else if (resource === "events") {
     const market = state.eventFilters.market === "all" ? "" : state.eventFilters.market;
+    const eventType = state.eventFilters.type === "all" ? "" : state.eventFilters.type;
+    const direction = state.eventFilters.direction === "all" ? "" : state.eventFilters.direction;
     const query = normalizedServerQuery(state.eventFilters.query);
     if (market) url.searchParams.set("market", market);
-    if (query) url.searchParams.set("issuer", query);
+    if (eventType) url.searchParams.set("event_type", eventType);
+    if (direction) url.searchParams.set("direction", direction);
+    if (query) url.searchParams.set("q", query);
   }
   return `${url.pathname}${url.search}`;
 }
@@ -1992,15 +2102,10 @@ function validSchedulerGatePayload(payload) {
     || (Number.isInteger(value) && value >= 0);
   const optionalTextValid = (value) => value === null
     || (typeof value === "string" && value.trim().length > 0);
-  return Boolean(
-    payload?.contract_version === "scheduler-health-v1"
-    && payload.ok === true
+  const baseValid = Boolean(
+    payload?.ok === true
     && schedulerGateIdentityMatchesSnapshot(payload)
     && ["r2", "embedded"].includes(payload.publication_backend)
-    && typeof payload.scheduler_enabled === "boolean"
-    && (payload.scheduler_enabled
-      ? payload.scheduler_gap === null
-      : typeof payload.scheduler_gap === "string" && payload.scheduler_gap.trim().length > 0)
     && optionalTimestampFields.every((field) => (
       Object.hasOwn(payload, field) && optionalTimestampValid(payload[field])
     ))
@@ -2013,6 +2118,125 @@ function validSchedulerGatePayload(payload) {
     && typeof payload.recovery_mode === "string"
     && payload.recovery_mode.trim().length > 0
   );
+  if (!baseValid) return false;
+  if (payload.contract_version === "scheduler-health-v1") {
+    return Boolean(
+      typeof payload.scheduler_enabled === "boolean"
+      && (payload.scheduler_enabled
+        ? payload.scheduler_gap === null
+        : typeof payload.scheduler_gap === "string" && payload.scheduler_gap.trim().length > 0)
+    );
+  }
+  if (payload.contract_version !== "scheduler-health-v2") return false;
+  const readiness = payload.scheduler_readiness;
+  const initializing = readiness === "INITIALIZING";
+  const slo = payload.scheduler_slo;
+  const countFields = [
+    "expected_checkpoints_24h", "published_on_time_24h",
+    "late_recoveries_24h", "evidence_lag_batches",
+  ];
+  const countsValid = countFields.every((field) => (
+    Number.isInteger(payload[field]) && payload[field] >= 0
+  ));
+  const publicationWithinSloValid = initializing || payload.published_at === null
+    ? payload.publication_within_slo === null
+    : typeof payload.publication_within_slo === "boolean";
+  return Boolean(
+    payload.scheduler_primary_provider === "github_actions"
+    && typeof payload.scheduler_primary_enabled === "boolean"
+    && typeof payload.cloudflare_dispatch_enabled === "boolean"
+    && ["INITIALIZING", "READY", "DEGRADED"].includes(readiness)
+    && typeof payload.checkpoint_evidence_ready === "boolean"
+    && typeof payload.unattended_refresh_ready === "boolean"
+    && countsValid
+    && payload.published_on_time_24h + payload.late_recoveries_24h
+      <= payload.expected_checkpoints_24h
+    && Number.isInteger(payload.publication_slo_seconds)
+    && payload.publication_slo_seconds > 0
+    && publicationWithinSloValid
+    && isRecord(slo)
+    && slo.contract_version === "scheduler-slo-v1"
+    && slo.guaranteed === false
+    && slo.public_data_source_sla === false
+    && Number.isInteger(slo.target_publication_within_minutes)
+    && slo.target_publication_within_minutes > 0
+    && slo.target_publication_within_minutes * 60 === payload.publication_slo_seconds
+    && (!Object.hasOwn(slo, "coverage_window_hours")
+      || slo.coverage_window_hours === 24)
+    && (initializing
+      ? payload.checkpoint_coverage_status === "INITIALIZING_24H_LEDGER"
+      : payload.checkpoint_coverage_status === "COMPLETE_24H_LEDGER")
+    && payload.checkpoint_evidence_contract_version === "scheduler-checkpoint-ledger-v1"
+  );
+}
+
+function effectiveCandidateRoleFromTuple(roles) {
+  if (roles?.production === "PRIMARY") return "production_primary";
+  if (roles?.production === "QUALIFIED") return "production_qualified";
+  if (roles?.research === "PRIORITY") return "research_priority";
+  return ({
+    PRIMARY: "legacy_market_primary",
+    BLOCKED: "legacy_blocked",
+    WATCHLIST: "legacy_watchlist",
+    NONE: "legacy_watchlist",
+  })[roles?.legacy] || null;
+}
+
+function validCandidateRoleRow(row, selection, publishedIdentities) {
+  const roles = row?.decision_roles;
+  if (row?.role_contract_version !== "candidate-role-v1"
+    || !isRecord(roles)
+    || !["PRIMARY", "QUALIFIED", "NONE"].includes(roles.production)
+    || !["PRIMARY", "BLOCKED", "WATCHLIST", "NONE"].includes(roles.legacy)
+    || !["PRIORITY", "NONE"].includes(roles.research)
+    || row.decision_role !== effectiveCandidateRoleFromTuple(roles)) return false;
+  const qualifiedIndex = selection.qualified_candidate_ids.indexOf(row.id);
+  const productionRole = roles.production;
+  if (qualifiedIndex >= 0) {
+    if (productionRole !== (qualifiedIndex === 0 ? "PRIMARY" : "QUALIFIED")) return false;
+    if (row.production_rank !== qualifiedIndex + 1) return false;
+  } else if (productionRole !== "NONE" || Object.hasOwn(row, "production_rank")) return false;
+  if (productionRole !== "NONE") {
+    const identity = candidateIdentity(row.market, row.code || row.symbol);
+    if (!identity || (publishedIdentities && !publishedIdentities.has(identity))) return false;
+  }
+  return true;
+}
+
+function validCandidateRoleEnvelope(payload, rows, { complete = false } = {}) {
+  const selection = payload?.production_selection;
+  if (payload?.role_contract_version !== "candidate-role-v1"
+    || !isRecord(selection)
+    || selection.role_contract_version !== "candidate-role-v1"
+    || !["QUALIFIED_PICK", "NO_QUALIFIED_PICK"].includes(selection.action)
+    || !Array.isArray(selection.qualified_candidate_ids)
+    || selection.qualified_candidate_ids.some((id) => typeof id !== "string" || !/^cand_[a-f0-9]{20}$/.test(id))
+    || new Set(selection.qualified_candidate_ids).size !== selection.qualified_candidate_ids.length
+    || !Number.isInteger(selection.qualified_candidate_count)
+    || selection.qualified_candidate_count !== selection.qualified_candidate_ids.length) return false;
+  const hasPick = selection.action === "QUALIFIED_PICK";
+  if ((hasPick && (
+    selection.qualified_candidate_ids.length === 0
+    || selection.primary_candidate_id !== selection.qualified_candidate_ids[0]
+  )) || (!hasPick && (
+    selection.primary_candidate_id !== null
+    || selection.qualified_candidate_ids.length !== 0
+  ))) return false;
+  const snapshotAction = state.snapshot?.production_decision?.action;
+  if (["QUALIFIED_PICK", "NO_QUALIFIED_PICK"].includes(snapshotAction)
+    && selection.action !== snapshotAction) return false;
+  const publishedRows = productionQualifiedRows(state.snapshot);
+  const publishedIdentities = snapshotAction === "QUALIFIED_PICK"
+    ? new Set(publishedRows.map((row) => candidateIdentity(row.market, row.code)))
+    : null;
+  if (snapshotAction === "QUALIFIED_PICK"
+    && publishedRows.length !== selection.qualified_candidate_count) return false;
+  if (!Array.isArray(rows)) return false;
+  const rowIds = rows.map((row) => row?.id);
+  if (new Set(rowIds).size !== rowIds.length
+    || rows.some((row) => !validCandidateRoleRow(row, selection, publishedIdentities))) return false;
+  if (complete && selection.qualified_candidate_ids.some((id) => !rowIds.includes(id))) return false;
+  return true;
 }
 
 function validateResourcePayload(resource, payload, { queryKey = resourceQueryKey(resource) } = {}) {
@@ -2030,20 +2254,29 @@ function validateResourcePayload(resource, payload, { queryKey = resourceQueryKe
     throw new Error("按需资产与当前快照身份不一致");
   }
   if (resource === "candidates") {
-    const modern = payload.contract_version === "candidate-list-v1";
+    const paginated = ["candidate-list-v2", "candidate-list-v1"].includes(payload.contract_version);
+    const roleContract = ["candidate-list-v2", "ui-candidates-v2"].includes(payload.contract_version);
     if (!Array.isArray(payload.candidates)
       || payload.candidates.some((row) => (
         !isRecord(row)
         || !MARKET_ORDER.includes(row.market)
         || !candidateIdentity(row.market, row.code || row.symbol)
-        || (modern && (typeof row.id !== "string" || !/^cand_[a-f0-9]{20}$/.test(row.id)))
+        || (paginated && (typeof row.id !== "string" || !/^cand_[a-f0-9]{20}$/.test(row.id)))
       ))) throw new Error("候选列表合同无效");
-    if (modern && (!Number.isInteger(payload.scanned_count)
+    if (paginated && (!Number.isInteger(payload.scanned_count)
       || payload.scanned_count < 0
       || !validPageContract(payload))) {
       throw new Error("候选分页合同无效");
     }
-    if (!modern && queryKey !== JSON.stringify(["", ""])) {
+    if (roleContract) {
+      const complete = payload.contract_version === "ui-candidates-v2"
+        || (queryKey === JSON.stringify(["", ""])
+          && payload.page === 1 && payload.total === payload.candidates.length);
+      if (!validCandidateRoleEnvelope(payload, payload.candidates, { complete })) {
+        throw new Error("候选角色合同与正式选择不一致");
+      }
+    }
+    if (!paginated && queryKey !== JSON.stringify(["", ""])) {
       throw new Error("旧候选合同不支持服务端筛选");
     }
   } else if (resource === "events") {
@@ -2052,10 +2285,28 @@ function validateResourcePayload(resource, payload, { queryKey = resourceQueryKe
       || events.some((row) => !isRecord(row) || typeof row.event_id !== "string" || !row.event_id)) {
       throw new Error("事件列表合同无效");
     }
-    if (payload.contract_version === "event-list-v1" && !validPageContract(payload)) {
+    const modern = ["event-list-v2", "event-list-v1"].includes(payload.contract_version);
+    if (modern && !validPageContract(payload)) {
       throw new Error("事件分页合同无效");
     }
-    if (payload.contract_version !== "event-list-v1" && queryKey !== JSON.stringify(["", ""])) {
+    if (payload.contract_version === "event-list-v2") {
+      const publication = payload.event_publication;
+      const bound = payload.decision_bound;
+      if (payload.ordering_contract_version !== "decision-bound-first-then-published-desc-v1"
+        || !isRecord(publication)
+        || !Array.isArray(publication.decision_bound_event_ids)
+        || publication.decision_bound_event_count !== publication.decision_bound_event_ids.length
+        || events.some((row) => typeof row.decision_bound !== "boolean")
+        || !isRecord(bound)
+        || !Number.isInteger(bound.total)
+        || bound.total !== publication.decision_bound_event_ids.length
+        || !Number.isInteger(bound.matched)
+        || !Number.isInteger(bound.returned)
+        || typeof bound.all_matched_returned !== "boolean") {
+        throw new Error("事件绑定证据合同无效");
+      }
+    }
+    if (!modern && queryKey !== JSON.stringify(["", "", "", ""])) {
       throw new Error("旧事件合同不支持服务端筛选");
     }
   } else if (resource === "history") {
@@ -2478,7 +2729,7 @@ function scoreLensCards(candidate, market) {
   const quality = candidate?.data_quality;
   const row = allCandidates().find((item) => candidateId(item.candidate, item.market) === candidateId(candidate, market));
   const role = row?.decisionRole || candidateDecisionRole(candidate, market);
-  const legacyAction = role === "primary" ? recommendationLabel(candidate, true) : role === "blocked" ? "暂不执行" : "观察候选";
+  const legacyAction = isLegacyPrimaryRole(role) ? recommendationLabel(candidate, true) : isLegacyBlockedRole(role) ? "暂不执行" : "观察候选";
   const v2Top = topPercent(candidate?.v2?.rank, candidate?.v2?.rank_universe_size);
   const dualTop = topPercent(dualLow?.rank, dualLow?.rank_universe_size);
   const gates = candidate?.decision_gates || [];
@@ -2496,8 +2747,8 @@ function scoreLensCards(candidate, market) {
     {
       key: "legacy", icon: "ph-seal-check", label: "Legacy 市场信号", value: legacyAction,
       meta: `推荐度 ${fmt(candidateScore(candidate), 0)}/100 · Legacy #${row?.legacyRank || "--"}`,
-      note: role === "primary" ? "市场内 Legacy 首选；只有 global 严格门禁通过才能升级为可执行复核" : role === "blocked" ? "最接近阈值，但当前不执行" : "保留观察，不代表买入信号",
-      tone: role === "primary" ? "active" : role === "blocked" ? "warning" : "muted",
+      note: isLegacyPrimaryRole(role) ? "市场内 Legacy 首选；只有 global 严格门禁通过才能升级为可执行复核" : isLegacyBlockedRole(role) ? "最接近阈值，但当前不执行" : "保留观察，不代表买入信号",
+      tone: isLegacyPrimaryRole(role) ? "active" : isLegacyBlockedRole(role) ? "warning" : "muted",
     },
     {
       key: "v2", icon: "ph-ranking", label: "影子排序", value: candidate?.v2?.rank ? `前 ${v2Top || "--"}%` : "待生成",
@@ -2524,14 +2775,14 @@ function scoreDivergence(candidate, market) {
   const dualLow = dualLowAnalysis(candidate);
   const role = candidateDecisionRole(candidate, market);
   const v2Top = topPercent(candidate?.v2?.rank, candidate?.v2?.rank_universe_size);
-  if (role === "primary" && dualLow?.status === "rejected") {
+  if (isLegacyPrimaryRole(role) && dualLow?.status === "rejected") {
     const reason = dualLow.filter_reasons?.[0]?.message;
     return `<div class="callout warning score-divergence">${icon("ph-arrows-left-right")}<div><strong>风格分歧，不是模型冲突</strong><br>Legacy 把它列为当前首选，但双低模型认为它不属于低估值风格${reason ? `：${esc(reason)}` : ""}。实际决策仍由 Legacy 与客观门控决定。</div></div>`;
   }
-  if (role === "blocked" && dualLow?.status === "ranked") {
+  if (isLegacyBlockedRole(role) && dualLow?.status === "ranked") {
     return `<div class="callout warning score-divergence">${icon("ph-shield-warning")}<div><strong>价值靠前，不等于现在能买</strong><br>双低研究排名较高，但 Legacy 或客观门控尚未通过；继续观察，不把价值分当交易指令。</div></div>`;
   }
-  if (role === "primary" && dualLow?.status === "ranked" && v2Top !== null && v2Top <= 25) {
+  if (isLegacyPrimaryRole(role) && dualLow?.status === "ranked" && v2Top !== null && v2Top <= 25) {
     return `<div class="callout score-divergence">${icon("ph-check-circle")}<div><strong>多视角一致</strong><br>Legacy 当前首选，V2 结构位于前 25%，同时进入双低研究序列；三套结果仍保持独立，不合成为上涨概率。</div></div>`;
   }
   return `<div class="callout score-divergence">${icon("ph-info")}<div><strong>如何阅读三套结果</strong><br>Legacy 回答“当前怎么做”，V2 回答“结构质量如何”，双低回答“是否属于低估值风格”。</div></div>`;
@@ -2806,7 +3057,46 @@ function validTradeDate(value) {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
-function validateTenDayTradePlan(published, primary = {}) {
+function horizonRangeDisplayText(low, high) {
+  const signed = (value) => `${value >= 0 ? "+" : ""}${Number(value).toFixed(1)}%`;
+  return `${signed(low)} ~ ${signed(high)}`;
+}
+
+function canonicalHorizonRangeView(value) {
+  if (!isRecord(value)) return null;
+  const low = value.low_pct;
+  const high = value.high_pct;
+  const observations = value.source_observations;
+  if (value.contract_version !== "horizon-range-v1"
+    || value.horizon_trade_days !== 10
+    || value.method_id !== "realized-vol-drift-shadow-v1"
+    || value.calibrated !== false
+    || !finiteRuleNumber(low) || !finiteRuleNumber(high) || !(low < 0 && high > 0)
+    || !Number.isInteger(observations) || observations < 0 || observations > 20
+    || value.text !== horizonRangeDisplayText(low, high)) return null;
+  const start = value.source_window_start_date;
+  const end = value.source_window_end_date;
+  if ((start === undefined || start === null) !== (end === undefined || end === null)
+    || (start !== undefined && start !== null
+      && (!validTradeDate(start) || !validTradeDate(end) || start > end))) return null;
+  const result = {
+    contract_version: "horizon-range-v1",
+    low_pct: roundRuleNumber(low, 2),
+    high_pct: roundRuleNumber(high, 2),
+    text: horizonRangeDisplayText(low, high),
+    horizon_trade_days: 10,
+    method_id: "realized-vol-drift-shadow-v1",
+    calibrated: false,
+    source_observations: observations,
+  };
+  if (start !== undefined && start !== null) {
+    result.source_window_start_date = start;
+    result.source_window_end_date = end;
+  }
+  return result;
+}
+
+function validateTenDayTradePlan(published, primary = {}, candidate = {}) {
   const errors = [];
   if (!isRecord(published)) return { valid: false, errors: ["计划对象缺失"] };
   const quote = published.reference_quote;
@@ -2816,7 +3106,22 @@ function validateTenDayTradePlan(published, primary = {}) {
   const position = published.position_limit;
   const marketCurrency = MARKET_META[primary.market]?.currency;
   const positiveNumber = (value) => finiteRuleNumber(value) && value > 0;
-  if (published.contract_version !== "ten-day-trade-plan-v1") errors.push("合同版本不匹配");
+  const planV2 = published.contract_version === "ten-day-trade-plan-v2";
+  if (!planV2 && published.contract_version !== "ten-day-trade-plan-v1") errors.push("合同版本不匹配");
+  let scenarioRange = null;
+  if (planV2) {
+    scenarioRange = canonicalHorizonRangeView(published.scenario_range);
+    const primaryRange = canonicalHorizonRangeView(primary.estimated_10d_range);
+    const candidateRangeSource = candidate?.estimated_10d_range
+      || candidate?.production_qualification?.estimated_10d_range;
+    const candidateRange = candidateRangeSource ? canonicalHorizonRangeView(candidateRangeSource) : null;
+    if (!scenarioRange || !primaryRange
+      || !normalizedFullJsonEqual(scenarioRange, primaryRange)
+      || (candidateRangeSource && (!candidateRange
+        || !normalizedFullJsonEqual(scenarioRange, candidateRange)))) {
+      errors.push("十日情景溯源不完整或上下游不一致");
+    }
+  }
   if (published.status !== "REVIEW_REQUIRED") errors.push("计划状态不是 REVIEW_REQUIRED");
   if (published.horizon_trade_days !== 10) errors.push("持有窗口不是 10 个交易日");
   if (!isRecord(quote)
@@ -2861,17 +3166,20 @@ function validateTenDayTradePlan(published, primary = {}) {
   const requiredExitRules = Object.keys(TRADE_PLAN_EXIT_RULE_LABELS);
   if (!sameStringList(exitRules, requiredExitRules)) errors.push("退出规则合同不完整");
   if (published.is_personalized_advice !== false) errors.push("个性化建议声明无效");
-  return { valid: errors.length === 0, errors };
+  return { valid: errors.length === 0, errors, scenarioRange };
 }
 
 function tenSessionTradePlan(candidate = {}, primary = {}) {
   const published = primary.ten_day_trade_plan;
-  const validation = validateTenDayTradePlan(published, primary);
+  const validation = validateTenDayTradePlan(published, primary, candidate);
   const contractPublished = validation.valid;
   const entryZone = contractPublished ? published.entry_zone : {};
   const invalidation = contractPublished ? published.invalidation : {};
   const target = contractPublished ? published.target : {};
-  const scenario = contractPublished ? primary.estimated_10d_range || {} : {};
+  const planV2 = contractPublished && published.contract_version === "ten-day-trade-plan-v2";
+  const scenario = contractPublished
+    ? planV2 ? validation.scenarioRange || {} : primary.estimated_10d_range || {}
+    : {};
   const riskReward = contractPublished ? primary.risk_reward || {} : {};
   const exitRules = contractPublished ? published.exit_rules : [];
   return {
@@ -2893,6 +3201,12 @@ function tenSessionTradePlan(candidate = {}, primary = {}) {
     targetSource: contractPublished ? firstTextValue(target.source) : "",
     targetLowPct: contractPublished ? firstFiniteValue(scenario.low_pct) : null,
     targetHighPct: contractPublished ? firstFiniteValue(scenario.high_pct) : null,
+    rangeProvenanceAvailable: planV2,
+    rangeMethod: planV2 ? firstTextValue(scenario.method_id) : "",
+    rangeCalibrated: planV2 ? scenario.calibrated === true : null,
+    rangeObservationCount: planV2 ? scenario.source_observations : null,
+    rangeWindowStart: planV2 ? firstTextValue(scenario.source_window_start_date) : "",
+    rangeWindowEnd: planV2 ? firstTextValue(scenario.source_window_end_date) : "",
     riskRewardRatio: contractPublished ? firstFiniteValue(riskReward.ratio) : null,
     maximumPosition: contractPublished ? firstFiniteValue(published.position_limit?.max_single_name_weight_pct) : null,
     positionPolicy: contractPublished ? firstTextValue(published.position_limit?.policy) : "",
@@ -2948,6 +3262,9 @@ function renderDecision() {
   const entryZone = Number.isFinite(Number(plan.entryZoneLow)) || Number.isFinite(Number(plan.entryZoneHigh))
     ? `${tradePlanValue(plan.entryZoneLow, plan.currency)} – ${tradePlanValue(plan.entryZoneHigh, plan.currency)}`
     : "待发布";
+  const rangeProvenance = plan.rangeProvenanceAvailable
+    ? `历史波动情景、${plan.rangeCalibrated ? "已校准" : "未校准"}、${fmt(plan.rangeObservationCount, 0)}个观测${plan.rangeWindowStart && plan.rangeWindowEnd ? `；窗口 ${plan.rangeWindowStart} 至 ${plan.rangeWindowEnd}` : ""}`
+    : "旧版情景、溯源未发布";
   const scannedCount = num(production.serverDecision?.evaluated_candidate_count, state.candidatePayload?.evaluated_count);
   const publishedCount = num(state.candidatePayload?.total, state.candidates.length || production.currentQualifiedCount);
   const defaultBlockerCopy = decisionState === "NO_ACTION"
@@ -2962,12 +3279,12 @@ function renderDecision() {
     </section>
     ${decisionState === "ENTER_TRADE_REVIEW" ? `<section class="ten-session-plan" aria-labelledby="tenSessionPlanTitle">
       <header><div><span>交易前核对清单</span><h2 id="tenSessionPlanTitle">未来 10 个交易日计划</h2><p>所有价格和日期均来自当前不可变快照；合同缺失或无效时整份计划显示“待发布”，浏览器不自行推算。</p></div><span class="status-pill ${plan.contractPublished ? "positive" : "negative"}">${plan.contractPublished ? `${esc(plan.status)} · ${fmt(plan.horizonTradeDays, 0)} 日` : "计划合同无效 / 缺失"}</span></header>
-      ${plan.contractPublished ? "" : `<div class="callout negative trade-plan-contract-error">${icon("ph-warning-octagon")}<div><strong>本候选不能进入价格执行核对</strong><br>${esc(plan.validationErrors.join("；") || "服务端未发布 ten-day-trade-plan-v1。")}</div></div>`}
+      ${plan.contractPublished ? "" : `<div class="callout negative trade-plan-contract-error">${icon("ph-warning-octagon")}<div><strong>本候选不能进入价格执行核对</strong><br>${esc(plan.validationErrors.join("；") || "服务端未发布 ten-day-trade-plan-v1/v2。")}</div></div>`}
       <div class="trade-plan-grid">
         <article><small>参考价 / 时间</small><strong>${tradePlanValue(plan.referencePrice, plan.currency)}</strong><span>${esc(plan.referenceTime ? `${dateTime(plan.referenceTime)} · ${plan.referenceSource} · ${plan.quoteStatus}` : "时间、来源与行情状态待发布")}</span></article>
         <article><small>计划入场区间</small><strong>${esc(entryZone)}</strong><span>${esc(plan.entryTradeDate ? `计划入场日 ${plan.entryTradeDate}` : "入场日待发布")}</span></article>
         <article class="is-risk"><small>失效价格</small><strong>${tradePlanValue(plan.invalidationPrice, plan.currency)}</strong><span>${esc(plan.invalidationSource ? `依据 ${plan.invalidationSource}` : "失效依据待发布")}</span></article>
-        <article><small>目标区间</small><strong>${esc(targetRange)}</strong><span>${esc(plan.targetSource ? `依据 ${plan.targetSource}；情景范围不是收益承诺` : "目标依据待发布")}</span></article>
+        <article><small>目标区间</small><strong>${esc(targetRange)}</strong><span>${esc(plan.targetSource ? `${rangeProvenance}；依据 ${plan.targetSource}；情景范围不是收益承诺` : "目标依据待发布")}</span></article>
         <article><small>风险收益比</small><strong>${Number.isFinite(Number(plan.riskRewardRatio)) ? fmt(plan.riskRewardRatio, 2) : "待发布"}</strong><span>仍需结合实际滑点</span></article>
         <article><small>建议最大仓位</small><strong>${esc(tradePlanPosition(plan.maximumPosition))}</strong><span>${esc(plan.positionPolicy === "strategy_safety_cap_not_personalized" ? "策略安全上限 · 非个性化建议" : "上限而非默认仓位")}</span></article>
         <article><small>催化有效期</small><strong>${esc(plan.catalystExpiry || (primary?.qualification_track === "quality_technical" ? "不适用" : "待发布"))}</strong><span>${primary?.qualification_track === "quality_technical" ? "质量趋势轨不依赖正向催化" : "过期后重新评估"}</span></article>
@@ -3010,7 +3327,22 @@ function filteredCandidates() {
   });
   if (market !== "all") return rows;
   return rows.sort((left, right) => {
-    const rolePriority = { qualified: 0, historical_qualified: 1, primary: 2, research: 3, watchlist: 4, blocked: 5 };
+    const rolePriority = {
+      production_primary: 0,
+      production_qualified: 1,
+      qualified: 1,
+      historical_production_primary: 2,
+      historical_production_qualified: 3,
+      historical_qualified: 3,
+      legacy_market_primary: 4,
+      primary: 4,
+      research_priority: 5,
+      research: 5,
+      legacy_watchlist: 6,
+      watchlist: 6,
+      legacy_blocked: 7,
+      blocked: 7,
+    };
     const roleDelta = (rolePriority[left.decisionRole] ?? 5) - (rolePriority[right.decisionRole] ?? 5);
     if (roleDelta) return roleDelta;
     const evidenceLevel = (row) => {
@@ -3101,9 +3433,13 @@ async function loadCandidateDetail(row) {
     if (!RESOURCE_CONTRACT_VERSIONS.candidateDetail.has(payload?.contract_version)
       || !payloadIdentityMatchesSnapshot(payload)
       || payload.id !== apiId) throw new Error("候选详情合同或快照身份无效");
-    mergeSnapshotDecisionState(payload, { strict: true });
     const detail = payload.candidate;
     if (!detail || typeof detail !== "object" || Array.isArray(detail)) throw new Error("候选详情合同无效");
+    if (payload.contract_version === "candidate-detail-v2"
+      && (!validCandidateRoleEnvelope(payload, [detail]) || detail.id !== payload.id)) {
+      throw new Error("候选详情角色合同与正式选择不一致");
+    }
+    mergeSnapshotDecisionState(payload, { strict: true });
     if (candidateId(detail, row.market) !== key) throw new Error("候选详情标的身份不一致");
     state.candidateDetails[key] = detail;
     state.candidateDetailStatus[key] = "ready";
@@ -3140,10 +3476,10 @@ function candidateDetail(row) {
   const marketGate = coverage.state === "READY" ? "" : `<div class="callout ${coverage.state === "BLOCKED" ? "negative" : "warning"}">${icon(coverage.state === "BLOCKED" ? "ph-warning-octagon" : "ph-warning-circle")}<div><strong>市场级门禁：${coverage.state}</strong><br>${esc(coverage.reasons.join("；") || "市场覆盖尚未达到跨市场可执行标准")}。单股门控通过也不能绕过市场级阻断。</div></div>`;
   const nextActiveRefresh = validActiveRefreshStatus(state.status) ? state.status.next_active_refresh : null;
   const snapshotStatus = `<div class="callout info">${icon("ph-waveform")}<div><strong>${esc(quoteView.title)}：${esc(quoteView.label)}</strong><br>快照生成 ${esc(dateTime(state.status?.snapshot_as_of || state.snapshot?.generated_at))}；下次实际自动刷新 ${esc(dateTime(nextActiveRefresh))}。评分与排序不在浏览器重算。</div></div>`;
-  const qualification = ["qualified", "historical_qualified"].includes(row.decisionRole)
+  const qualification = isProductionCandidateRole(row.decisionRole)
     ? productionQualificationForCandidate(candidate, market)
     : null;
-  const historicalQualification = row.decisionRole === "historical_qualified";
+  const historicalQualification = isHistoricalProductionCandidateRole(row.decisionRole);
   const detailStatus = state.candidateDetailStatus[candidateDetailKey(row)] || (candidateApiId(row) ? "idle" : "embedded");
   const detailNotice = detailStatus === "loading"
     ? `<div class="detail-loading" role="status">${icon("ph-spinner-gap")} 正在读取完整候选详情…</div>`
@@ -3152,7 +3488,7 @@ function candidateDetail(row) {
       : "";
   return `<article class="detail-panel candidate-detail">
     <button class="candidate-detail-back" type="button" data-action="close-candidate-detail">${icon("ph-arrow-left")} 返回决策短名单</button>
-    <header class="detail-header"><div><div class="eyebrow">${marketBadge(market)} ${esc(MARKET_META[market].label)} · ${esc(candidate.code || candidate.symbol)}</div><h2 class="detail-title">${esc(candidate.name)}</h2><p class="detail-subtitle">${esc(candidate.role || candidate.reason_tags || "综合候选")}</p></div><div class="detail-actions">${qualification ? badge(`${historicalQualification ? "历史·" : ""}${qualificationTrackLabel(qualification.qualification_track)} ${fmt(qualification.qualification_score, 1)} 分`, historicalQualification ? "warning" : "positive") : ""}${badge(candidate.legacy_complete === false ? "Legacy 未深评" : `Legacy ${legacyRankLabel(displayRow)}`, candidate.legacy_complete === false ? "warning" : "primary")}${candidate.v2?.rank ? badge(`V2 #${candidate.v2.rank}/${candidate.v2.rank_universe_size}`, "purple") : ""}${dualLow?.status === "ranked" ? badge(`双低 #${dualLow.rank}/${dualLow.rank_universe_size}`, "positive") : dualLow ? badge(dualLowLabel(dualLow), dualLowTone(dualLow)) : ""}</div></header>
+    <header class="detail-header"><div><div class="eyebrow">${marketBadge(market)} ${esc(MARKET_META[market].label)} · ${esc(candidate.code || candidate.symbol)}</div><h2 class="detail-title">${esc(candidate.name)}</h2><p class="detail-subtitle">${esc(candidate.role || candidate.reason_tags || "综合候选")}</p></div><div class="detail-actions">${qualification ? badge(`${decisionRoleLabel(row.decisionRole)} · ${qualificationTrackLabel(qualification.qualification_track)} ${fmt(qualification.qualification_score, 1)} 分`, historicalQualification ? "warning" : "positive") : badge(decisionRoleLabel(row.decisionRole), isLegacyBlockedRole(row.decisionRole) ? "warning" : "primary")}${badge(candidate.legacy_complete === false ? "Legacy 未深评" : `Legacy ${legacyRankLabel(displayRow)}`, candidate.legacy_complete === false ? "warning" : "primary")}${candidate.v2?.rank ? badge(`V2 #${candidate.v2.rank}/${candidate.v2.rank_universe_size}`, "purple") : ""}${dualLow?.status === "ranked" ? badge(`双低 #${dualLow.rank}/${dualLow.rank_universe_size}`, "positive") : dualLow ? badge(dualLowLabel(dualLow), dualLowTone(dualLow)) : ""}</div></header>
     ${detailNotice}
     ${historicalQualification ? `<div class="callout warning">${icon("ph-warning-octagon")}<div><strong>历史规则合格，不可作为当前买入信号</strong><br>快照已经过期；本页只保留评分与证据供研究，等待 fresh 快照后再判断。</div></div>` : ""}
     ${marketGate}
@@ -3173,14 +3509,14 @@ function candidateMobileCard(row) {
   const c = row.candidate;
   const key = candidateId(row.candidate, row.market);
   const risk = candidateRiskLevel(c, row.market);
-  const qualification = ["qualified", "historical_qualified"].includes(row.decisionRole)
+  const qualification = isProductionCandidateRole(row.decisionRole)
     ? productionQualificationForCandidate(c, row.market)
     : null;
-  const roleLabel = qualification
-    ? qualificationTrackLabel(qualification.qualification_track)
-    : decisionRoleLabel(row.decisionRole);
+  const roleLabel = decisionRoleLabel(row.decisionRole);
+  const positiveRole = ["production_primary", "production_qualified", "qualified"].includes(row.decisionRole);
+  const historicalRole = isHistoricalProductionCandidateRole(row.decisionRole);
   return `<button class="candidate-mobile-card ${key === state.candidateKey ? "is-selected" : ""}" type="button" data-action="select-candidate" data-key="${esc(key)}" aria-pressed="${key === state.candidateKey}">
-    <header><span>${marketBadge(row.market)}<b>${esc(c.name)}</b><small>${esc(c.code || c.symbol)}</small></span>${badge(roleLabel, ["qualified", "primary"].includes(row.decisionRole) ? "positive" : row.decisionRole === "historical_qualified" ? "warning" : row.decisionRole === "blocked" ? "negative" : "")}</header>
+    <header><span>${marketBadge(row.market)}<b>${esc(c.name)}</b><small>${esc(c.code || c.symbol)}</small></span>${badge(roleLabel, positiveRole ? "positive" : historicalRole ? "warning" : isLegacyBlockedRole(row.decisionRole) ? "negative" : "")}</header>
     <dl><div><dt>十日情景</dt><dd>${esc(candidateTenDayRange(c))}</dd></div><div><dt>下行风险</dt><dd class="${risk === "clear" ? "positive" : risk === "blocked" ? "negative" : "warning"}">${esc(candidateDownsideLabel(c, risk))}</dd></div><div><dt>事件覆盖</dt><dd>${esc(candidateEventGrade(c))}</dd></div></dl>
     <span class="candidate-mobile-cta">查看详情 ${icon("ph-arrow-right")}</span>
   </button>`;
@@ -3341,15 +3677,16 @@ function renderCandidates() {
           const c = row.candidate;
           const key = candidateId(row.candidate, row.market);
           const risk = candidateRiskLevel(c, row.market);
-          const qualification = ["qualified", "historical_qualified"].includes(row.decisionRole)
-            ? productionQualificationForCandidate(c, row.market)
-            : null;
-          const statusTone = row.decisionRole === "qualified" ? "positive" : row.decisionRole === "historical_qualified" ? "warning" : risk === "clear" ? "positive" : risk === "blocked" ? "negative" : "warning";
-          const statusLabel = row.decisionRole === "historical_qualified"
-            ? "历史合格·不可执行"
-            : qualification
-              ? qualificationTrackLabel(qualification.qualification_track)
-            : ({ clear: "清晰", warning: "警告", blocked: "阻断" })[risk];
+          const currentProductionRole = ["production_primary", "production_qualified", "qualified"].includes(row.decisionRole);
+          const historicalProductionRole = isHistoricalProductionCandidateRole(row.decisionRole);
+          const statusTone = currentProductionRole
+            ? "positive"
+            : historicalProductionRole
+              ? "warning"
+              : isLegacyBlockedRole(row.decisionRole)
+                ? "negative"
+                : risk === "clear" ? "positive" : risk === "blocked" ? "negative" : "warning";
+          const statusLabel = decisionRoleLabel(row.decisionRole);
           return `<tr class="${key === state.candidateKey ? "is-selected" : ""}" tabindex="0" data-action="select-candidate" data-key="${esc(key)}"><td>${marketBadge(row.market)}</td><td><span class="name">${esc(c.name)}</span><br><span class="symbol">${esc(c.code || c.symbol)}</span></td><td><span class="status-pill ${statusTone}">${statusLabel}</span></td><td>${esc(candidateTenDayRange(c))}</td><td class="${risk === "blocked" ? "negative" : risk === "warning" ? "warning" : "positive"}">${esc(candidateDownsideLabel(c, risk))}</td><td>${esc(candidateEventGrade(c))}</td><td><button class="row-action" type="button" data-action="select-candidate" data-key="${esc(key)}" aria-label="查看${esc(c.name)}详情">${icon("ph-caret-right")}</button></td></tr>`;
         }).join("")}</tbody></table></div>` : `<div class="empty-state">${icon("ph-funnel-x")}<h3>没有匹配候选</h3><p>调整市场、风险或召回来源筛选。</p></div>`}
         ${rows.length ? `<div class="candidate-mobile-list">${rows.map(candidateMobileCard).join("")}</div>` : ""}
@@ -3416,7 +3753,7 @@ function filteredEvents() {
     if (market !== "all" && event.market !== market) return false;
     if (type !== "all" && event.event_type !== type) return false;
     if (direction !== "all" && normalizedDirection(event.direction) !== direction) return false;
-    if (needle && !`${event.issuer || ""} ${event.company || event.name || ""} ${event.code || event.symbol || ""}`.toLowerCase().includes(needle)) return false;
+    if (needle && !`${event.event_id || ""} ${event.issuer || ""} ${event.company || event.name || ""} ${event.code || event.symbol || ""} ${event.title || ""} ${event.source || ""}`.toLowerCase().includes(needle)) return false;
     return true;
   });
 }
@@ -3472,15 +3809,28 @@ function clusterEvents(events) {
     const key = `${event.market || "unknown"}|${issuer}|${eventTypeLabel(event)}|${day}`;
     const existing = clusters.get(key);
     if (!existing) {
-      clusters.set(key, { ...event, cluster_key: key, cluster_count: 1, cluster_event_ids: [event.event_id] });
+      clusters.set(key, {
+        ...event,
+        decision_bound: event.decision_bound === true,
+        cluster_key: key,
+        cluster_count: 1,
+        cluster_event_ids: [event.event_id],
+      });
       continue;
     }
     existing.cluster_count += 1;
     existing.cluster_event_ids.push(event.event_id);
+    existing.decision_bound = existing.decision_bound === true || event.decision_bound === true;
     if (Date.parse(event.published_at || "") > Date.parse(existing.published_at || "")) {
       const count = existing.cluster_count;
       const ids = existing.cluster_event_ids;
-      Object.assign(existing, event, { cluster_key: key, cluster_count: count, cluster_event_ids: ids });
+      const decisionBound = existing.decision_bound;
+      Object.assign(existing, event, {
+        decision_bound: decisionBound,
+        cluster_key: key,
+        cluster_count: count,
+        cluster_event_ids: ids,
+      });
     }
   }
   return [...clusters.values()].sort((left, right) => Date.parse(right.published_at || "") - Date.parse(left.published_at || ""));
@@ -3567,16 +3917,27 @@ function renderEvents() {
     }
     return `<div class="callout info section-callout production-event-audit-row">${icon("ph-seal-check")}<div><strong>${esc(heading)}</strong><br>事件催化轨已绑定 ${fmt(eventIds.length, 0)} 条正向事件；event_id：${esc(eventIds.join(" · ") || "--")}。<small>${esc(identity)} · 只有这些已绑定证据参与该候选资格；规则资格分不是上涨概率。</small></div></div>`;
   }).join("");
-  const automaticRaw = automaticEventFeed().sort((left, right) => Number(qualificationIds.has(right.event_id)) - Number(qualificationIds.has(left.event_id)));
+  const automaticRaw = automaticEventFeed().sort((left, right) => (
+    Number(right.decision_bound === true || qualificationIds.has(right.event_id))
+    - Number(left.decision_bound === true || qualificationIds.has(left.event_id))
+  ));
   const automatic = clusterEvents(automaticRaw).sort((left, right) => {
-    const leftBound = (left.cluster_event_ids || []).some((id) => qualificationIds.has(id));
-    const rightBound = (right.cluster_event_ids || []).some((id) => qualificationIds.has(id));
+    const leftBound = left.decision_bound === true
+      || (left.cluster_event_ids || []).some((id) => qualificationIds.has(id));
+    const rightBound = right.decision_bound === true
+      || (right.cluster_event_ids || []).some((id) => qualificationIds.has(id));
     return Number(rightBound) - Number(leftBound);
   });
-  const qualificationEvents = automatic.filter((event) => (event.cluster_event_ids || [event.event_id]).some((id) => qualificationIds.has(id)));
+  const resolvedQualificationIds = new Set(
+    all.filter((event) => qualificationIds.has(event.event_id)).map((event) => event.event_id),
+  );
   const externalCount = automaticExternalEvidenceCount();
   const publication = state.eventsPayload?.event_publication || {};
   const truncatedEventCount = num(publication.truncated, 0);
+  const loadedEventCount = Array.isArray(state.eventsPayload?.events)
+    ? state.eventsPayload.events.length
+    : Array.isArray(state.eventsPayload?.events?.items) ? state.eventsPayload.events.items.length : 0;
+  const filteredEventCount = num(state.eventsPayload?.total, loadedEventCount);
   const missingEvidence = all.filter((event) => !event.source || !(event.published_at || event.ingested_at)).length;
   let selected = rows.find((event) => event.event_id === state.eventKey)
     || rows.find((event) => automatic.some((item) => item.event_id === event.event_id))
@@ -3590,14 +3951,14 @@ function renderEvents() {
     ${production.currentAction === "HISTORICAL_ONLY" ? `<div class="snapshot-execution-banner" role="alert">${icon("ph-warning-octagon")}<div><strong>快照已过期，事件只供历史研究</strong><span>历史规则候选与其绑定证据保留展示，不得触发当前执行。</span></div></div>` : ""}
     ${renderKpis([
       { icon: "ph-newspaper", label: "官方自动证据", value: fmt(externalCount, 0), tone: externalCount ? "positive" : "negative", meta: "自动入库且可参与门禁" },
-      { icon: "ph-seal-check", label: "规则候选证据", value: fmt(qualificationEvents.length, 0), tone: production.qualified ? "positive" : productionRows.length ? "warning" : "negative", meta: production.qualified ? `${fmt(productionRows.length, 0)} 只当前规则合格候选 · 事件轨绑定 ${fmt(qualificationIds.size, 0)} 个 event_id` : productionRows.length ? `${fmt(productionRows.length, 0)} 只历史发布合格候选 · 不可执行` : "本轮无规则合格候选" },
+      { icon: "ph-seal-check", label: "规则候选证据", value: `${fmt(resolvedQualificationIds.size, 0)} / ${fmt(qualificationIds.size, 0)}`, tone: qualificationIds.size > 0 && resolvedQualificationIds.size === qualificationIds.size ? "positive" : productionRows.length ? "warning" : "negative", meta: productionRows.length ? `${fmt(productionRows.length, 0)} 只${production.qualified ? "当前" : "历史发布"}规则合格候选 · 已解析 ${fmt(resolvedQualificationIds.size, 0)} / ${fmt(qualificationIds.size, 0)} 个绑定 event_id${production.qualified ? "" : " · 不可执行"}` : "本轮无规则合格候选" },
       { icon: "ph-cpu", label: "模型信号", value: fmt(modelSignals.length, 0), meta: "系统生成，不等于外部证据" },
       { icon: "ph-user-check", label: "人工核验待入库", value: fmt(manual.length, 0), tone: "warning", meta: "仅研究提示，不参与自动决策" },
       { icon: "ph-warning-octagon", label: "数据状态", value: externalCount ? "待复核" : "严重缺口", tone: externalCount ? "warning" : "negative", meta: missingEvidence ? `${missingEvidence} 条来源或时间缺失` : "事件因子不可独立支撑买入" },
     ])}
     ${eventCoverage.contract_version === "two-tier-event-coverage-v1" ? `<section class="two-tier-event-coverage" aria-label="事件双层覆盖口径"><article><span>全池结构化风险筛查</span><strong>${fmt(riskCoverage.evaluated_candidate_count, 0)} 只</strong><p>PASS ${fmt(riskCoverage.pass_count, 0)} · BLOCKED ${fmt(riskCoverage.blocked_count, 0)} · INCOMPLETE ${fmt(riskCoverage.incomplete_count, 0)}</p><small>覆盖标题与结构化元数据；PASS 不等于官方确认“绝无负面”。</small></article><article><span>优先样本正向事件深扫</span><strong>${fmt(positiveCoverage.scanned_candidate_count, 0)} 只</strong><p>有正向证据 ${fmt(positiveCoverage.with_positive_count, 0)} · 未命中 ${fmt(positiveCoverage.scanned_no_positive_count, 0)} · 未选深扫 ${fmt(positiveCoverage.not_selected_count, 0)}</p><small>只对有界优先样本核验正文，不代表完整扫描池都有催化。</small></article></section>` : ""}
     ${productionRows.length ? `<section class="production-event-audit-list" aria-label="全部规则合格候选通道审计">${qualificationAudits}</section>` : ""}
-    ${truncatedEventCount > 0 ? `<div class="callout info section-callout">${icon("ph-database")}<div><strong>事件资产已按时点有界发布</strong><br>源快照 ${fmt(publication.total, 0)} 条，页面发布 ${fmt(publication.published, 0)} 条，裁剪 ${fmt(truncatedEventCount, 0)} 条；所有决策绑定证据均已保留。</div></div>` : ""}
+    ${(publication.total || loadedEventCount) ? `<div class="callout info section-callout">${icon("ph-database")}<div><strong>事件资产已按时点有界发布</strong><br>源快照 ${fmt(publication.total, 0)} 条 · 发布 ${fmt(publication.published, 0)} 条 · 当前筛选匹配 ${fmt(filteredEventCount, 0)} 条 · 已载入 ${fmt(loadedEventCount, 0)} 条${truncatedEventCount > 0 ? ` · 裁剪 ${fmt(truncatedEventCount, 0)} 条` : ""}；决策绑定证据按绑定优先发布。</div></div>` : ""}
     <div class="callout warning section-callout">${icon("ph-warning-circle")}<div><strong>模型信号 ≠ 外部事件证据</strong><br>model_signal 只是系统推断，不能替代公告、财报、监管文件或权威新闻；没有原文链接时，“查看证据原文”必须禁用。</div></div>
     <section class="panel evidence-feed-panel"><header class="panel-header"><div><h3 class="panel-title">事件聚合 · 已自动入库</h3><p class="panel-subtitle">${automaticRaw.length} 条原始证据聚合为 ${automatic.length} 组 · 按公司、事件类型与生效日期去重</p></div></header><div class="verified-evidence-list">${automatic.map((event) => evidenceRow(event, true)).join("") || `<div class="empty-state compact">${icon("ph-newspaper-clipping")}<h3>暂无自动准入证据</h3><p>当前不会用模型信号或人工笔记替代。</p></div>`}</div><div class="model-signal-title"><span>已人工核验 · 待自动入库（${manual.length} 条）</span></div><div class="verified-evidence-list">${manual.map((event) => evidenceRow(event, false)).join("") || `<div class="empty-state compact"><p>暂无人工核验证据</p></div>`}</div><div class="model-signal-title"><span>系统模型信号 · 非外部证据</span></div><div class="model-signal-grid">${modelSignals.map((event) => `<article><header><span>${esc(event.title)}</span><span class="status-pill primary">非外部</span></header><p>${esc(event.source || "系统生成")} · 无可访问原文</p></article>`).join("")}</div>${state.pagination.events.hasMore ? `<button class="load-more-button" type="button" data-action="load-more-events" ${state.pagination.events.loading ? "disabled" : ""}>${state.pagination.events.loading ? "正在读取…" : `加载更多事件（第 ${fmt(state.pagination.events.page, 0)} 页）`}</button>` : ""}</section>
     <section class="evidence-bottom-grid"><div>${renderEventDetail(selected)}</div><article class="panel evidence-rules"><header class="panel-header"><div><h3 class="panel-title">证据准入规则</h3><p class="panel-subtitle">任何一项缺失，都不能升级为自动买入依据</p></div></header><ol><li>可访问原文或监管文件</li><li>记录来源、发布时间与生效时间</li><li>区分事实、模型推断与人工判断</li><li>计算相关性、新颖度与已计价程度</li><li>失效或过期后自动退出决策窗口</li></ol><strong>任一关键字段缺失，事件因子只能降级为研究提示。</strong></article></section>
@@ -4181,8 +4542,7 @@ const SCHEDULER_GAP_META = {
   R2_OR_EMBEDDED_MANIFEST_MISSING: "调度数据 manifest 不可用",
 };
 const ACTIVE_REFRESH_MODES = new Set([
-  "cloudflare_primary_with_github_watchdog",
-  "github_watchdog_only",
+  "github_actions_primary_with_30m_watchdog",
 ]);
 
 function scheduleCheckpointCopy(value) {
@@ -4213,18 +4573,21 @@ function validActiveRefreshStatus(status = state.status) {
   if (!status || typeof status !== "object" || Array.isArray(status)) return false;
   const mode = status.active_refresh_mode;
   const enabled = status.scheduler_primary_enabled;
-  const modeMatchesFlag = enabled === true
-    ? mode === "cloudflare_primary_with_github_watchdog"
-    : enabled === false && mode === "github_watchdog_only";
+  const readinessFields = [
+    "research_decision_ready", "checkpoint_evidence_ready",
+    "unattended_refresh_ready", "calibrated_execution_ready",
+  ];
   return Boolean(
     status.ok === true
     && status.snapshot_key === state.snapshot?.snapshot_key
     && status.generated_at === state.snapshot?.generated_at
     && status.source_snapshot_sha256 === state.snapshot?.source_snapshot?.sha256
     && Number(status.source_snapshot_byte_size) === Number(state.snapshot?.source_snapshot?.byte_size)
-    && typeof enabled === "boolean"
+    && status.scheduler_primary_provider === "github_actions"
+    && enabled === true
+    && typeof status.cloudflare_dispatch_enabled === "boolean"
     && ACTIVE_REFRESH_MODES.has(mode)
-    && modeMatchesFlag
+    && readinessFields.every((field) => typeof status[field] === "boolean")
     && typeof status.next_active_refresh === "string"
     && /\+08:00$/.test(status.next_active_refresh)
     && Number.isFinite(Date.parse(status.next_active_refresh))
@@ -4237,69 +4600,120 @@ function activeRefreshStatusFieldsPresent(status = state.status) {
     status
     && typeof status === "object"
     && !Array.isArray(status)
-    && ["scheduler_primary_enabled", "active_refresh_mode", "next_active_refresh", "schedule_us_post_close"]
+    && [
+      "scheduler_primary_provider", "scheduler_primary_enabled",
+      "cloudflare_dispatch_enabled", "active_refresh_mode", "next_active_refresh",
+      "schedule_us_post_close", "research_decision_ready",
+      "checkpoint_evidence_ready", "unattended_refresh_ready",
+      "calibrated_execution_ready",
+    ]
       .some((field) => Object.hasOwn(status, field))
   );
+}
+
+function readinessLayerPresentation(value, initializing = false) {
+  if (initializing && value !== true) {
+    return { state: "INITIALIZING", label: "证据初始化中", tone: "warning" };
+  }
+  if (value === true) return { state: "READY", label: "已就绪", tone: "positive" };
+  if (value === false) return { state: "NOT_READY", label: "未就绪", tone: "negative" };
+  return { state: "UNKNOWN", label: "未知", tone: "warning" };
 }
 
 function schedulerHealthPresentation() {
   const gate = state.schedulerGate;
   const contractReady = validSchedulerGatePayload(gate);
+  const v2ContractReady = contractReady && gate.contract_version === "scheduler-health-v2";
+  const legacyContractReady = contractReady && gate.contract_version === "scheduler-health-v1";
   const status = state.status || {};
   const statusFieldsPresent = activeRefreshStatusFieldsPresent(status);
   const statusReady = validActiveRefreshStatus(status);
   const contractsConsistent = Boolean(
     statusReady
-    && contractReady
-    && status.scheduler_primary_enabled === gate.scheduler_enabled
+    && v2ContractReady
+    && status.scheduler_primary_provider === gate.scheduler_primary_provider
+    && status.scheduler_primary_enabled === gate.scheduler_primary_enabled
+    && status.cloudflare_dispatch_enabled === gate.cloudflare_dispatch_enabled
+    && status.checkpoint_evidence_ready === gate.checkpoint_evidence_ready
+    && status.unattended_refresh_ready === gate.unattended_refresh_ready
   );
-  const legacyGateFallback = !statusFieldsPresent && contractReady;
+  const gateOnlyFallback = !statusFieldsPresent && v2ContractReady;
   const primaryEnabled = contractsConsistent
     ? status.scheduler_primary_enabled
-    : legacyGateFallback ? gate.scheduler_enabled : null;
+    : gateOnlyFallback ? gate.scheduler_primary_enabled : null;
   const primaryState = primaryEnabled === true ? "ENABLED" : primaryEnabled === false ? "DISABLED" : "UNKNOWN";
   const primaryLabel = primaryState === "ENABLED"
-    ? "主调度已启用"
-    : primaryState === "DISABLED" ? "主调度未启用" : "主调度状态未知";
+    ? "GitHub Actions 主调度已启用"
+    : primaryState === "DISABLED" ? "GitHub Actions 主调度未启用" : "GitHub Actions 主调度状态未知";
   const primaryTone = primaryState === "ENABLED" ? "positive" : primaryState === "DISABLED" ? "negative" : "warning";
-  const gapLabel = statusFieldsPresent && (!statusReady || !contractReady || !contractsConsistent)
+  const gapLabel = statusFieldsPresent && (!statusReady || !v2ContractReady || !contractsConsistent)
     ? "未知（状态 API 与 gate-status 合同缺失或不一致）"
-    : !contractReady ? "未知（gate-status 合同不可用）"
-    : gate.scheduler_gap === null ? "无" : SCHEDULER_GAP_META[gate.scheduler_gap] || gate.scheduler_gap;
+    : legacyContractReady ? "旧版调度合同仅供读取，主调度状态未知"
+      : !v2ContractReady ? "未知（gate-status v2 合同不可用）"
+        : primaryEnabled ? "无" : "GitHub Actions 主调度未启用";
+  const schedulerReadiness = v2ContractReady
+    && (contractsConsistent || gateOnlyFallback)
+    ? gate.scheduler_readiness : "UNKNOWN";
+  const initializing = schedulerReadiness === "INITIALIZING";
+  const readinessLabel = schedulerReadiness === "READY"
+    ? "调度证据就绪"
+    : schedulerReadiness === "DEGRADED" ? "调度证据降级"
+      : initializing ? "证据初始化中" : "调度证据未知";
+  const readinessTone = schedulerReadiness === "READY"
+    ? "positive" : schedulerReadiness === "DEGRADED" ? "negative" : "warning";
+  const cloudflareDispatchEnabled = contractsConsistent
+    ? status.cloudflare_dispatch_enabled
+    : gateOnlyFallback ? gate.cloudflare_dispatch_enabled : null;
+  const cloudflareDispatchLabel = cloudflareDispatchEnabled === true
+    ? "可选 dispatch 已启用"
+    : cloudflareDispatchEnabled === false
+      ? "可选 dispatch 未启用（不影响主调度）"
+      : "可选 dispatch 状态未知";
   const hasBatchPublicationEvidence = Boolean(
-    contractReady
+    v2ContractReady
+    && !initializing
     && typeof gate.source_invocation_slot === "string"
     && Number.isFinite(Date.parse(gate.source_invocation_slot))
     && typeof gate.published_at === "string"
     && Number.isFinite(Date.parse(gate.published_at))
   );
-  const batchEvidence = hasBatchPublicationEvidence
+  const batchEvidence = initializing
+    ? "证据初始化中"
+    : hasBatchPublicationEvidence
     ? `源调用 ${dateTime(gate.source_invocation_slot)} · 发布 ${dateTime(gate.published_at)} · ${gate.publication_backend}`
     : "未知（未发布完整的源调用与发布时间证据）";
   const activeMode = contractsConsistent ? status.active_refresh_mode : null;
-  const watchdogLabel = activeMode === "github_watchdog_only"
-    ? "watchdog 生效（唯一自动刷新）"
-    : activeMode === "cloudflare_primary_with_github_watchdog"
-      ? "watchdog 生效（健康补跑）"
-      : "watchdog 状态未知";
+  const watchdogLabel = activeMode === "github_actions_primary_with_30m_watchdog"
+    ? "30 分钟 watchdog 已配置"
+    : "watchdog 状态未知";
   const watchdogDetail = activeMode
     ? `状态 API 发布 active_refresh_mode=${activeMode}`
     : hasBatchPublicationEvidence
       ? "最近批次有发布证据，但合同未标注触发来源，不归因为 GitHub watchdog"
       : "状态 API 未发布可验证的 active_refresh_mode";
-  const checkpointEvidenceComplete = Boolean(
-    contractReady
-    && gate.checkpoint_coverage_status === "COMPLETE_24H_LEDGER"
-    && gate.checkpoint_evidence_contract_version === "scheduler-checkpoint-ledger-v1"
-    && Number.isInteger(gate.missed_checkpoints_24h)
-  );
-  const checkpointEvidence = checkpointEvidenceComplete
-    ? `24 小时遗漏 ${gate.missed_checkpoints_24h} 个`
-    : "24 小时检查点证据不完整";
+  const checkpointEvidence = initializing
+    ? "证据初始化中（完整 24 小时窗口形成前不按零值处理）"
+    : v2ContractReady
+      ? `24 小时应有 ${gate.expected_checkpoints_24h} · 按时 ${gate.published_on_time_24h} · 迟到恢复 ${gate.late_recoveries_24h} · ${Number.isInteger(gate.missed_checkpoints_24h) ? `遗漏 ${gate.missed_checkpoints_24h} · ` : ""}证据滞后 ${gate.evidence_lag_batches} 批`
+      : "24 小时检查点证据不完整";
+  const sloMinutes = v2ContractReady ? gate.publication_slo_seconds / 60 : null;
+  const publicationSlo = initializing
+    ? `${fmt(sloMinutes, 0)} 分钟发布服务目标（非保证）· 证据初始化中`
+    : v2ContractReady
+      ? `${fmt(sloMinutes, 0)} 分钟发布服务目标（非保证）· ${gate.publication_within_slo === true ? "最近批次在目标内" : gate.publication_within_slo === false ? "最近批次超出目标" : "最近批次证据未知"}`
+      : "发布服务目标未知（不构成保证）";
+  const readinessSource = contractsConsistent ? status : gateOnlyFallback ? gate : {};
+  const readinessLayers = {
+    research: readinessLayerPresentation(readinessSource.research_decision_ready, initializing),
+    checkpoint: readinessLayerPresentation(readinessSource.checkpoint_evidence_ready, initializing),
+    unattended: readinessLayerPresentation(readinessSource.unattended_refresh_ready, initializing),
+    calibrated: readinessLayerPresentation(readinessSource.calibrated_execution_ready, initializing),
+  };
   const usSchedule = statusReady ? status.schedule_us_post_close : null;
   return {
     contractReady, statusReady, contractsConsistent, primaryState, primaryLabel, primaryTone, gapLabel,
-    activeMode,
+    activeMode, schedulerReadiness, readinessLabel, readinessTone,
+    cloudflareDispatchEnabled, cloudflareDispatchLabel, publicationSlo, readinessLayers,
     hasBatchPublicationEvidence, batchEvidence, watchdogLabel, watchdogDetail,
     checkpointEvidence,
     nextActiveRefresh: contractsConsistent ? status.next_active_refresh : null,
@@ -4363,13 +4777,13 @@ function renderHealth() {
       { icon: "ph-globe", label: "可比较市场", value: `${readyMarkets} / 3`, tone: readyMarkets === 3 ? "positive" : "negative", meta: "A股、港股、美股须口径可比" },
       { icon: "ph-binoculars", label: "三市场召回目标", value: recallTargetsMet ? "300 / 200 / 300" : "未达标", tone: recallTargetsMet ? "positive" : "warning", meta: "A股 / 港股 / 美股；行情与深评另行门控" },
       { icon: "ph-newspaper", label: "外部自动证据", value: fmt(truth.autoEvidenceCount, 0), tone: truth.autoEvidenceCount ? "positive" : "negative", meta: `模型信号 ${fmt(eventStats.modelSignals, 0)} 条不等于证据` },
-      { icon: "ph-clock-clockwise", label: "Cloudflare 主调度", value: scheduler.primaryLabel, tone: scheduler.primaryTone, meta: scheduler.gapLabel },
+      { icon: "ph-clock-clockwise", label: "GitHub Actions 主调度", value: scheduler.primaryLabel, tone: scheduler.primaryTone, meta: scheduler.readinessLabel },
     ])}
     <section class="health-layout"><article class="panel"><header class="panel-header"><div><h3 class="panel-title">市场与数据源状态</h3><p class="panel-subtitle">健康状态直接解释为什么不能给出买入答案</p></div></header><div class="health-table"><div class="health-table-head"><span>对象</span><span>状态</span><span>关键指标</span><span>说明与决策影响</span></div>
       ${truth.markets.map((market) => row(MARKET_META[market.market].label, marketTone(market), marketStateLabel(market), marketMetrics(market), market.reasons.join("；") || "关键数据门禁已通过")).join("")}
       ${row("事件数据", truth.autoEvidenceCount ? "warning" : "negative", truth.autoEvidenceCount ? "已入库" : "严重缺口", `外部自动 ${truth.autoEvidenceCount} · 发布候选绑定 ${fmt(publishedPrimary?.verified_positive_event_ids?.length, 0)} · 模型信号 ${fmt(eventStats.modelSignals, 0)}`, "官方事件可进入规则门禁，但不可单独支撑买入")}
       ${row("最近发布快照", snapshotPublished ? "positive" : "negative", snapshotPublished ? "身份一致" : "证据不足", `快照 ${dateTime(state.snapshot?.generated_at)}`, "快照可访问和新鲜度不证明主调度已启用，也不代表决策数据完整")}
-    </div></article><aside class="health-side"><article class="panel"><header class="panel-header"><div><h3 class="panel-title">实际更新机制</h3><p class="panel-subtitle">纯云端批次快照，不依赖个人设备</p></div>${badge(scheduler.primaryLabel, scheduler.primaryTone)}</header><dl><dt>Cloudflare 主调度</dt><dd>${esc(scheduler.primaryLabel)}</dd><dt>调度缺口</dt><dd>${esc(scheduler.gapLabel)}</dd><dt>GitHub watchdog</dt><dd>${esc(scheduler.watchdogLabel)}；${esc(scheduler.watchdogDetail)}</dd><dt>最近批次证据</dt><dd>${esc(scheduler.batchEvidence)}</dd><dt>24 小时覆盖证据</dt><dd>${esc(scheduler.checkpointEvidence)}</dd><dt>标准主检查点（配置口径）</dt><dd>工作日北京时间 ${esc(primarySchedule)}</dd><dt>标准 watchdog（配置口径）</dt><dd>工作日北京时间 ${esc(fallbackSchedule)}；不表示已触发</dd><dt>美股盘后主检查点</dt><dd>北京时间 ${esc(scheduler.usPrimaryCheckpoints)}；${esc(scheduler.usScheduleDays)}，仅匹配纽约 16:17 的时段有效</dd><dt>美股盘后 watchdog</dt><dd>北京时间 ${esc(scheduler.usWatchdogCheckpoints)}；${esc(scheduler.usScheduleDays)}</dd><dt>快照生成</dt><dd>${esc(dateTime(status.snapshot_as_of || state.snapshot?.generated_at))}</dd><dt>下次实际自动刷新</dt><dd>${scheduler.nextActiveRefresh ? esc(dateTime(scheduler.nextActiveRefresh)) : "未知（状态 API 合同不可用）"}</dd><dt>交易日窗口</dt><dd>XSHG / XHKG / XNYS 真实日历</dd><dt>结果跟踪</dt><dd>规则资格随每日快照留档；校准可执行预测第 10 个交易日后结算</dd></dl></article><article class="panel"><header class="panel-header"><div><h3 class="panel-title">发布证据不等于主调度或决策可用</h3></div></header><p>${scheduler.activeMode ? `状态 API 已明确实际自动刷新路径为 ${esc(scheduler.activeMode)}；` : "状态 API 与 gate-status 不足时，主调度和 watchdog 必须显示未知；"}最近批次发布证据仍不代表决策数据完整。规则轨或校准轨证据缺失时仍会阻断。</p>${badge(scheduler.hasBatchPublicationEvidence ? "最近批次：有发布证据" : "最近批次：证据未知", scheduler.hasBatchPublicationEvidence ? "primary" : "warning")}</article><a class="secondary-button" href="https://github.com/dzhdingzihang/xuangu/actions" target="_blank" rel="noopener noreferrer">查看最近一次任务 ${icon("ph-arrow-square-out")}</a></aside></section>`;
+    </div></article><aside class="health-side"><article class="panel"><header class="panel-header"><div><h3 class="panel-title">实际更新机制</h3><p class="panel-subtitle">纯云端批次快照，不依赖个人设备</p></div>${badge(scheduler.readinessLabel, scheduler.readinessTone)}</header><dl><dt>GitHub Actions 主调度</dt><dd>${esc(scheduler.primaryLabel)}</dd><dt>Cloudflare dispatch（可选）</dt><dd>${esc(scheduler.cloudflareDispatchLabel)}</dd><dt>调度合同</dt><dd>${esc(scheduler.gapLabel)}</dd><dt>30 分钟 watchdog</dt><dd>${esc(scheduler.watchdogLabel)}；${esc(scheduler.watchdogDetail)}</dd><dt>调度证据状态</dt><dd>${badge(scheduler.readinessLabel, scheduler.readinessTone)}</dd><dt>研究决策可用</dt><dd>${badge(scheduler.readinessLayers.research.label, scheduler.readinessLayers.research.tone)}</dd><dt>检查点证据可用</dt><dd>${badge(scheduler.readinessLayers.checkpoint.label, scheduler.readinessLayers.checkpoint.tone)}</dd><dt>无人值守刷新可用</dt><dd>${badge(scheduler.readinessLayers.unattended.label, scheduler.readinessLayers.unattended.tone)}</dd><dt>校准执行可用</dt><dd>${badge(scheduler.readinessLayers.calibrated.label, scheduler.readinessLayers.calibrated.tone)}</dd><dt>发布 SLO</dt><dd>${esc(scheduler.publicationSlo)}</dd><dt>最近批次证据</dt><dd>${esc(scheduler.batchEvidence)}</dd><dt>24 小时覆盖证据</dt><dd>${esc(scheduler.checkpointEvidence)}</dd><dt>标准主检查点（配置口径）</dt><dd>工作日北京时间 ${esc(primarySchedule)}</dd><dt>标准 watchdog（配置口径）</dt><dd>工作日北京时间 ${esc(fallbackSchedule)}；不表示已触发</dd><dt>美股盘后主检查点</dt><dd>北京时间 ${esc(scheduler.usPrimaryCheckpoints)}；${esc(scheduler.usScheduleDays)}，仅匹配纽约 16:17 的时段有效</dd><dt>美股盘后 watchdog</dt><dd>北京时间 ${esc(scheduler.usWatchdogCheckpoints)}；${esc(scheduler.usScheduleDays)}</dd><dt>快照生成</dt><dd>${esc(dateTime(status.snapshot_as_of || state.snapshot?.generated_at))}</dd><dt>下次实际自动刷新</dt><dd>${scheduler.nextActiveRefresh ? esc(dateTime(scheduler.nextActiveRefresh)) : "未知（状态 API 合同不可用）"}</dd><dt>交易日窗口</dt><dd>XSHG / XHKG / XNYS 真实日历</dd><dt>结果跟踪</dt><dd>规则资格随每日快照留档；校准可执行预测第 10 个交易日后结算</dd></dl></article><article class="panel"><header class="panel-header"><div><h3 class="panel-title">发布证据不等于主调度或决策可用</h3></div></header><p>${scheduler.activeMode ? `状态 API 已明确实际自动刷新路径为 ${esc(scheduler.activeMode)}；` : "状态 API 与 gate-status 不足时，主调度和 watchdog 必须显示未知；"}发布 SLO 只是可观测服务目标，不是 GitHub、公开数据源或市场行情的保证。最近批次发布证据也不代表决策数据完整。</p>${badge(scheduler.schedulerReadiness === "INITIALIZING" ? "证据初始化中" : scheduler.hasBatchPublicationEvidence ? "最近批次：有发布证据" : "最近批次：证据未知", scheduler.hasBatchPublicationEvidence ? "primary" : "warning")}</article><a class="secondary-button" href="https://github.com/dzhdingzihang/xuangu/actions" target="_blank" rel="noopener noreferrer">查看最近一次任务 ${icon("ph-arrow-square-out")}</a></aside></section>`;
 }
 
 function renderActiveTab() {
@@ -4693,8 +5107,8 @@ function handleClick(event) {
 function handleChange(event) {
   if (event.target.id === "candidateRisk") { state.candidateFilters.risk = event.target.value; renderCandidates(); }
   if (event.target.id === "candidateRoute") { state.candidateFilters.route = event.target.value; renderCandidates(); }
-  if (event.target.id === "eventType") { state.eventFilters.type = event.target.value; renderEvents(); }
-  if (event.target.id === "eventDirection") { state.eventFilters.direction = event.target.value; renderEvents(); }
+  if (event.target.id === "eventType") { state.eventFilters.type = event.target.value; void reloadPagedResource("events"); }
+  if (event.target.id === "eventDirection") { state.eventFilters.direction = event.target.value; void reloadPagedResource("events"); }
   if (event.target.id === "historyAction") { state.historyAction = event.target.value; renderHistory(); }
 }
 

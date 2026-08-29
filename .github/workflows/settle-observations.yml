@@ -6,6 +6,10 @@ on:
     # Weekend runs can settle Friday/Saturday-matured US observations without
     # waiting until Monday.
     - cron: "30 22 * * *"
+    # Beijing 12:30 idempotent watchdog. GitHub schedules are best-effort and
+    # may create the 06:30 run hours late; a second pass closes that gap without
+    # changing already-settled immutable outcomes.
+    - cron: "30 4 * * *"
   workflow_dispatch:
 
 permissions: {}

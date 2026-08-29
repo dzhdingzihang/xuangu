@@ -61,6 +61,37 @@ def fixture(root: pathlib.Path) -> dict:
 
 
 class PublishDataAssetsTests(unittest.TestCase):
+    def test_publication_slo_measures_checkpoint_to_publication_and_initializes_unknown(self) -> None:
+        manifest = {
+            "generated_at": "2026-08-29T01:30:00+00:00",
+            "scheduler_health": {
+                "scheduler_readiness": "READY",
+                "generation_delay_seconds": 1800,
+                "publication_slo_seconds": 2700,
+            },
+        }
+        ready = publish_data_assets.publication_manifest(
+            manifest,
+            published_at="2026-08-29T01:50:00+00:00",
+        )
+        self.assertEqual(ready["scheduler_health"]["publication_delay_seconds"], 1200)
+        self.assertEqual(
+            ready["scheduler_health"]["checkpoint_publication_delay_seconds"], 3000
+        )
+        self.assertFalse(ready["scheduler_health"]["publication_within_slo"])
+
+        initializing = publish_data_assets.publication_manifest(
+            {
+                **manifest,
+                "scheduler_health": {
+                    **manifest["scheduler_health"],
+                    "scheduler_readiness": "INITIALIZING",
+                },
+            },
+            published_at="2026-08-29T01:50:00+00:00",
+        )
+        self.assertIsNone(initializing["scheduler_health"]["publication_within_slo"])
+
     def test_immutable_objects_are_verified_before_alias_switch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = pathlib.Path(temporary)

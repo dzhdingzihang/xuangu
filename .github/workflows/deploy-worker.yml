@@ -4,8 +4,21 @@ on:
   push:
     branches: [main]
   schedule:
-    # GitHub native schedules are watchdogs. Cloudflare owns the primary
-    # checkpoints only after its dedicated dispatch token is provisioned.
+    # GitHub Actions is the device-free primary scheduler.  These invocations
+    # do not depend on a Cloudflare workflow-dispatch token.
+    - cron: "17 0 * * 1-5"
+    - cron: "17 2 * * 1-5"
+    - cron: "17 4 * * 1-5"
+    - cron: "17 7 * * 1-5"
+    - cron: "17 8 * * 1-5"
+    - cron: "17 12 * * 1-5"
+    - cron: "47 14 * * 1-5"
+    # US post-close primary invocations; schedule_gate admits only the UTC
+    # expression that currently maps to 16:17 America/New_York.
+    - cron: "17 20 * * 1-5"
+    - cron: "17 21 * * 1-5"
+    # Thirty-minute GitHub watchdogs repair a primary checkpoint only when the
+    # complete production snapshot does not already cover it.
     - cron: "47 0 * * 1-5"
     - cron: "47 2 * * 1-5"
     - cron: "47 4 * * 1-5"
@@ -50,6 +63,7 @@ jobs:
       should_publish: ${{ steps.publish_guard.outputs.should_publish }}
       snapshot_key: ${{ steps.snapshot_bundle.outputs.snapshot_key }}
       snapshot_sha256: ${{ steps.snapshot_bundle.outputs.snapshot_sha256 }}
+      has_checkpoint_receipt: ${{ steps.checkpoint_receipt.outputs.created }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -444,6 +458,34 @@ jobs:
               raise SystemExit(f"rollback snapshot identity verification failed: {last_error}")
           PY
 
+      - name: Create verified scheduler checkpoint receipt
+        id: checkpoint_receipt
+        if: steps.trigger_context.outputs.scheduled_like == 'true' && steps.schedule_gate.outputs.should_run == 'true' && steps.publish_guard.outputs.should_publish == 'true' && steps.verify_deployment.outcome == 'success'
+        run: |
+          set -euo pipefail
+          receipt_root="${RUNNER_TEMP}/scheduler-checkpoint-receipt-${GITHUB_RUN_ID}"
+          receipt_name="ghrun_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}.json"
+          mkdir -p "${receipt_root}"
+          python scripts/scheduler_checkpoint_ledger.py create \
+            --snapshot data/picks/latest.json \
+            --output "${receipt_root}/${receipt_name}" \
+            --workflow-run-id "${GITHUB_RUN_ID}" \
+            --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-sha "${GITHUB_SHA}" \
+            --publication-backend embedded
+          python scripts/scheduler_checkpoint_ledger.py validate \
+            "${receipt_root}/${receipt_name}"
+          echo "created=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload verified scheduler checkpoint receipt
+        if: steps.checkpoint_receipt.outputs.created == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: scheduler-checkpoint-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/scheduler-checkpoint-receipt-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 30
+
   archive:
     needs: deploy
     if: needs.deploy.result == 'success' && needs.deploy.outputs.should_archive == 'true' && needs.deploy.outputs.should_publish != 'false'
@@ -604,4 +646,133 @@ jobs:
           done
 
           echo "Archive failed after 3 bounded attempts; marking workflow red." >&2
+          exit 1
+
+  checkpoint-ledger:
+    needs: deploy
+    if: needs.deploy.result == 'success' && needs.deploy.outputs.has_checkpoint_receipt == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Download verified scheduler checkpoint receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: scheduler-checkpoint-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/scheduler-checkpoint-receipt
+
+      - name: Persist only the immutable scheduler receipt
+        run: |
+          set -uo pipefail
+          mapfile -d '' receipts < <(
+            find "${RUNNER_TEMP}/scheduler-checkpoint-receipt" \
+              -type f -name 'ghrun_*.json' -print0
+          )
+          if ((${#receipts[@]} != 1)); then
+            echo "Expected exactly one verified scheduler receipt; found ${#receipts[@]}" >&2
+            exit 1
+          fi
+          receipt_source="${receipts[0]}"
+          receipt_name="$(basename "${receipt_source}")"
+          python scripts/scheduler_checkpoint_ledger.py validate "${receipt_source}"
+
+          push_receipt_with_scoped_token() {
+            receipt_tree="$1"
+            auth_header="$(printf 'x-access-token:%s' '${{ github.token }}' | base64 | tr -d '\n')"
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}" \
+              git -C "${receipt_tree}" push origin HEAD:main
+            push_status="$?"
+            unset auth_header
+            return "${push_status}"
+          }
+
+          for attempt in 1 2 3; do
+            echo "Scheduler receipt push attempt ${attempt}/3"
+            if ! git fetch --prune origin main; then
+              echo "Fetch failed before scheduler receipt attempt ${attempt}" >&2
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            attempt_root="$(mktemp -d "${RUNNER_TEMP}/xuangu-scheduler-receipt-${attempt}-XXXXXX")"
+            receipt_tree="${attempt_root}/worktree"
+            if ! git worktree add --detach "${receipt_tree}" origin/main; then
+              echo "Unable to create scheduler receipt worktree on attempt ${attempt}" >&2
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            target_relative="data/outcomes/scheduler-checkpoints/${receipt_name}"
+            if ! python "${receipt_tree}/scripts/scheduler_checkpoint_ledger.py" install \
+              "${receipt_source}" \
+              --directory "${receipt_tree}/data/outcomes/scheduler-checkpoints"; then
+              echo "Scheduler receipt conflicts with immutable main evidence" >&2
+              git worktree remove --force "${receipt_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            if ! git -C "${receipt_tree}" add -- "${target_relative}"; then
+              echo "Scheduler receipt staging failed on attempt ${attempt}" >&2
+              git worktree remove --force "${receipt_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            staged_paths="$(git -C "${receipt_tree}" diff --cached --name-only)"
+            if [ -n "${staged_paths}" ] && [ "${staged_paths}" != "${target_relative}" ]; then
+              echo "Refusing to commit anything except ${target_relative}: ${staged_paths}" >&2
+              git worktree remove --force "${receipt_tree}"
+              exit 1
+            fi
+            if git -C "${receipt_tree}" diff --cached --quiet; then
+              echo "Scheduler receipt ${receipt_name} is already persisted."
+              git worktree remove "${receipt_tree}"
+              exit 0
+            fi
+            git -C "${receipt_tree}" config user.name "github-actions[bot]"
+            git -C "${receipt_tree}" config user.email \
+              "41898282+github-actions[bot]@users.noreply.github.com"
+            if ! git -C "${receipt_tree}" commit \
+              -m "Record scheduler checkpoint ${receipt_name} [skip ci]"; then
+              echo "Scheduler receipt commit failed on attempt ${attempt}" >&2
+              git worktree remove --force "${receipt_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            if ! git fetch --prune origin main || \
+              ! git -C "${receipt_tree}" rebase origin/main; then
+              echo "Scheduler receipt rebase failed on attempt ${attempt}" >&2
+              git -C "${receipt_tree}" rebase --abort >/dev/null 2>&1 || :
+              git worktree remove --force "${receipt_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            if ! python "${receipt_tree}/scripts/scheduler_checkpoint_ledger.py" validate \
+              "${receipt_tree}/${target_relative}"; then
+              echo "Scheduler receipt validation changed after rebase" >&2
+              git worktree remove --force "${receipt_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            if push_receipt_with_scoped_token "${receipt_tree}"; then
+              git worktree remove "${receipt_tree}"
+              echo "Scheduler receipt ${receipt_name} persisted successfully."
+              exit 0
+            fi
+            echo "Scheduler receipt push conflicted on attempt ${attempt}" >&2
+            git worktree remove --force "${receipt_tree}"
+            sleep "$((attempt * 5))"
+          done
+
+          echo "Scheduler receipt persistence failed after 3 bounded attempts" >&2
           exit 1

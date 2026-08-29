@@ -14,8 +14,13 @@ class HorizonRangeTests(unittest.TestCase):
 
         self.assertEqual(two["horizon_trade_days"], 2)
         self.assertEqual(ten["horizon_trade_days"], 10)
+        self.assertEqual(two["contract_version"], "horizon-range-v1")
         self.assertEqual(two["method_id"], "realized-vol-drift-shadow-v1")
         self.assertFalse(two["calibrated"])
+        self.assertEqual(two["source_observations"], 20)
+        self.assertEqual(two["text"], f"{two['low_pct']:+.1f}% ~ {two['high_pct']:+.1f}%")
+        self.assertEqual(two["source_window_start_date"], rows[-21]["date"])
+        self.assertEqual(two["source_window_end_date"], rows[-1]["date"])
         self.assertLess(two["low_pct"], 0)
         self.assertGreater(two["high_pct"], 0)
         self.assertNotEqual((two["low_pct"], two["high_pct"]), (ten["low_pct"], ten["high_pct"]))
@@ -29,6 +34,21 @@ class HorizonRangeTests(unittest.TestCase):
         self.assertEqual(candidate["estimated_10d_range"]["horizon_trade_days"], 10)
         self.assertEqual(candidate["estimated_2w_range"], candidate["estimated_10d_range"])
         self.assertIsNot(candidate["estimated_2w_range"], candidate["estimated_10d_range"])
+
+    def test_missing_source_dates_are_omitted_instead_of_fabricated(self) -> None:
+        rows = [{"close": 100 + index} for index in range(8)]
+
+        estimated = server.estimate_horizon_range(
+            rows,
+            "us",
+            10,
+            confidence=60,
+            risk_count=0,
+        )
+
+        self.assertEqual(estimated["source_observations"], 7)
+        self.assertNotIn("source_window_start_date", estimated)
+        self.assertNotIn("source_window_end_date", estimated)
 
 
 if __name__ == "__main__":

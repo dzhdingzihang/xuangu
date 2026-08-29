@@ -200,9 +200,29 @@ def publication_manifest(manifest: dict, published_at: str | None = None) -> dic
         publication_delay = max(0, int((published - generated).total_seconds()))
     except (TypeError, ValueError):
         publication_delay = None
+    generation_delay = health.get("generation_delay_seconds")
+    checkpoint_publication_delay = (
+        generation_delay + publication_delay
+        if isinstance(generation_delay, int)
+        and not isinstance(generation_delay, bool)
+        and isinstance(publication_delay, int)
+        else None
+    )
     health.update(
         {
             "publication_delay_seconds": publication_delay,
+            "checkpoint_publication_delay_seconds": checkpoint_publication_delay,
+            "publication_slo_seconds": int(health.get("publication_slo_seconds") or 45 * 60),
+            "publication_within_slo": (
+                None
+                if health.get("scheduler_readiness") == "INITIALIZING"
+                else (
+                    checkpoint_publication_delay
+                    <= int(health.get("publication_slo_seconds") or 45 * 60)
+                    if isinstance(checkpoint_publication_delay, int)
+                    else None
+                )
+            ),
             "published_at": result["published_at"],
         }
     )

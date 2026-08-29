@@ -5,7 +5,30 @@ import json
 import math
 import unittest
 
-from production_rule_model import build_production_decision, build_production_rule_inputs
+from production_rule_model import (
+    build_production_decision,
+    build_production_rule_inputs,
+    production_rule_inputs_sha256,
+)
+
+
+def horizon_range(low_pct=-4.1, high_pct=5.8, *, observations=20):
+    try:
+        text = f"{float(low_pct):+.1f}% ~ {float(high_pct):+.1f}%"
+    except (TypeError, ValueError):
+        text = "invalid"
+    return {
+        "contract_version": "horizon-range-v1",
+        "low_pct": low_pct,
+        "high_pct": high_pct,
+        "text": text,
+        "horizon_trade_days": 10,
+        "method_id": "realized-vol-drift-shadow-v1",
+        "calibrated": False,
+        "source_observations": observations,
+        "source_window_start_date": "2026-07-28",
+        "source_window_end_date": "2026-08-25",
+    }
 
 
 def candidate(**overrides):
@@ -21,7 +44,7 @@ def candidate(**overrides):
         "priority_components": {"data_quality": 20.0},
         "event_candidate_scanned": True,
         "verified_positive_event_ids": ["evt-1", "evt-2"],
-        "estimated_10d_range": {"low_pct": -4.1, "high_pct": 5.8},
+        "estimated_10d_range": horizon_range(),
         "entry_price": 80.0,
         "calendar_id": "XHKG",
         "calendar_version": "test-v1",
@@ -33,6 +56,12 @@ def candidate(**overrides):
         "shadow_model": {"probability": 0.88},
     }
     row.update(overrides)
+    estimated_range = row.get("estimated_10d_range")
+    if isinstance(estimated_range, dict) and "contract_version" not in estimated_range:
+        row["estimated_10d_range"] = horizon_range(
+            estimated_range.get("low_pct"),
+            estimated_range.get("high_pct"),
+        )
     return row
 
 
@@ -96,7 +125,7 @@ class ProductionRuleModelTests(unittest.TestCase):
         source["production_rule_inputs"] = inputs
         decision = build_production_decision(source)
 
-        self.assertEqual(inputs["contract_version"], "production-rule-inputs-v2")
+        self.assertEqual(inputs["contract_version"], "production-rule-inputs-v3")
         self.assertEqual(inputs["evaluated_candidate_count"], 2)
         self.assertRegex(inputs["ledger_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(
@@ -148,7 +177,7 @@ class ProductionRuleModelTests(unittest.TestCase):
         self.assertEqual(sum("candidate_snapshot" in entry for entry in inputs["rows"]), 1)
         self.assertLess(
             len(json.dumps(inputs, ensure_ascii=False, separators=(",", ":"))),
-            512 * 1024,
+            768 * 1024,
         )
 
     def test_emits_independent_rule_candidate_without_probability_claims(self):
@@ -196,7 +225,7 @@ class ProductionRuleModelTests(unittest.TestCase):
 
         plan = build_production_decision(source)["primary"]["ten_day_trade_plan"]
 
-        self.assertEqual(plan["contract_version"], "ten-day-trade-plan-v1")
+        self.assertEqual(plan["contract_version"], "ten-day-trade-plan-v2")
         self.assertEqual(plan["status"], "REVIEW_REQUIRED")
         self.assertEqual(plan["reference_quote"]["price"], 80.0)
         self.assertEqual(plan["reference_quote"]["source_as_of"], "2026-08-25T16:08:00+08:00")
@@ -206,7 +235,53 @@ class ProductionRuleModelTests(unittest.TestCase):
         self.assertEqual(plan["position_limit"]["max_single_name_weight_pct"], 10.0)
         self.assertEqual(plan["catalyst_expiry_date"], "2026-09-08")
         self.assertEqual(plan["review_end_trade_date"], "2026-09-08")
+        self.assertEqual(plan["scenario_range"], horizon_range())
         self.assertFalse(plan["is_personalized_advice"])
+
+    def test_range_provenance_is_frozen_and_tampering_fails_closed(self):
+        source = snapshot(candidate())
+        inputs = build_production_rule_inputs(source)
+        source["production_rule_inputs"] = inputs
+        decision = build_production_decision(source)
+
+        frozen_range = inputs["rows"][0]["estimated_10d_range"]
+        self.assertEqual(frozen_range, horizon_range())
+        self.assertEqual(decision["primary"]["estimated_10d_range"], frozen_range)
+        self.assertEqual(decision["primary"]["ten_day_trade_plan"]["scenario_range"], frozen_range)
+
+        tampered = copy.deepcopy(source)
+        tampered_range = tampered["production_rule_inputs"]["rows"][0]["estimated_10d_range"]
+        tampered_range["method_id"] = "untrusted-method"
+        tampered["production_rule_inputs"]["ledger_sha256"] = production_rule_inputs_sha256(
+            tampered["production_rule_inputs"]
+        )
+        rebuilt = build_production_decision(tampered)
+        self.assertEqual(rebuilt["action"], "NO_QUALIFIED_PICK")
+        self.assertIn(
+            "TEN_DAY_RANGE_PROVENANCE_INVALID",
+            rebuilt["evaluated_candidates"][0]["blocker_codes"],
+        )
+
+    def test_legacy_v2_ledger_rebuilds_the_v1_plan_unchanged(self):
+        source = snapshot(candidate())
+        inputs = build_production_rule_inputs(source)
+        inputs["contract_version"] = "production-rule-inputs-v2"
+        for row in inputs["rows"]:
+            estimated_range = row.get("estimated_10d_range") or {}
+            row["estimated_10d_range"] = {
+                key: estimated_range.get(key) for key in ("low_pct", "high_pct")
+            }
+        inputs["ledger_sha256"] = production_rule_inputs_sha256(inputs)
+        source["production_rule_inputs"] = inputs
+
+        decision = build_production_decision(source)
+
+        self.assertEqual(decision["action"], "QUALIFIED_PICK")
+        self.assertEqual(
+            decision["primary"]["ten_day_trade_plan"]["contract_version"],
+            "ten-day-trade-plan-v1",
+        )
+        self.assertNotIn("scenario_range", decision["primary"]["ten_day_trade_plan"])
 
     def test_publishes_exact_dual_track_policy(self):
         policy = build_production_decision(snapshot(candidate()))["policy"]

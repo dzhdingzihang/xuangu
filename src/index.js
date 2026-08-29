@@ -33,7 +33,7 @@ const FALLBACK_CHECKPOINTS = [
 const SCHEDULED_REFRESH_CHECKPOINTS = [...WEEKDAY_CHECKPOINTS, ...FALLBACK_CHECKPOINTS]
   .sort(([leftHour, leftMinute], [rightHour, rightMinute]) =>
     leftHour * 60 + leftMinute - (rightHour * 60 + rightMinute));
-const CLOUDFLARE_PRIMARY_UTC_SCHEDULES = [
+const GITHUB_PRIMARY_UTC_SCHEDULES = [
   { minute: 17, hours: [0, 2, 4, 7, 8, 12] },
   { minute: 47, hours: [14] },
   { minute: 17, hours: [20, 21], newYorkHour: 16 },
@@ -48,8 +48,10 @@ const LIVE_CACHE_TTL_MS = 10_000;
 const WORKER_RUNTIME_CONTRACT_VERSION = "worker-runtime-v1";
 const WORKER_LIVE_INDEX_CONTRACT_VERSION = "worker-live-index-v1";
 const WORKER_UI_BOOTSTRAP_CONTRACT_VERSION = "ui-bootstrap-v1";
-const WORKER_UI_CANDIDATES_CONTRACT_VERSION = "ui-candidates-v1";
-const WORKER_UI_EVENTS_CONTRACT_VERSION = "ui-events-v1";
+const WORKER_UI_CANDIDATES_CONTRACT_VERSION = "ui-candidates-v2";
+const WORKER_UI_EVENTS_CONTRACT_VERSION = "ui-events-v2";
+const EVENT_LIST_CONTRACT_VERSION = "event-list-v2";
+const EVENT_ORDERING_CONTRACT_VERSION = "decision-bound-first-then-published-desc-v1";
 const DATA_MANIFEST_CONTRACT_VERSION = "data-manifest-v1";
 const DATA_MANIFEST_KEY = "latest-manifest.json";
 const EMBEDDED_DATA_MANIFEST_PATH = "/data/latest-manifest.json";
@@ -222,9 +224,8 @@ function checkpointIso(parts, checkpoint) {
 }
 
 export function nextScheduledRefresh(current = new Date()) {
-  // Compatibility export: without an explicit environment the only active
-  // production path is the GitHub watchdog schedule.
-  return nextActiveRefresh(current, false);
+  // The repository-owned GitHub Actions schedule is the production primary.
+  return nextActiveRefresh(current, true);
 }
 
 function shanghaiIsoForInstant(value) {
@@ -237,7 +238,7 @@ export function nextActiveRefresh(current = new Date(), primaryEnabled = false) 
   const now = current instanceof Date ? current : new Date(current);
   if (Number.isNaN(now.getTime())) return null;
   const schedules = primaryEnabled
-    ? CLOUDFLARE_PRIMARY_UTC_SCHEDULES
+    ? GITHUB_PRIMARY_UTC_SCHEDULES
     : GITHUB_WATCHDOG_UTC_SCHEDULES;
   const candidates = [];
   const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
@@ -269,7 +270,7 @@ export function latestActiveCheckpoint(current = new Date(), primaryEnabled = fa
   const now = current instanceof Date ? current : new Date(current);
   if (Number.isNaN(now.getTime())) return null;
   const schedules = primaryEnabled
-    ? CLOUDFLARE_PRIMARY_UTC_SCHEDULES
+    ? GITHUB_PRIMARY_UTC_SCHEDULES
     : GITHUB_WATCHDOG_UTC_SCHEDULES;
   const candidates = [];
   const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
@@ -524,7 +525,7 @@ function stableV3QualificationId(snapshot, market, code, contractVersion = 4) {
   return `qual_${sha256RuleText(identity).slice(0, 24)}`;
 }
 
-function frozenV3SourceProjection(source, index) {
+function frozenV3SourceProjection(source, index, inputContractVersion = "production-rule-inputs-v2") {
   const result = {
     input_index: index,
     market: ruleText(source?.market),
@@ -540,8 +541,15 @@ function frozenV3SourceProjection(source, index) {
   }
   if (source?.estimated_10d_range && typeof source.estimated_10d_range === "object"
     && !Array.isArray(source.estimated_10d_range)) {
+    const rangeFields = inputContractVersion === "production-rule-inputs-v3"
+      ? [
+        "contract_version", "low_pct", "high_pct", "text",
+        "horizon_trade_days", "method_id", "calibrated",
+        "source_observations", "source_window_start_date", "source_window_end_date",
+      ]
+      : ["low_pct", "high_pct"];
     result.estimated_10d_range = Object.fromEntries(
-      ["low_pct", "high_pct"]
+      rangeFields
         .filter((field) => Object.hasOwn(source.estimated_10d_range, field))
         .map((field) => [field, source.estimated_10d_range[field]]),
     );
@@ -556,7 +564,7 @@ function v3RuleInputContext(snapshot) {
   const isV3 = inputs?.contract_version === "production-rule-inputs-v1"
     && inputs?.action_basis === PRODUCTION_RULE_V3_ACTION_BASIS
     && inputs?.rule_model_id === PRODUCTION_RULE_V3_MODEL_ID;
-  const isV4 = inputs?.contract_version === "production-rule-inputs-v2"
+  const isV4 = ["production-rule-inputs-v2", "production-rule-inputs-v3"].includes(inputs?.contract_version)
     && inputs?.action_basis === PRODUCTION_RULE_V4_ACTION_BASIS
     && inputs?.rule_model_id === PRODUCTION_RULE_V4_MODEL_ID;
   if (
@@ -592,15 +600,63 @@ function v3RuleInputContext(snapshot) {
         "candidate_snapshot",
       ].includes(field)),
     );
-    if (!contractDeepEqual(frozenInput, frozenV3SourceProjection(source, index))) return null;
+    if (!contractDeepEqual(frozenInput, frozenV3SourceProjection(source, index, inputs.contract_version))) return null;
     const key = `${market}:${code}`;
     if (byIdentity.has(key)) return null;
     byIdentity.set(key, { source, input });
   }
-  return { sources, inputRows, byIdentity, contractVersion: isV4 ? 4 : 3 };
+  return {
+    sources,
+    inputRows,
+    byIdentity,
+    contractVersion: isV4 ? 4 : 3,
+    inputContractVersion: inputs.contract_version,
+  };
 }
 
-function tenDayTradePlan(row, candidate, qualificationTrack) {
+function horizonRangeText(low, high) {
+  const signed = (value) => `${value >= 0 ? "+" : ""}${Number(value).toFixed(1)}%`;
+  return `${signed(low)} ~ ${signed(high)}`;
+}
+
+function canonicalHorizonRange(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const low = value.low_pct;
+  const high = value.high_pct;
+  const observations = value.source_observations;
+  if (
+    value.contract_version !== "horizon-range-v1"
+    || value.horizon_trade_days !== 10
+    || value.method_id !== "realized-vol-drift-shadow-v1"
+    || value.calibrated !== false
+    || !finiteRuleNumber(low) || !finiteRuleNumber(high) || !(low < 0 && high > 0)
+    || !Number.isInteger(observations) || observations < 0 || observations > 20
+    || value.text !== horizonRangeText(low, high)
+  ) return null;
+  const start = value.source_window_start_date;
+  const end = value.source_window_end_date;
+  if ((start === undefined || start === null) !== (end === undefined || end === null)) return null;
+  if (start !== undefined && start !== null && (
+    !validIsoDate(start) || !validIsoDate(end) || start > end
+  )) return null;
+  const result = {
+    contract_version: "horizon-range-v1",
+    low_pct: roundRuleNumber(low, 2),
+    high_pct: roundRuleNumber(high, 2),
+    text: horizonRangeText(low, high),
+    horizon_trade_days: 10,
+    method_id: "realized-vol-drift-shadow-v1",
+    calibrated: false,
+    source_observations: observations,
+  };
+  if (start !== undefined && start !== null) {
+    result.source_window_start_date = start;
+    result.source_window_end_date = end;
+  }
+  return result;
+}
+
+function tenDayTradePlan(row, candidate, qualificationTrack, inputContractVersion = "production-rule-inputs-v2") {
   const price = row?.entry_price;
   if (!finiteRuleNumber(price) || price <= 0) return null;
   const source = candidate && typeof candidate === "object" && !Array.isArray(candidate) ? candidate : {};
@@ -622,8 +678,9 @@ function tenDayTradePlan(row, candidate, qualificationTrack) {
   }
   const currency = { a_share: "CNY", hk: "HKD", us: "USD" }[row.market] || null;
   const reviewEnd = ruleText(row.forecast_end_trade_date);
-  return {
-    contract_version: "ten-day-trade-plan-v1",
+  const currentProvenance = inputContractVersion === "production-rule-inputs-v3";
+  const plan = {
+    contract_version: currentProvenance ? "ten-day-trade-plan-v2" : "ten-day-trade-plan-v1",
     status: "REVIEW_REQUIRED",
     horizon_trade_days: 10,
     reference_quote: {
@@ -663,9 +720,20 @@ function tenDayTradePlan(row, candidate, qualificationTrack) {
     ],
     is_personalized_advice: false,
   };
+  if (currentProvenance) {
+    const scenarioRange = canonicalHorizonRange(row?.estimated_10d_range);
+    if (!scenarioRange) return null;
+    plan.scenario_range = scenarioRange;
+  }
+  return plan;
 }
 
-function expectedV3RuleEvaluation(snapshot, input, contractVersion = 4) {
+function expectedV3RuleEvaluation(
+  snapshot,
+  input,
+  contractVersion = 4,
+  inputContractVersion = "production-rule-inputs-v2",
+) {
   const source = input;
   const market = ruleText(source?.market);
   const code = ruleText(source?.code || source?.symbol);
@@ -753,6 +821,9 @@ function expectedV3RuleEvaluation(snapshot, input, contractVersion = 4) {
   const low = source?.estimated_10d_range?.low_pct;
   const high = source?.estimated_10d_range?.high_pct;
   const rangeValid = finiteRuleNumber(low) && finiteRuleNumber(high) && low < 0 && high > 0;
+  const canonicalRange = inputContractVersion === "production-rule-inputs-v3"
+    ? canonicalHorizonRange(source?.estimated_10d_range)
+    : null;
   let downside = null;
   let ratio = null;
   let riskRewardStrength = 0;
@@ -768,6 +839,9 @@ function expectedV3RuleEvaluation(snapshot, input, contractVersion = 4) {
     if (downside > qualityPolicy.maximumDownside) qualityBlockers.push("QUALITY_TEN_DAY_DOWNSIDE_ABOVE_LIMIT");
     if (ratio < PRODUCTION_QUALITY_MIN_RISK_REWARD) qualityBlockers.push("QUALITY_RISK_REWARD_BELOW_THRESHOLD");
     riskRewardStrength = clampRuleNumber(ratio / 2 * 100);
+    if (inputContractVersion === "production-rule-inputs-v3" && !canonicalRange) {
+      blockBoth("TEN_DAY_RANGE_PROVENANCE_INVALID");
+    }
   }
 
   const components = {
@@ -828,7 +902,7 @@ function expectedV3RuleEvaluation(snapshot, input, contractVersion = 4) {
     calendar_version: ruleText(source.calendar_version),
     entry_trade_date: ruleText(source.entry_trade_date),
     forecast_end_trade_date: ruleText(source.forecast_end_trade_date),
-    estimated_10d_range: {
+    estimated_10d_range: canonicalRange || {
       low_pct: rangeValid ? roundRuleNumber(low) : null,
       high_pct: rangeValid ? roundRuleNumber(high) : null,
       horizon_trade_days: 10,
@@ -853,6 +927,7 @@ function expectedV3RuleEvaluation(snapshot, input, contractVersion = 4) {
         row,
         row.candidate_snapshot || input.candidate_snapshot,
         qualificationTrack,
+        inputContractVersion,
       );
     }
   }
@@ -869,7 +944,12 @@ function validV3QualifiedRow(row, decision, snapshot, context = null) {
   const code = ruleText(row.code || row.symbol);
   const sourceContext = ruleContext.byIdentity.get(`${market}:${code}`);
   if (!sourceContext) return false;
-  const expected = expectedV3RuleEvaluation(snapshot, sourceContext.input, contractVersion);
+  const expected = expectedV3RuleEvaluation(
+    snapshot,
+    sourceContext.input,
+    contractVersion,
+    ruleContext.inputContractVersion,
+  );
   if (!expected || expected.status !== "QUALIFIED" || !contractDeepEqual(row, expected)) return false;
   if (
     !row.candidate_snapshot || typeof row.candidate_snapshot !== "object" || Array.isArray(row.candidate_snapshot)
@@ -921,7 +1001,12 @@ function validatedV3DecisionRows(snapshot, decision) {
 
   const rebuiltEvaluated = [];
   for (const input of context.inputRows) {
-    const rebuilt = expectedV3RuleEvaluation(snapshot, input, contractVersion);
+    const rebuilt = expectedV3RuleEvaluation(
+      snapshot,
+      input,
+      contractVersion,
+      context.inputContractVersion,
+    );
     if (!rebuilt) return null;
     rebuiltEvaluated.push(rebuilt);
   }
@@ -1338,7 +1423,10 @@ function validLiveIndexContract(index) {
   return actualCount === index.candidate_count;
 }
 
-async function latestRuntime(env) {
+async function latestRuntime(env, includeGeneration = false) {
+  const result = (runtime, manifest = null) => (
+    includeGeneration ? { runtime, manifest } : runtime
+  );
   const generation = await loadDataGeneration(env, ["runtime"]);
   const publishedRuntime = generation?.assets?.runtime || null;
   if (publishedRuntime) {
@@ -1346,7 +1434,7 @@ async function latestRuntime(env) {
       !validRuntimeIdentity(publishedRuntime, WORKER_RUNTIME_CONTRACT_VERSION)
       || !validSourceSnapshotBinding(publishedRuntime)
     ) throw new Error("manifest-bound worker runtime identity is invalid");
-    return publishedRuntime;
+    return result(publishedRuntime, generation.manifest);
   }
   if (await currentDataManifest(env)) {
     throw new Error("manifest-bound worker runtime asset is unavailable");
@@ -1356,16 +1444,16 @@ async function latestRuntime(env) {
     if (
       legacyFullSnapshotFallbackEnabled(env)
       && !Object.hasOwn(runtime, "contract_version")
-    ) return latestPick(env);
+    ) return result(await latestPick(env));
     if (
       !validRuntimeIdentity(runtime, WORKER_RUNTIME_CONTRACT_VERSION)
       || !validSourceSnapshotBinding(runtime)
     ) {
       throw new Error("worker runtime identity is invalid");
     }
-    return runtime;
+    return result(runtime);
   }
-  if (legacyFullSnapshotFallbackEnabled(env)) return latestPick(env);
+  if (legacyFullSnapshotFallbackEnabled(env)) return result(await latestPick(env));
   throw new Error("worker runtime asset is unavailable");
 }
 
@@ -2062,19 +2150,51 @@ function snapshotLiveContract(snapshot, market, code, current = new Date(), prim
 }
 
 function schedulerPrimaryEnabled(env = {}) {
+  return String(env?.GITHUB_ACTIONS_SCHEDULER_ENABLED ?? "1") !== "0";
+}
+
+function cloudflareDispatchEnabled(env = {}) {
   return String(env?.CLOUDFLARE_SCHEDULER_ENABLED || "") === "1"
     && Boolean(String(env?.GITHUB_WORKFLOW_DISPATCH_TOKEN || ""));
 }
 
-function buildStatusPayload(latest, current = new Date(), env = {}) {
+function buildStatusPayload(latest, current = new Date(), env = {}, schedulerHealth = {}) {
   const productionDecision = latest ? productionDecisionForRuntime(latest) : null;
   const currentTime = nowCN();
   const primaryEnabled = schedulerPrimaryEnabled(env);
+  const optionalDispatchEnabled = cloudflareDispatchEnabled(env);
   const snapshotUse = snapshotUseContract(latest, current, primaryEnabled);
   const freshness = snapshotFreshness(
     latest?.generated_at || null,
     current,
     primaryEnabled,
+  );
+  const health = schedulerHealth && typeof schedulerHealth === "object" && !Array.isArray(schedulerHealth)
+    ? schedulerHealth
+    : {};
+  const checkpointEvidenceReady = health.checkpoint_evidence_ready === true;
+  const schedulerReadiness = typeof health.scheduler_readiness === "string"
+    ? health.scheduler_readiness
+    : "UNAVAILABLE";
+  const publicationWithinSlo = typeof health.publication_within_slo === "boolean"
+    ? health.publication_within_slo
+    : null;
+  const researchDecisionReady = Boolean(
+    latest && productionDecision && snapshotUse.current_decision_allowed,
+  );
+  const calibratedDecision = latest?.global_decision;
+  const calibratedExecutionReady = Boolean(
+    snapshotUse.execution_review_allowed
+    && calibratedDecision?.action === "REVIEW_EXECUTABLE_PICK"
+    && calibratedDecision?.calibrated === true
+    && calibratedDecision?.primary
+    && typeof calibratedDecision.primary === "object",
+  );
+  const unattendedRefreshReady = Boolean(
+    primaryEnabled
+    && checkpointEvidenceReady
+    && schedulerReadiness === "READY"
+    && publicationWithinSlo === true,
   );
   const sourceStateByMarket = Object.fromEntries(["a_share", "hk", "us"].map((market) => {
     const section = latest?.markets?.[market] || {};
@@ -2100,9 +2220,12 @@ function buildStatusPayload(latest, current = new Date(), env = {}) {
     schedule_primary_checkpoints: WEEKDAY_CHECKPOINTS.map(([hour, minute]) => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`),
     schedule_fallback_checkpoints: FALLBACK_CHECKPOINTS.map(([hour, minute]) => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`),
     scheduler_primary_enabled: primaryEnabled,
+    scheduler_primary_provider: "github_actions",
+    cloudflare_dispatch_enabled: optionalDispatchEnabled,
+    cloudflare_dispatch_optional: true,
     active_refresh_mode: primaryEnabled
-      ? "cloudflare_primary_with_github_watchdog"
-      : "github_watchdog_only",
+      ? "github_actions_primary_with_30m_watchdog"
+      : "scheduler_disabled",
     next_active_refresh: nextActiveRefresh(current, primaryEnabled),
     schedule_us_post_close: {
       contract_version: "us-post-close-schedule-v1",
@@ -2114,6 +2237,32 @@ function buildStatusPayload(latest, current = new Date(), env = {}) {
       dst_variant_selected_at_runtime: true,
     },
     recompute_supported: false,
+    readiness_contract_version: "production-readiness-v1",
+    research_decision_ready: researchDecisionReady,
+    checkpoint_evidence_ready: checkpointEvidenceReady,
+    unattended_refresh_ready: unattendedRefreshReady,
+    calibrated_execution_ready: calibratedExecutionReady,
+    scheduler_readiness: schedulerReadiness,
+    checkpoint_coverage_status: health.checkpoint_coverage_status || "UNAVAILABLE_NO_COMPLETE_LEDGER",
+    checkpoint_evidence_contract_version: health.checkpoint_evidence_contract_version || null,
+    expected_checkpoints_24h: Number.isInteger(health.expected_checkpoints_24h)
+      ? health.expected_checkpoints_24h : null,
+    published_on_time_24h: Number.isInteger(health.published_on_time_24h)
+      ? health.published_on_time_24h : null,
+    late_recoveries_24h: Number.isInteger(health.late_recoveries_24h)
+      ? health.late_recoveries_24h : null,
+    missed_checkpoints_24h: checkpointEvidenceReady && Number.isInteger(health.missed_checkpoints_24h)
+      ? health.missed_checkpoints_24h : null,
+    ledger_started_at: health.ledger_started_at || null,
+    evidence_lag_batches: Number.isInteger(health.evidence_lag_batches)
+      ? health.evidence_lag_batches : null,
+    publication_slo_seconds: Number.isInteger(health.publication_slo_seconds)
+      ? health.publication_slo_seconds : null,
+    checkpoint_publication_delay_seconds: Number.isInteger(health.checkpoint_publication_delay_seconds)
+      ? health.checkpoint_publication_delay_seconds : null,
+    publication_within_slo: publicationWithinSlo,
+    scheduler_slo: health.scheduler_slo && typeof health.scheduler_slo === "object"
+      ? health.scheduler_slo : null,
     has_latest: Boolean(latest),
     latest_path: latest ? "/data/picks/latest.json" : null,
     schema_version: latest?.schema_version || null,
@@ -2154,13 +2303,25 @@ async function currentDataManifest(env) {
 }
 
 function pageRequest(url, defaultLimit = 25, maximumLimit = 100) {
-  const pageValue = Number(url.searchParams.get("page") || 1);
-  const limitValue = Number(url.searchParams.get("limit") || defaultLimit);
-  const page = Number.isInteger(pageValue) && pageValue > 0 ? pageValue : 1;
-  const limit = Number.isInteger(limitValue)
-    ? Math.max(1, Math.min(limitValue, maximumLimit))
-    : defaultLimit;
-  return { page, limit, offset: (page - 1) * limit };
+  const positiveInteger = (field, fallback, maximum = null) => {
+    if (!url.searchParams.has(field)) return { ok: true, value: fallback };
+    const raw = String(url.searchParams.get(field) || "");
+    if (!/^[1-9]\d*$/.test(raw)) return { ok: false, field };
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || (maximum !== null && value > maximum)) {
+      return { ok: false, field };
+    }
+    return { ok: true, value };
+  };
+  const pageResult = positiveInteger("page", 1);
+  if (!pageResult.ok) return pageResult;
+  const limitResult = positiveInteger("limit", defaultLimit, maximumLimit);
+  if (!limitResult.ok) return limitResult;
+  const page = pageResult.value;
+  const limit = limitResult.value;
+  const offset = (page - 1) * limit;
+  if (!Number.isSafeInteger(offset)) return { ok: false, field: "page" };
+  return { ok: true, page, limit, offset };
 }
 
 function pageRows(rows, page) {
@@ -2175,13 +2336,130 @@ function pageRows(rows, page) {
   };
 }
 
+function parseEventBooleanFilter(searchParams, name) {
+  if (!searchParams.has(name)) return { ok: true, present: false, value: null };
+  const raw = String(searchParams.get(name) || "").trim().toLowerCase();
+  if (["1", "true"].includes(raw)) return { ok: true, present: true, value: true };
+  if (["0", "false"].includes(raw)) return { ok: true, present: true, value: false };
+  return { ok: false, field: name };
+}
+
+function parseEventApiQuery(url) {
+  const market = String(url.searchParams.get("market") || "").trim();
+  if (market && !LIVE_MARKETS.has(market)) return { ok: false, field: "market" };
+  const rawScope = String(url.searchParams.get("scope") || "all").trim().toLowerCase();
+  if (!new Set(["all", "decision_bound"]).has(rawScope)) return { ok: false, field: "scope" };
+  const decisionBound = parseEventBooleanFilter(url.searchParams, "decision_bound");
+  const decisionEligible = parseEventBooleanFilter(url.searchParams, "decision_eligible");
+  if (!decisionBound.ok) return decisionBound;
+  if (!decisionEligible.ok) return decisionEligible;
+  if (rawScope === "decision_bound" && decisionBound.present && decisionBound.value === false) {
+    return { ok: false, field: "decision_bound" };
+  }
+  const eventType = String(url.searchParams.get("event_type") || "").trim().toLowerCase();
+  const direction = String(url.searchParams.get("direction") || "").trim().toLowerCase();
+  if (direction && !new Set(["positive", "neutral", "negative"]).has(direction)) {
+    return { ok: false, field: "direction" };
+  }
+  const symbol = String(url.searchParams.get("symbol") || "").trim().toLowerCase();
+  const q = String(url.searchParams.get("q") || url.searchParams.get("issuer") || "").trim().toLowerCase();
+  if (eventType.length > 64) return { ok: false, field: "event_type" };
+  if (symbol.length > 64) return { ok: false, field: "symbol" };
+  if (q.length > 64) return { ok: false, field: "q" };
+  const eventIds = [...new Set(url.searchParams.getAll("event_id")
+    .flatMap((value) => String(value || "").split(","))
+    .map((value) => value.trim())
+    .filter(Boolean))];
+  if (eventIds.length > 50 || eventIds.some((eventId) => eventId.length > 128)) {
+    return { ok: false, field: "event_id" };
+  }
+  return {
+    ok: true,
+    market,
+    scope: rawScope,
+    decision_bound: decisionBound.present ? decisionBound.value : null,
+    decision_eligible: decisionEligible.present ? decisionEligible.value : null,
+    event_type: eventType,
+    direction,
+    symbol,
+    q,
+    event_ids: eventIds,
+  };
+}
+
+function normalizedEventDirection(value) {
+  const direction = String(value || "").trim().toLowerCase();
+  return direction === "positive" || direction === "negative" ? direction : "neutral";
+}
+
+function eventRowsForQuery(asset, query) {
+  const publication = asset?.event_publication && typeof asset.event_publication === "object"
+    ? asset.event_publication
+    : {};
+  const boundIds = new Set(Array.isArray(publication.decision_bound_event_ids)
+    ? publication.decision_bound_event_ids.map((value) => String(value))
+    : []);
+  const rawEvents = asset?.events;
+  const sourceRows = Array.isArray(rawEvents)
+    ? rawEvents
+    : Array.isArray(rawEvents?.items) ? rawEvents.items : [];
+  let rows = sourceRows.map((row, index) => ({
+    row: {
+      ...row,
+      decision_bound: row?.decision_bound === true || boundIds.has(String(row?.event_id || "")),
+    },
+    index,
+  }));
+  rows.sort((left, right) => (
+    Number(right.row.decision_bound) - Number(left.row.decision_bound)
+    || left.index - right.index
+  ));
+  rows = rows.map(({ row }) => row);
+  if (query.scope === "decision_bound") rows = rows.filter((row) => row.decision_bound === true);
+  if (query.decision_bound !== null) {
+    rows = rows.filter((row) => row.decision_bound === query.decision_bound);
+  }
+  if (query.market) rows = rows.filter((row) => row?.market === query.market);
+  if (query.decision_eligible !== null) {
+    rows = rows.filter((row) => (row?.decision_eligible === true) === query.decision_eligible);
+  }
+  if (query.event_ids.length) {
+    const wantedIds = new Set(query.event_ids);
+    rows = rows.filter((row) => wantedIds.has(String(row?.event_id || "")));
+  }
+  if (query.symbol) {
+    rows = rows.filter((row) => [row?.symbol, row?.code]
+      .some((value) => String(value || "").toLowerCase() === query.symbol));
+  }
+  if (query.event_type) {
+    rows = rows.filter((row) => String(row?.event_type || "").toLowerCase() === query.event_type);
+  }
+  if (query.direction) {
+    rows = rows.filter((row) => normalizedEventDirection(row?.direction) === query.direction);
+  }
+  if (query.q) {
+    rows = rows.filter((row) => [
+      row?.event_id, row?.issuer, row?.company, row?.name, row?.code,
+      row?.symbol, row?.title, row?.source,
+    ].some((value) => String(value || "").toLowerCase().includes(query.q)));
+  }
+  return { publication, boundIds, rows, sourceCount: sourceRows.length };
+}
+
 function schedulerGatePayload(manifestRecord, env) {
   const tokenPresent = Boolean(String(env?.GITHUB_WORKFLOW_DISPATCH_TOKEN || ""));
-  const enabled = String(env?.CLOUDFLARE_SCHEDULER_ENABLED || "") === "1" && tokenPresent;
+  const optionalDispatchConfigured = String(env?.CLOUDFLARE_SCHEDULER_ENABLED || "") === "1";
+  const optionalDispatchEnabled = optionalDispatchConfigured && tokenPresent;
+  const primaryEnabled = schedulerPrimaryEnabled(env);
+  const optionalDispatchGap = optionalDispatchEnabled
+    ? null
+    : optionalDispatchConfigured
+      ? "OPTIONAL_DISPATCH_TOKEN_NOT_PROVISIONED"
+      : "OPTIONAL_DISPATCH_DISABLED";
   if (!manifestRecord) {
     return {
       ok: false,
-      contract_version: "scheduler-health-v1",
+      contract_version: "scheduler-health-v2",
       error: "DATA_MANIFEST_UNAVAILABLE",
       snapshot_key: null,
       generated_at: null,
@@ -2199,18 +2477,48 @@ function schedulerGatePayload(manifestRecord, env) {
       missed_checkpoints_24h: null,
       checkpoint_coverage_status: "UNAVAILABLE_NO_COMPLETE_LEDGER",
       checkpoint_evidence_contract_version: null,
+      checkpoint_evidence_ready: false,
+      scheduler_readiness: "UNAVAILABLE",
+      expected_checkpoints_24h: null,
+      published_on_time_24h: null,
+      late_recoveries_24h: null,
+      ledger_started_at: null,
+      evidence_lag_batches: null,
+      publication_slo_seconds: null,
+      checkpoint_publication_delay_seconds: null,
+      publication_within_slo: null,
+      scheduler_slo: null,
       recovery_mode: null,
-      scheduler_enabled: enabled,
-      scheduler_gap: tokenPresent ? "R2_OR_EMBEDDED_MANIFEST_MISSING" : "GITHUB_WORKFLOW_DISPATCH_TOKEN_NOT_PROVISIONED",
+      scheduler_enabled: primaryEnabled,
+      scheduler_primary_enabled: primaryEnabled,
+      scheduler_primary_provider: "github_actions",
+      cloudflare_dispatch_enabled: optionalDispatchEnabled,
+      cloudflare_dispatch_optional: true,
+      cloudflare_dispatch_gap: optionalDispatchGap,
+      unattended_refresh_ready: false,
+      scheduler_gap: primaryEnabled ? "DATA_MANIFEST_UNAVAILABLE" : "GITHUB_ACTIONS_PRIMARY_DISABLED",
     };
   }
   const { backend, manifest } = manifestRecord;
   const health = manifest.scheduler_health || {};
   const checkpointCoverageStatus = health.checkpoint_coverage_status || "UNAVAILABLE_NO_COMPLETE_LEDGER";
   const checkpointEvidenceContract = health.checkpoint_evidence_contract_version || null;
+  const checkpointEvidenceReady = health.checkpoint_evidence_ready === true;
+  const schedulerReadiness = typeof health.scheduler_readiness === "string"
+    ? health.scheduler_readiness
+    : "UNAVAILABLE";
+  const publicationWithinSlo = typeof health.publication_within_slo === "boolean"
+    ? health.publication_within_slo
+    : null;
+  const unattendedRefreshReady = Boolean(
+    primaryEnabled
+    && checkpointEvidenceReady
+    && schedulerReadiness === "READY"
+    && publicationWithinSlo === true,
+  );
   return {
     ok: true,
-    contract_version: "scheduler-health-v1",
+    contract_version: "scheduler-health-v2",
     snapshot_key: manifest.snapshot_key,
     generated_at: manifest.generated_at,
     generation_started_at: health.generation_started_at || null,
@@ -2233,11 +2541,33 @@ function schedulerGatePayload(manifestRecord, env) {
       ? health.missed_checkpoints_24h : null,
     checkpoint_coverage_status: checkpointCoverageStatus,
     checkpoint_evidence_contract_version: checkpointEvidenceContract,
+    checkpoint_evidence_ready: checkpointEvidenceReady,
+    scheduler_readiness: schedulerReadiness,
+    expected_checkpoints_24h: Number.isInteger(health.expected_checkpoints_24h)
+      ? health.expected_checkpoints_24h : null,
+    published_on_time_24h: Number.isInteger(health.published_on_time_24h)
+      ? health.published_on_time_24h : null,
+    late_recoveries_24h: Number.isInteger(health.late_recoveries_24h)
+      ? health.late_recoveries_24h : null,
+    ledger_started_at: health.ledger_started_at || null,
+    evidence_lag_batches: Number.isInteger(health.evidence_lag_batches)
+      ? health.evidence_lag_batches : null,
+    publication_slo_seconds: Number.isInteger(health.publication_slo_seconds)
+      ? health.publication_slo_seconds : null,
+    checkpoint_publication_delay_seconds: Number.isInteger(health.checkpoint_publication_delay_seconds)
+      ? health.checkpoint_publication_delay_seconds : null,
+    publication_within_slo: publicationWithinSlo,
+    scheduler_slo: health.scheduler_slo && typeof health.scheduler_slo === "object"
+      ? health.scheduler_slo : null,
     recovery_mode: health.recovery_mode || "none",
-    scheduler_enabled: enabled,
-    scheduler_gap: enabled ? null : tokenPresent
-      ? "CLOUDFLARE_SCHEDULER_DISABLED"
-      : "GITHUB_WORKFLOW_DISPATCH_TOKEN_NOT_PROVISIONED",
+    scheduler_enabled: primaryEnabled,
+    scheduler_primary_enabled: primaryEnabled,
+    scheduler_primary_provider: "github_actions",
+    cloudflare_dispatch_enabled: optionalDispatchEnabled,
+    cloudflare_dispatch_optional: true,
+    cloudflare_dispatch_gap: optionalDispatchGap,
+    unattended_refresh_ready: unattendedRefreshReady,
+    scheduler_gap: primaryEnabled ? null : "GITHUB_ACTIONS_PRIMARY_DISABLED",
   };
 }
 
@@ -2286,8 +2616,8 @@ async function handleApi(request, env) {
     const digest = await derivedRepresentationDigest(
       record?.manifest?.manifest_sha256 || record?.manifest?.snapshot_sha256 || "unavailable",
       {
-        scheduler_configured: String(env?.CLOUDFLARE_SCHEDULER_ENABLED || "") === "1",
-        dispatch_token_present: Boolean(String(env?.GITHUB_WORKFLOW_DISPATCH_TOKEN || "")),
+        scheduler_primary_enabled: schedulerPrimaryEnabled(env),
+        cloudflare_dispatch_enabled: cloudflareDispatchEnabled(env),
         publication_backend: record?.backend || "unavailable",
       },
     );
@@ -2322,8 +2652,13 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === "/api/status") {
-    const latest = await latestRuntime(env);
-    return json(buildStatusPayload(latest, new Date(), env));
+    const { runtime: latest, manifest } = await latestRuntime(env, true);
+    return json(buildStatusPayload(
+      latest,
+      new Date(),
+      env,
+      manifest?.scheduler_health || {},
+    ));
   }
 
   if (url.pathname === "/api/latest") {
@@ -2340,7 +2675,12 @@ async function handleApi(request, env) {
         runtime = generation.assets.runtime;
         const latest = generation.assets.summary;
         const current = new Date();
-        const status = buildStatusPayload(runtime, current, env);
+        const status = buildStatusPayload(
+          runtime,
+          current,
+          env,
+          generation.manifest?.scheduler_health || {},
+        );
         const snapshotUse = status.snapshot_use;
         const effective = status.effective_decisions;
         return json({
@@ -2361,7 +2701,12 @@ async function handleApi(request, env) {
         runtime,
       );
       const current = new Date();
-      const status = buildStatusPayload(runtime, current, env);
+      const status = buildStatusPayload(
+        runtime,
+        current,
+        env,
+        {},
+      );
       const snapshotUse = status.snapshot_use;
       const effective = status.effective_decisions;
       return json({
@@ -2398,20 +2743,24 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === "/api/candidates") {
+    const pagination = pageRequest(url, 25, 100);
+    if (!pagination.ok) {
+      return json({ ok: false, error: "INVALID_PAGINATION", field: pagination.field }, 400);
+    }
+    const market = String(url.searchParams.get("market") || "").trim();
+    const query = String(url.searchParams.get("q") || "").trim().slice(0, 64).toLowerCase();
     try {
       const generation = await loadDataGeneration(env, ["runtime", "candidates"]);
       if (generation) {
         const runtime = generation.assets.runtime;
         const asset = generation.assets.candidates;
-        const market = String(url.searchParams.get("market") || "").trim();
-        const query = String(url.searchParams.get("q") || "").trim().slice(0, 64).toLowerCase();
         const allRows = Array.isArray(asset.candidates) ? asset.candidates : [];
         let filtered = market ? allRows.filter((row) => row?.market === market) : allRows;
         if (query) {
           filtered = filtered.filter((row) => [row?.code, row?.name]
             .some((value) => String(value || "").toLowerCase().includes(query)));
         }
-        const page = pageRows(filtered, pageRequest(url));
+        const page = pageRows(filtered, pagination);
         const snapshotUse = snapshotUseContract(runtime, new Date(), schedulerPrimaryEnabled(env));
         return json({
           contract_version: asset.contract_version,
@@ -2431,6 +2780,8 @@ async function handleApi(request, env) {
           has_more: page.has_more,
           returned_count: page.returned_count,
           candidates: page.rows,
+          role_contract_version: asset.role_contract_version,
+          production_selection: asset.production_selection,
           dual_low_model: asset.dual_low_model || {},
           snapshot_use: snapshotUse,
           effective_decisions: effectiveDecisions(runtime, snapshotUse),
@@ -2444,8 +2795,22 @@ async function handleApi(request, env) {
         runtime,
       );
       const snapshotUse = snapshotUseContract(runtime, new Date(), schedulerPrimaryEnabled(env));
+      const allRows = Array.isArray(asset.candidates) ? asset.candidates : [];
+      let filtered = market ? allRows.filter((row) => row?.market === market) : allRows;
+      if (query) {
+        filtered = filtered.filter((row) => [row?.code, row?.name]
+          .some((value) => String(value || "").toLowerCase().includes(query)));
+      }
+      const page = pageRows(filtered, pagination);
       return json({
         ...asset,
+        candidate_count: filtered.length,
+        page: page.page,
+        limit: page.limit,
+        total: page.total,
+        has_more: page.has_more,
+        returned_count: page.returned_count,
+        candidates: page.rows,
         snapshot_use: snapshotUse,
         effective_decisions: effectiveDecisions(runtime, snapshotUse),
       });
@@ -2456,28 +2821,45 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === "/api/events") {
+    const pagination = pageRequest(url, 25, 50);
+    if (!pagination.ok) {
+      return json({ ok: false, error: "INVALID_PAGINATION", field: pagination.field }, 400);
+    }
+    const query = parseEventApiQuery(url);
+    if (!query.ok) {
+      return json({ ok: false, error: "INVALID_EVENT_FILTER", field: query.field }, 400);
+    }
     try {
       const generation = await loadDataGeneration(env, ["runtime", "events"]);
       if (generation) {
         const runtime = generation.assets.runtime;
         const asset = generation.assets.events;
-        const market = String(url.searchParams.get("market") || "").trim();
-        const issuer = String(url.searchParams.get("issuer") || "").trim().toLowerCase();
-        let rows = Array.isArray(asset.events) ? asset.events : [];
-        if (market) rows = rows.filter((row) => row?.market === market);
-        if (issuer) {
-          rows = rows.filter((row) => [row?.issuer, row?.company, row?.name, row?.code, row?.symbol]
-            .some((value) => String(value || "").toLowerCase().includes(issuer)));
-        }
-        const page = pageRows(rows, pageRequest(url, 25, 50));
+        const { publication, boundIds, rows, sourceCount } = eventRowsForQuery(asset, query);
+        const page = pageRows(rows, pagination);
         const snapshotUse = snapshotUseContract(runtime, new Date(), schedulerPrimaryEnabled(env));
+        const matchedBoundCount = rows.filter((row) => row.decision_bound === true).length;
+        const returnedBoundCount = page.rows.filter((row) => row.decision_bound === true).length;
         return json({
-          contract_version: asset.contract_version,
+          contract_version: EVENT_LIST_CONTRACT_VERSION,
           ok: true,
           snapshot_key: asset.snapshot_key,
           generated_at: asset.generated_at,
           snapshot_sha256: asset.snapshot_sha256,
           source_snapshot: asset.source_snapshot,
+          ordering_contract_version: EVENT_ORDERING_CONTRACT_VERSION,
+          filters: {
+            scope: query.scope,
+            decision_bound: query.decision_bound,
+            market: query.market || null,
+            decision_eligible: query.decision_eligible,
+            event_ids: query.event_ids,
+            symbol: query.symbol || null,
+            event_type: query.event_type || null,
+            direction: query.direction || null,
+            q: query.q || null,
+          },
+          source_event_count: Number(publication.total || 0),
+          published_event_count: Number(publication.published || sourceCount),
           event_count: rows.length,
           page: page.page,
           limit: page.limit,
@@ -2485,7 +2867,14 @@ async function handleApi(request, env) {
           has_more: page.has_more,
           returned_count: page.returned_count,
           events: page.rows,
-          event_publication: asset.event_publication || {},
+          event_publication: publication,
+          decision_bound: {
+            total: boundIds.size,
+            matched: matchedBoundCount,
+            returned: returnedBoundCount,
+            all_matched_returned: matchedBoundCount === returnedBoundCount,
+            ids: [...boundIds].sort(),
+          },
           snapshot_use: snapshotUse,
           effective_decisions: effectiveDecisions(runtime, snapshotUse),
         });
@@ -2497,9 +2886,43 @@ async function handleApi(request, env) {
         WORKER_UI_EVENTS_CONTRACT_VERSION,
         runtime,
       );
+      const { publication, boundIds, rows, sourceCount } = eventRowsForQuery(asset, query);
+      const page = pageRows(rows, pagination);
       const snapshotUse = snapshotUseContract(runtime, new Date(), schedulerPrimaryEnabled(env));
+      const matchedBoundCount = rows.filter((row) => row.decision_bound === true).length;
+      const returnedBoundCount = page.rows.filter((row) => row.decision_bound === true).length;
       return json({
         ...asset,
+        contract_version: EVENT_LIST_CONTRACT_VERSION,
+        ordering_contract_version: EVENT_ORDERING_CONTRACT_VERSION,
+        filters: {
+          scope: query.scope,
+          decision_bound: query.decision_bound,
+          market: query.market || null,
+          decision_eligible: query.decision_eligible,
+          event_ids: query.event_ids,
+          symbol: query.symbol || null,
+          event_type: query.event_type || null,
+          direction: query.direction || null,
+          q: query.q || null,
+        },
+        source_event_count: Number(publication.total || 0),
+        published_event_count: Number(publication.published || sourceCount),
+        event_count: rows.length,
+        page: page.page,
+        limit: page.limit,
+        total: page.total,
+        has_more: page.has_more,
+        returned_count: page.returned_count,
+        events: page.rows,
+        event_publication: publication,
+        decision_bound: {
+          total: boundIds.size,
+          matched: matchedBoundCount,
+          returned: returnedBoundCount,
+          all_matched_returned: matchedBoundCount === returnedBoundCount,
+          ids: [...boundIds].sort(),
+        },
         snapshot_use: snapshotUse,
         effective_decisions: effectiveDecisions(runtime, snapshotUse),
       });
@@ -2510,6 +2933,10 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === "/api/history") {
+    const pagination = pageRequest(url, 5, 5);
+    if (!pagination.ok) {
+      return json({ ok: false, error: "INVALID_PAGINATION", field: pagination.field }, 400);
+    }
     const generation = await loadDataGeneration(env, ["runtime", "history"]);
     if (generation) {
       const asset = generation.assets.history;
@@ -2518,7 +2945,7 @@ async function handleApi(request, env) {
       rows.sort((a, b) => `${b.target_date || ""}${b.generated_at || ""}`.localeCompare(`${a.target_date || ""}${a.generated_at || ""}`));
       const days = latestDecisionDays(rows);
       const selected = view === "raw" ? rows : days;
-      const page = pageRows(selected, pageRequest(url, 5, 5));
+      const page = pageRows(selected, pagination);
       return json({
         contract_version: asset.contract_version,
         ok: true,
@@ -2546,7 +2973,6 @@ async function handleApi(request, env) {
         history: page.rows,
       });
     }
-    const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 120), 1000));
     const view = url.searchParams.get("view") === "raw" ? "raw" : "daily";
     const manifest = await loadManifest(env);
     if (!manifest) return json({ ok: false, error: "HISTORY_MANIFEST_UNAVAILABLE" }, 503);
@@ -2556,7 +2982,7 @@ async function handleApi(request, env) {
     );
     const days = latestDecisionDays(rows);
     const selectedRows = view === "raw" ? rows : days;
-    const history = selectedRows.slice(0, limit);
+    const page = pageRows(selectedRows, pagination);
     const latest = await latestRuntime(env);
     return json({
       ok: true,
@@ -2566,9 +2992,20 @@ async function handleApi(request, env) {
           ? latest.latest_summary || null
           : summarizePick(latest)
         : null,
-      meta: historyMetadata(rows, days, view, history.length, manifest.history_evaluation),
+      page: page.page,
+      limit: page.limit,
+      total: page.total,
+      has_more: page.has_more,
+      returned_count: page.returned_count,
+      meta: {
+        ...historyMetadata(rows, days, view, page.returned_count, manifest.history_evaluation),
+        page: page.page,
+        limit: page.limit,
+        total: page.total,
+        has_more: page.has_more,
+      },
       history_evaluation: manifest.history_evaluation || null,
-      history,
+      history: page.rows,
     });
   }
 

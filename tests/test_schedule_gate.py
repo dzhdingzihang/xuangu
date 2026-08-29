@@ -123,6 +123,33 @@ class ScheduleGateTests(unittest.TestCase):
             ],
         )
 
+    def test_github_primary_and_watchdog_crons_are_all_gate_recognized(self) -> None:
+        primary = {
+            "17 0 * * 1-5",
+            "17 2 * * 1-5",
+            "17 4 * * 1-5",
+            "17 7 * * 1-5",
+            "17 8 * * 1-5",
+            "17 12 * * 1-5",
+            "47 14 * * 1-5",
+            "17 20 * * 1-5",
+            "17 21 * * 1-5",
+        }
+        watchdog = {
+            "47 0 * * 1-5",
+            "47 2 * * 1-5",
+            "47 4 * * 1-5",
+            "47 7 * * 1-5",
+            "47 8 * * 1-5",
+            "47 12 * * 1-5",
+            "17 15 * * 1-5",
+            "47 20 * * 1-5",
+            "47 21 * * 1-5",
+        }
+        self.assertTrue(primary <= set(self.module.CRON_INVOCATION_SLOTS))
+        self.assertTrue(watchdog <= set(self.module.CRON_INVOCATION_SLOTS))
+        self.assertEqual(len(primary | watchdog), 18)
+
     def test_friday_2247_slot_survives_saturday_delay(self) -> None:
         now = dt.datetime.fromisoformat("2026-08-22T00:00:00+08:00")
         slot = self.module.select_checkpoint(now)

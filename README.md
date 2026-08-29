@@ -11,7 +11,7 @@ XuanGu 是一个面向未来约两周（10 个交易日）的 A 股、港股、�
 - **三市场动态候选池**：A 股动态召回 300 只；港股、美股在每次定时或手动快照生成任务中重新读取公开市场横截面，并分别动态召回 200 / 300 只，不再使用仓库静态名单决定入池成员。
 - **A 股 300 只完整深评**：全部有效行情候选先完成基础评分和技术评分；技术 K 线完整、满足交易性过滤的候选最多 300 只继续运行 Legacy、V2、双低、Chan/CZSC、Serenity、UZI 与评审团深研，不再把第 97–300 只固定挡在深度评分之外。
 - **双层生产输出**：当前 `production_decision` V4 在共享安全门禁后分别运行“事件催化”和“质量趋势”两条规则资格通道，产出 `QUALIFIED_PICK / NO_QUALIFIED_PICK`；`global_decision` 继续负责独立的严格校准概率。V1–V3 只用于读取历史快照。规则资格分不等于上涨概率，Shadow 模型也不会因为规则轨有候选而被授权。
-- **纯云端自动更新**：GitHub Actions 在多个市场检查点生成并校验不可变快照，Cloudflare Worker 负责发布；每日末次检查点、规则合格批次或正式可执行批次进入长期归档，不依赖 Render、OpenD 或个人电脑常开。当前实际自动路径是 GitHub watchdog；Cloudflare 主调度在专用最小权限 token 配好前保持关闭，页面会如实显示。
+- **纯云端自动更新**：GitHub Actions 是不需要设备或额外 dispatch token 的主调度，在多个市场检查点生成并校验不可变快照，30 分钟后的 GitHub watchdog 只在主批次未健康发布时补跑；Cloudflare Worker 负责发布，其定时 `workflow_dispatch` 只是可选冗余路径。缺少 Cloudflare 专用 token 不会关闭 GitHub 主调度，也不计为生产故障。每日末次检查点、规则合格批次或正式可执行批次进入长期归档，不依赖 Render、OpenD 或个人电脑常开。
 - **时效失败关闭**：已发布结论与“现在能否使用”分开。快照过期时仍保留历史规则合格记录，但运行合同切换为 `HISTORICAL_RESEARCH_ONLY`、`current_decision_allowed=false`，当前可执行候选强制为 0。
 
 页面提供今日答案、候选池、事件证据、历史检验、模型逻辑和数据健康六个 Tab。首屏只读与快照身份绑定的轻量摘要，候选、事件和历史数据在进入对应 Tab 时才按需加载。所有数字均来自已发布快照；浏览器只展示服务端已经发布且校验一致的结果，不会自行补选或把计划价冒充实时行情。
@@ -31,6 +31,14 @@ XuanGu 是一个面向未来约两周（10 个交易日）的 A 股、港股、�
 | `global_decision.primary` | 哪只股票通过完整生产门禁 | 只有校准模型上线后才可解释为概率 | 是，但当前缺条件时为空 |
 
 `RULE_PRIORITY` 和 `RULE_QUALIFICATION_SCORE` 都是确定性规则分，不是“未来 10 天上涨概率”，也不能解释为“80 分等于 80% 会涨”。规则资格轨固定发布 `probability_status=NOT_APPLICABLE`、`probability=null`、`calibrated=false`；校准概率轨未达标时继续发布 `probability_status=UNAVAILABLE`。
+
+候选资源以 `candidate-role-v1` 把权限拆成三个独立命名空间，不再用一个“首选”混合不同口径：
+
+- `decision_roles.production=PRIMARY` 是跨市场规则主候选，兼容字段为 `decision_role=production_primary`。
+- `decision_roles.production=QUALIFIED` 是通过同一 V4 门禁的其他规则合格候选，兼容字段为 `decision_role=production_qualified`。
+- `decision_roles.legacy=PRIMARY` 只是单个市场 Legacy 规则的首选，兼容字段为 `decision_role=legacy_market_primary`；它不等于规则主候选，也不能取得 production 或校准概率权限。`decision_roles.research=PRIORITY` 同样只表示研究排序。
+
+同一只股票可同时拥有 production、legacy 和 research 角色；展示层的短标签只是兼容映射，服务端发布的 `decision_roles`、`production_rank` 和 `legacy_rank` 才是可审计依据。
 
 ## 选股与评分机制
 
@@ -136,7 +144,7 @@ A / 港 / 美的 Legacy 分布刻度并不相同，质量通道因此使用 64 /
 
 官方正向事件 enrichment 默认每市场深扫 16 只，并按 Legacy、V2、数据质量、风险收益和市场动作预排序；Shadow 概率不参与预排序。快照以 `two-tier-event-coverage-v1` 明确发布两层口径：`risk_screen.scope=full_candidate_pool` 对全部候选执行结构化交易性、必需输入和已核验重大负面门禁；`positive_event_enrichment.scope=bounded_priority_sample` 才表示进入官方公告深扫的重点样本。事件源按市场隔离：一个市场的官方源故障不会抹掉另一个市场已经核验的证据；但严格 `global_decision` 仍要求三市场事件管线全部完成。浏览器只展示服务端发布且复算一致的通道、资格分和证据合同，不能自行补选、切换通道或把研究项升级为 `QUALIFIED_PICK`。
 
-每个规则合格候选还携带服务端冻结的 `ten-day-trade-plan-v1` 复核计划：快照参考价及来源时间、允许复核的参考入场区间、失效价、目标参考、最晚复核交易日和单票 10% 策略安全上限。它的状态固定为 `REVIEW_REQUIRED`，`is_personalized_advice=false`；这是统一执行纪律，不是实时委托、个性化仓位建议或收益承诺。浏览器只读取该合同，缺值显示未知，不根据当前网页时间自行推算价格。
+每个规则合格候选还携带服务端冻结的 `ten-day-trade-plan-v2` 复核计划：快照参考价及来源时间、允许复核的参考入场区间、失效价、目标参考、最晚复核交易日和单票 10% 策略安全上限。其 `scenario_range` 必须无损绑定同一候选的 `horizon-range-v1`，核心字段包含 10 交易日上下界、`method_id=realized-vol-drift-shadow-v1`、`calibrated=false` 和源观测数；K 线日期完整时还发布真实的来源窗口起止日，日期证据缺失时省略而不猜测。核心来源字段缺失、窗口只出现单边或任一字段被篡改都会失败关闭。`horizon-range-v1`、失效价和目标价都是未校准的确定性情景，**不是概率置信区间、预期收益或胜率承诺**。计划状态固定为 `REVIEW_REQUIRED`，`is_personalized_advice=false`；这是统一执行纪律，不是实时委托或个性化仓位建议。浏览器只读取该合同，缺值显示未知，不根据当前网页时间自行推算价格。`ten-day-trade-plan-v1` 只作为历史快照兼容合同读取。
 
 ### 7. 10 交易日影子概率模型
 
@@ -199,6 +207,12 @@ A / 港 / 美的 Legacy 分布刻度并不相同，质量通道因此使用 64 /
 
 事件管线必须发布“是否已扫描、逐市场来源状态、扫描证券、有效条数和拒绝原因”，不会把无法访问原文、缺发布时间或只有模型描述的内容包装成官方证据。默认每市场预扫 16 只（硬上限 30），用途明确标记为 `positive_event_enrichment`；它用于补强最有希望候选的官方催化证据，而不是把新闻数量直接当成分数，也不是对未入选证券宣称“官方公告无风险”。
 
+`event-list-v2` / `ui-events-v2` 使决策证据在首屏和分页 API 中可发现：
+
+- 每行都有布尔值 `decision_bound`，发布元数据同时列出 `decision_bound_event_ids`、`production_bound_event_ids` 及对应计数。默认顺序是“已绑定决策的证据优先，再按发布时间倒序”，因此首页不会被更新但未绑定的事件挤掉。
+- `/api/events` 支持 `scope=all|decision_bound`、`decision_bound`、`decision_eligible`、`event_id`（可重复或逗号分隔）、`market`、`symbol`、`event_type`、`direction=positive|neutral|negative` 和 `q`。所有筛选先于分页执行；非法组合返回 `400 INVALID_EVENT_FILTER`。
+- 前端按 `event_id` 去重合并首屏 bootstrap 中的不可变决策证据和按需加载的事件页，不会因为首个懒加载页缺少某个 ID 就把已绑定证据清零。候选审计使用“已解析 X / Y 个绑定 `event_id`”的口径；例如“已解析 7 / 7”只表示 7 个绑定 ID 均已载入，不代表所有事件源只有 7 条或全部市场已完整扫描。
+
 ## 真实交易日历与约两周窗口
 
 交易窗口由 `exchange-calendars==4.13.2` 计算，使用：
@@ -248,7 +262,7 @@ A / 港 / 美的 Legacy 分布刻度并不相同，质量通道因此使用 64 /
 
 规则历史指标按“`signal_date × market`”单元聚合，只有单元内每一条资格记录都是通过合同校验的 `SETTLED` 时，该单元才能进入收益、胜率、分市场和分通道指标；不完整单元中即使已有部分 `SETTLED` 行也整体排除。只要存在无效 batch 或 `PENDING_DATA` 这类数据缺失，历史状态就绝不能是 `READY`：已有其他合法结算时显示 `PARTIAL_DATA`，尚无合法结算时显示 `PENDING_DATA / INVALID_DATA`。`PENDING_MATURITY` 只表示窗口尚未成熟，不会被当成数据缺失，但同样不会提前进入指标。
 
-观察和规则结算都有三种逐股状态：预测窗口未结束时为 `PENDING_MATURITY`；已成熟但缺少完整复权开收盘价时为 `PENDING_DATA`；只有身份、源快照摘要、时间窗口、调整行情和收益算术全部通过合同校验才进入 `SETTLED`。独立 Workflow 每天北京时间 `06:30` 尝试结算，并在验证后立即重建、部署历史数据，因此历史 Tab 不必等下一次选股任务。诊断可以计算 Brier、AUC、ECE、Rank IC 和分位收益，但只属于相应研究轨；它不进入正式收益分母，也不能自动授权生产概率模型。生产授权仍需要预注册门槛、足够的独立前瞻 cohort，以及未参与调参的留出样本；代码部署本身不会强制晋级。
+观察和规则结算都有三种逐股状态：预测窗口未结束时为 `PENDING_MATURITY`；已成熟但缺少完整复权开收盘价时为 `PENDING_DATA`；只有身份、源快照摘要、时间窗口、调整行情和收益算术全部通过合同校验才进入 `SETTLED`。独立 Workflow 每天北京时间 `06:30` 尝试结算，`12:30` 再做一次幂等 watchdog 补跑；已结算的不可变 outcome 不会被重复改写。任一轮在验证后都立即重建、部署历史数据，因此历史 Tab 不必等下一次选股任务。诊断可以计算 Brier、AUC、ECE、Rank IC 和分位收益，但只属于相应研究轨；它不进入正式收益分母，也不能自动授权生产概率模型。生产授权仍需要预注册门槛、足够的独立前瞻 cohort，以及未参与调参的留出样本；代码部署本身不会强制晋级。
 
 ## 云端定时快照与数据源
 
@@ -294,23 +308,43 @@ Python 选股程序不会在 Worker 或浏览器请求中重算。页面初始�
 
 ## 数据更新时序与可靠性
 
-当前实际启用的是 GitHub 原生 watchdog。系统展示时区为 `Asia/Shanghai`，北京时间计划如下：
+当前实际启用的是 GitHub Actions 原生主调度 + GitHub watchdog。系统展示时区为 `Asia/Shanghai`，主检查点如下：
 
 ```text
-周一至周五：08:47 / 10:47 / 12:47 / 15:47 / 16:47 / 20:47 / 23:17
-美股收盘后：纽约周一至周五 16:47
-              = 北京周二至周六 04:47（夏令时）/ 05:47（冬令时）
+周一至周五：08:17 / 10:17 / 12:17 / 15:17 / 16:17 / 20:17 / 22:47
+美股收盘后：纽约周一至周五 16:17
+              = 北京周二至周六 04:17（夏令时）/ 05:17（冬令时）
 ```
 
-Cloudflare 主调度目标是 `08:17 / 10:17 / 12:17 / 15:17 / 16:17 / 20:17 / 22:47`，另加纽约收盘后 `16:17`。它需要单独的 GitHub Actions 最小权限 dispatch token；当前 `CLOUDFLARE_SCHEDULER_ENABLED=0`，所以这些时点不是实际刷新承诺。启用后，GitHub 的 `:47`/`23:17` 任务才恢复为真正的 30 分钟健康补跑。`/api/status.next_refresh` 与数据健康 Tab 按实际开关、UTC cron 和纽约夏/冬令时计算，不会把已关闭的主调度写成下一次刷新。
+GitHub 还在每个主检查点 30 分钟后运行 watchdog：北京时间 `08:47 / 10:47 / 12:47 / 15:47 / 16:47 / 20:47 / 23:17`，纽约收盘后 `16:47`（北京夏令时 `04:47`、冬令时 `05:47`）。watchdog 会先核对线上完整快照；主检查点已健康覆盖时直接跳过，不会重复生成。
+
+Cloudflare Cron 触发的 `workflow_dispatch` 是可选冗余调用器，不再承担主检查点。它只在 `CLOUDFLARE_SCHEDULER_ENABLED=1` 且配置了专用最小权限 token 时启用；开关为 `0` 或缺少 token 只表示“可选 dispatch 未启用”，不影响 GitHub 主调度和 watchdog，也不应计为调度故障。`/api/status.next_refresh` 与数据健康 Tab 按 GitHub 主检查点、watchdog 及纽约夏/冬令时计算；Cloudflare 可选路径的状态独立展示。
 
 每次实际 cron 都记录来源调用点、逻辑检查点、开始延迟、恢复模式和生成时间；对应审计字段包括 `source_invocation_slot`、`scheduled_invocation_slot` 与 `scheduler_delay_seconds`。发布前按“调用点 + 生成时间”做单调校验，迟到旧任务不能覆盖新批次。普通延迟仍在原调用点的 4 小时窗口内处理；超过窗口时进入有界 `late_cron_recovery`，有效恢复调用点最多 12 小时。`schedule_gate.py` 只用线上完整 `/api/latest` 作为“已成功发布”证据：线上不可达、目标批次缺失/失败，或行情/候选池处于可恢复降级时继续运行。门禁硬校验 A/港/美实际召回达到 `300 / 200 / 300`，并检查动态来源、行情、A 股基础/技术评分及深研覆盖；仓库里的 `latest.json` 不能单独抑制刷新，因为它不证明 Cloudflare 已经切换成功。
 
-观察/规则结算与选股生成分离：`settle-observations.yml` 每天北京时间 `06:30` 运行，也可手动触发。它同时更新 observation settlement 与 rule settlement，验证后提交必要 JSON，并立即构建、部署历史资产；即使没有新提交也会验证并发布当前历史口径。对每个结算发布尝试只做单轮行情请求（`--retries 0`）；未成熟预测正常保持 `PENDING_MATURITY`，行情源超时或缺数固化为 `PENDING_DATA` 等待下次运行。Workflow 整体设置 40 分钟硬超时，给安装依赖、结算、最多 3 次 Git 冲突处理、历史构建、部署和验收留出有界时间。只有合同冲突、无法读取的账本、非法结算结果或历史线上验收失败才让 Workflow 标红。
+观察/规则结算与选股生成分离：`settle-observations.yml` 每天北京时间 `06:30` 主跑，`12:30` 执行幂等 watchdog，也可手动触发。它同时更新 observation settlement 与 rule settlement，验证后提交必要 JSON，并立即构建、部署历史资产；即使没有新提交也会验证并发布当前历史口径。对每个结算发布尝试只做单轮行情请求（`--retries 0`）；未成熟预测正常保持 `PENDING_MATURITY`，行情源超时或缺数固化为 `PENDING_DATA` 等待下次运行。Workflow 整体设置 40 分钟硬超时，给安装依赖、结算、最多 3 次 Git 冲突处理、历史构建、部署和验收留出有界时间。只有合同冲突、无法读取的账本、非法结算结果或历史线上验收失败才让 Workflow 标红。
 
 一次生成与 outcome 结算各最多尝试 3 次。部署前执行单元测试、JavaScript 语法检查、snapshot schema 校验和 immutable 快照一致性检查；部署后先轻量轮询 `generated_at` / `snapshot_key` 直到新版本收敛，再验证完整快照摘要、历史、不可变快照、页面合同和所有可见候选行情，避免在边缘版本传播期每轮重复执行整套探针。生成、测试或部署前校验失败时不会切换生产版。部署前还会记录当前唯一 100% 生效的 Cloudflare Worker Version 和快照摘要；若部署后完整验收失败，Workflow 会标红并自动回滚到该精确版本，再核对旧快照身份与摘要。这是自动恢复，不是零暴露发布：新版在部署后验证窗口内可能短暂在线；回滚本身若失败也会继续标红，需要人工处理。
 
+只有“定时任务实际运行 + 新快照成功发布 + 部署后完整验收通过”才会生成 `scheduler-checkpoint-receipt-v1`。回滚或验收失败不能写成正向证据。receipt 在本次已验证部署之后由独立最小写权任务持久化，因此聚合的 `scheduler-checkpoint-ledger-v1` **从下一个构建/发布批次才能看到它**，合同明示 `evidence_lag_batches=1`；这不是当批发布丢失。
+
+检查点账本以最近 24 小时为覆盖窗口。开始累积 receipt 后的前 24 小时必须是 `readiness=INITIALIZING`、`checkpoint_coverage_status=INITIALIZING_24H_LEDGER`、`missed_checkpoints_24h=null`，而不是假报 0 次遗漏；窗口完整后才能根据按时、迟到和遗漏 receipt 发布 `READY / DEGRADED`。“主检查点后 45 分钟内完成发布”是可观测的内部 SLO 目标，`guaranteed=false`、`public_data_source_sla=false`；它不是 GitHub、交易所或公开数据源的准时保证。
+
 每次定时或手动生成都会上传一个保留 30 天的 GitHub Actions 恢复包。为避免数 MiB、宽池批次可接近 10 MiB 的全量快照在 Git 和 Worker 中无限增长，长期 Git 归档保存每日末次主要检查点、产生生产规则合格候选的批次，以及确实产生正式可执行候选的批次；Worker 只携带最近 30 个决策日的完整交互快照。更早日期继续保留轻量摘要和隔离账本，因此历史统计仍可审计，但页面不会再下载其完整候选明细。归档冲突重试采用单调合并：较旧任务可以补充自己的不可变快照，但不能覆盖较新的 `latest.json`、把 `SETTLED` 降级成 `PENDING`，或丢失观察 revision。
+
+### 可用性分层
+
+API 和页面不用一个绿色 `ok` 概括全部能力，而是分层发布：
+
+| 层级 | 公开字段 | 准确含义 |
+|---|---|---|
+| 传输/合同组装 | `ok` | 当次 HTTP 请求成功，且 API 能从同一 manifest generation 组装通过身份校验的响应；不表示选股、无人值守或概率模型已就绪 |
+| 当前研究决策 | `research_decision_ready` | 快照时效、三市场候选/行情覆盖和规则安全门禁足以支持当前研究或规则复核；不等于校准概率可执行 |
+| 检查点证据 | `checkpoint_evidence_ready` | 已形成完整 24 小时 `scheduler-checkpoint-ledger-v1` 证据窗口；初始化期必须为 `false`/`INITIALIZING` |
+| 无人值守刷新 | `unattended_refresh_ready` | GitHub 主调度和 watchdog 配置有效，且完整账本未发现超出目标的迟到或遗漏；它仍是运营 SLO，不是外部 SLA |
+| 校准执行 | `calibrated_execution_ready` | 前瞻样本、校准、交易成本、尾部风险和人工治理授权全部通过，才能为 `true`；样本尚未成熟时应明确显示 `COLLECTING`，不能从规则合格分推导为可执行 |
+
+因此 `ok=true` 与一个或多个独立 `ready=false` 同时出现是合法且必要的诚实状态；页面必须分别展示原因，不能用传输成功覆盖数据、调度或校准未就绪。
 
 浏览器每 5 分钟读取一次 `/api/status`，并在服务端发布的 `next_refresh` 检查点主动复核；只有 `snapshot_key` 变化才重读 `/api/latest-summary`。当前未打开的候选、事件和历史 Tab 不会被顺带请求；按需接口返回更新的时效门禁时，浏览器会按服务端 `evaluated_at` 单调收紧状态，不等待下一轮定时轮询。它不会轮询盘中行情，也不在前端重算评分与排序。快照 `fresh` 只表示它满足发布时效合同，不等于所有公开数据源绝对完整。
 
@@ -327,6 +361,7 @@ GitHub scheduled workflow 不是精确计时器，可能因平台排队延后。
 | 自动事件管线完成但无正向证据 | 发布真实 0 条状态，不伪造事件；事件催化与 `global_decision` 不通过，质量趋势通道仍按更严格的非事件门槛独立评估 |
 | 概率模型未授权但规则门禁通过 | 页面可显示 `QUALIFIED_PICK` 与规则资格分，同时校准轨继续保持 `NO_VALID_PICK`；不显示伪概率 |
 | 正式概率模型未授权 | Shadow 有效时显示“影子 P10”与留出指标，但全局仍为 `probability_status=UNAVAILABLE`，只输出研究优先项 |
+| 分页参数非法 | 候选、事件和历史 API 返回 `400 INVALID_PAGINATION`，不会静默回退到第 1 页或截断到上限 |
 | 指定历史日期不存在 | `/api/pick?date=` 返回 `404 PICK_NOT_FOUND`，不会静默回退 latest |
 | 日期格式非法 | 返回 `400 INVALID_DATE` |
 | 历史 manifest 不可用 | 返回 `503 HISTORY_MANIFEST_UNAVAILABLE`，页面不显示伪 0 样本 |
@@ -340,7 +375,7 @@ GET /api/gate-status
 GET /api/latest-summary
 GET /api/candidates?market=us&q=NVDA&page=1&limit=25
 GET /api/candidates/<candidate_id>
-GET /api/events?market=hk&issuer=公司名&page=1&limit=25
+GET /api/events?scope=decision_bound&decision_eligible=true&event_id=evt_123&page=1&limit=25
 GET /api/latest
 GET /api/history?view=daily&page=1&limit=5
 GET /api/history?view=raw&page=1&limit=5
@@ -355,9 +390,11 @@ GET /api/live?market=us&code=PWR
 
 契约要点：
 
-- `/api/status` 返回快照版本、新鲜度、`snapshot_as_of`、按当前实际调度路径计算的 `next_refresh`、`active_refresh_mode`、美股收盘夏/冬令时时点、`data_mode=scheduled_snapshot` 和 `device_dependency=false`；快照过期时 `snapshot_use` 以 `SNAPSHOT_NOT_FRESH` 失败关闭。
-- `/api/gate-status` 返回生成/发布时间、来源调用点、逻辑检查点、调度延迟、恢复模式、发布后端和检查点账本状态。没有完整 24 小时检查点证据时，`missed_checkpoints_24h=null` 且状态为 `UNAVAILABLE_NO_COMPLETE_LEDGER`，不会拿未知冒充 0 次遗漏。
-- `/api/latest-summary`、`/api/candidates`、单股详情、`/api/events` 和 `/api/history` 必须来自同一个 `data-manifest-v1` generation，并具有相同 `snapshot_key`、源快照 SHA-256 和字节数；身份不一致返回 503。候选搜索/市场过滤和分页由服务端完成，`scanned_count` 始终是完整扫描数，不会被当前页条数替代。
+- `/api/status` 返回快照版本、新鲜度、`snapshot_as_of`、按 GitHub 主检查点/watchdog 计算的 `next_refresh`、`active_refresh_mode`、美股收盘夏/冬令时时点、`data_mode=scheduled_snapshot` 和 `device_dependency=false`。`ok` 只表示传输与合同组装成功；`research_decision_ready`、`checkpoint_evidence_ready`、`unattended_refresh_ready` 和 `calibrated_execution_ready` 必须独立解读。快照过期时 `snapshot_use` 以 `SNAPSHOT_NOT_FRESH` 失败关闭。
+- `/api/gate-status` 返回生成/发布时间、来源调用点、逻辑检查点、调度延迟、恢复模式、发布后端和检查点账本状态。有合法 ledger 但尚未满 24 小时时发布 `INITIALIZING_24H_LEDGER`；还没有可验证 ledger 时才是 `UNAVAILABLE_NO_COMPLETE_LEDGER`。两种情况都必须使 `missed_checkpoints_24h=null`，不会拿未知冒充 0 次遗漏。
+- `/api/latest-summary`、`/api/candidates`、单股详情、`/api/events` 和 `/api/history` 必须来自同一个 `data-manifest-v1` generation，并具有相同 `snapshot_key`、源快照 SHA-256 和字节数；身份不一致返回 503。候选搜索/市场过滤和分页由服务端完成，`scanned_count` 始终是完整扫描数，不会被当前页条数替代。候选列表以 `candidate-list-v2` + `candidate-role-v1` 分开规则主候选、规则合格项与 Legacy 市场首选。
+- `/api/events` 发布 `event-list-v2`，默认 bound-first，并在分页前完成 `scope`、`decision_bound`、`decision_eligible`、`event_id`、`market`、`symbol`、`event_type`、`direction` 和 `q` 过滤。非法事件筛选返回 `400 INVALID_EVENT_FILTER`。
+- `/api/candidates`、`/api/events` 和 `/api/history` 中显式提供的 `page` / `limit` 必须是合法正整数且不超过端点上限；非整数、零、负数或越界 limit 统一返回 `400 INVALID_PAGINATION`。只有省略参数时才使用默认值。
 - 候选、详情、事件、历史与首屏响应含当前时效门禁，因此固定使用 `no-store` 且不返回可导致过期 304 的 ETag。`/api/gate-status` 只在完整绑定 manifest 与调度开关时支持 ETag；`/api/data/<key>` 只提供 manifest 中登记的不可变对象，使用内容摘要 ETag 和一年 immutable cache。
 - `/api/latest` 流式返回完整快照，供审计和兼容客户端使用；它不是首屏加载依赖。
 - `/api/history` 默认 `view=daily`，按 `target_date` 合并盘中重复运行，同类保留最后一次；`view=raw` 返回不可变原始运行。正式、Shadow、观察和规则资格结果始终分开统计，不受页面 limit 或 daily 合并影响。
@@ -413,7 +450,7 @@ npm run dev
 ### GitHub / Cloudflare Secrets
 
 - `CLOUDFLARE_API_TOKEN`：Worker 部署权限。
-- Cloudflare 主调度默认关闭，配置为 `CLOUDFLARE_SCHEDULER_ENABLED=0`。四条合并 Cron Trigger 覆盖六个亚洲日间时点、美股开盘检查点和美股收盘夏/冬令时两个 UTC 变体；Worker 只接受白名单表达式，并在运行时跳过不匹配纽约 `16:17` 的 DST 变体。在开启前，必须为仓库 `dzhdingzihang/xuangu` 单独创建只有 `Actions: write` 的 fine-grained token，并以 Wrangler secret `GITHUB_WORKFLOW_DISPATCH_TOKEN` 保存。不得复用 `CLOUDFLARE_API_TOKEN`、任何行情密钥或本地 `gh` 的宽权限凭证；缺少专用 token 时不得将开关改为 `1`。
+- Cloudflare 定时 `workflow_dispatch` 是可选冗余路径，默认配置为 `CLOUDFLARE_SCHEDULER_ENABLED=0`。GitHub Actions 主调度与 30 分钟 watchdog 不使用该开关和 token；因此缺少 `GITHUB_WORKFLOW_DISPATCH_TOKEN` 是合法的默认配置，不是调度故障。如需启用 Cloudflare 冗余 dispatch，必须为仓库 `dzhdingzihang/xuangu` 单独创建只有 `Actions: write` 的 fine-grained token，并以 Wrangler secret `GITHUB_WORKFLOW_DISPATCH_TOKEN` 保存；不得复用 `CLOUDFLARE_API_TOKEN`、任何行情密钥或本地 `gh` 的宽权限凭证。Worker 只接受白名单表达式，并在运行时跳过不匹配纽约 `16:17` 的 DST 变体。
 - R2 当前未启用，内嵌同代资产是正式生产数据后端。现阶段不得设置 `ENABLE_R2_DATA_PUBLISH=1`；Workflow 会在 alias 切换前失败关闭并主动拒绝该配置。如果未来由 R2 manifest 供应数据，某个 R2 object 的内嵌回退也只接受同 generation 且 key / SHA-256 / 字节数一致的副本，不会把 R2 缺口静默降级为跨代数据。启用前必须补齐 alias 与 Worker Version 的原子切换、联合回滚与线上故障演练。
 - 定时选股不需要 OpenD、Tunnel、Render 或个人设备密钥。
 
@@ -443,7 +480,7 @@ curl -fsS 'https://xuangu.alixjd.com/api/history?view=daily&limit=5'
 curl -fsSI https://xuangu.alixjd.com/
 ```
 
-验收 `/api/status` 时应确认 `snapshot_generation=github-actions`、`data_mode=scheduled_snapshot`、`device_dependency=false`、`snapshot_as_of`、`active_refresh_mode` 和 `next_refresh`。当前还应看到 `scheduler_primary_enabled=false` 与 `active_refresh_mode=github_watchdog_only`。同时检查 `/api/gate-status` 的 snapshot identity 与发布后端。如果检查 `/api/live` 兼容路由，预期 `provider_class=SCHEDULED_SNAPSHOT` 与 `is_realtime=false`，不应期待 `REALTIME`。
+验收 `/api/status` 时应确认 `snapshot_generation=github-actions`、`data_mode=scheduled_snapshot`、`device_dependency=false`、`snapshot_as_of`、`active_refresh_mode`、`next_refresh`，以及 `research_decision_ready`、`checkpoint_evidence_ready`、`unattended_refresh_ready`、`calibrated_execution_ready` 四层状态。当前主路径应表达为 GitHub primary + 30 分钟 watchdog；Cloudflare 可选 dispatch 的开关/token 状态应独立展示，未启用不应把主路径降级成 watchdog-only 或故障。同时检查 `/api/gate-status` 的 snapshot identity、发布后端、receipt 证据滞后批次和 24 小时 ledger 状态；初始窗口显示 `INITIALIZING` 是预期状态。如果检查 `/api/live` 兼容路由，预期 `provider_class=SCHEDULED_SNAPSHOT` 与 `is_realtime=false`，不应期待 `REALTIME`。
 
 `xuangu.alixjd.com` 的生产页面、API 和定时更新均不依赖 Render、OpenD 或个人电脑。
 

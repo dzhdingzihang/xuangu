@@ -20,6 +20,7 @@ import history_evaluation
 import model_observation_ledger
 import observation_outcome_ledger
 import rule_outcome_ledger
+from scripts import scheduler_checkpoint_ledger
 
 
 PUBLIC = ROOT / "public"
@@ -161,12 +162,14 @@ TEN_DAY_RANK_SUMMARY_FIELDS = (
 WORKER_RUNTIME_CONTRACT_VERSION = "worker-runtime-v1"
 WORKER_LIVE_INDEX_CONTRACT_VERSION = "worker-live-index-v1"
 WORKER_UI_BOOTSTRAP_CONTRACT_VERSION = "ui-bootstrap-v1"
-WORKER_UI_CANDIDATES_CONTRACT_VERSION = "ui-candidates-v1"
-WORKER_UI_EVENTS_CONTRACT_VERSION = "ui-events-v1"
+WORKER_UI_CANDIDATES_CONTRACT_VERSION = "ui-candidates-v2"
+WORKER_UI_EVENTS_CONTRACT_VERSION = "ui-events-v2"
 DATA_MANIFEST_CONTRACT_VERSION = "data-manifest-v1"
-CANDIDATE_LIST_CONTRACT_VERSION = "candidate-list-v1"
-CANDIDATE_DETAIL_CONTRACT_VERSION = "candidate-detail-v1"
-EVENT_LIST_CONTRACT_VERSION = "event-list-v1"
+CANDIDATE_LIST_CONTRACT_VERSION = "candidate-list-v2"
+CANDIDATE_DETAIL_CONTRACT_VERSION = "candidate-detail-v2"
+CANDIDATE_ROLE_CONTRACT_VERSION = "candidate-role-v1"
+EVENT_LIST_CONTRACT_VERSION = "event-list-v2"
+EVENT_ORDERING_CONTRACT_VERSION = "decision-bound-first-then-published-desc-v1"
 HISTORY_LIST_CONTRACT_VERSION = "history-list-v1"
 WORKER_RUNTIME_IDENTITY_FIELDS = (
     "schema_version",
@@ -1331,6 +1334,49 @@ def _decision_bound_event_ids(snapshot: dict) -> tuple[str, ...]:
     }))
 
 
+def _production_bound_event_ids(snapshot: dict) -> tuple[str, ...]:
+    """Return event ids bound specifically to production-rule candidates."""
+
+    production = snapshot.get("production_decision") or {}
+    rows = [
+        production.get("primary"),
+        *((production.get("qualified_candidates") or [])
+          if isinstance(production.get("qualified_candidates"), list) else []),
+    ]
+    return tuple(sorted({
+        str(event_id)
+        for row in rows
+        if isinstance(row, dict)
+        for event_id in (row.get("verified_positive_event_ids") or [])
+        if event_id
+    }))
+
+
+def _event_records_by_id(items: list[dict]) -> dict[str, list[dict]]:
+    records: dict[str, list[dict]] = {}
+    for item in items:
+        event_id = str(item.get("event_id") or "")
+        if event_id:
+            records.setdefault(event_id, []).append(item)
+    return records
+
+
+def _require_unique_bound_event_records(items: list[dict], bound_ids: tuple[str, ...], context: str) -> None:
+    records = _event_records_by_id(items)
+    missing_ids = [event_id for event_id in bound_ids if not records.get(event_id)]
+    duplicate_ids = [event_id for event_id in bound_ids if len(records.get(event_id) or []) > 1]
+    if missing_ids:
+        raise ValueError(
+            f"decision-bound event evidence is missing from {context}: "
+            + ", ".join(missing_ids)
+        )
+    if duplicate_ids:
+        raise ValueError(
+            f"decision-bound event evidence is duplicated in {context}: "
+            + ", ".join(duplicate_ids)
+        )
+
+
 def _event_sort_key(item: dict) -> tuple:
     """Newest published/effective evidence first with a canonical tie-breaker."""
 
@@ -1384,17 +1430,7 @@ def _decision_evidence(snapshot: dict) -> dict:
     wanted_ids = _decision_bound_event_ids(snapshot)
     wanted_set = set(wanted_ids)
     items = _snapshot_event_items(snapshot)
-    available_ids = {
-        str(item.get("event_id"))
-        for item in items
-        if item.get("event_id")
-    }
-    missing_ids = sorted(wanted_set - available_ids)
-    if missing_ids:
-        raise ValueError(
-            "decision-bound event evidence is missing from snapshot: "
-            + ", ".join(missing_ids)
-        )
+    _require_unique_bound_event_records(items, wanted_ids, "snapshot")
     selected = sorted(
         (
             compact_runtime_value(item)
@@ -1413,35 +1449,89 @@ def _decision_evidence(snapshot: dict) -> dict:
     }
 
 
-def _candidate_role_maps(snapshot: dict) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str], int]]:
-    roles: dict[tuple[str, str], str] = {}
-    ranks: dict[tuple[str, str], int] = {}
-    priority = {"qualified": 0, "primary": 1, "research": 2, "watchlist": 3, "blocked": 4}
+def _candidate_role_maps(
+    snapshot: dict,
+) -> tuple[
+    dict[tuple[str, str], dict[str, str]],
+    dict[tuple[str, str], int],
+    dict[tuple[str, str], int],
+]:
+    """Keep production, legacy and research authority in separate namespaces."""
 
-    def remember(market: str, candidate: dict | None, role: str, rank: int | None = None) -> None:
+    roles: dict[tuple[str, str], dict[str, str]] = {}
+    legacy_ranks: dict[tuple[str, str], int] = {}
+    production_ranks: dict[tuple[str, str], int] = {}
+
+    def remember(
+        market: str,
+        candidate: dict | None,
+        role_family: str,
+        role: str,
+        rank: int | None = None,
+    ) -> tuple[str, str] | None:
         compact = compact_ui_candidate(candidate, market, detail=False)
         if compact is None:
-            return
+            return None
         identity = (market, compact["code"])
-        if identity not in roles or priority[role] < priority[roles[identity]]:
-            roles[identity] = role
-        if rank is not None:
-            ranks.setdefault(identity, rank)
+        current = roles.setdefault(
+            identity,
+            {"production": "NONE", "legacy": "NONE", "research": "NONE"},
+        )
+        current[role_family] = role
+        if role_family == "legacy" and rank is not None:
+            legacy_ranks.setdefault(identity, rank)
+        return identity
 
     for market in LIVE_MARKETS:
         decision = ((((snapshot.get("markets") or {}).get(market) or {}).get("decision") or {}))
-        remember(market, decision.get("primary"), "primary", 1)
-        remember(market, decision.get("blocked_candidate"), "blocked", 1)
+        primary_identity = remember(market, decision.get("primary"), "legacy", "PRIMARY", 1)
+        remember(market, decision.get("blocked_candidate"), "legacy", "BLOCKED", 1)
         for index, row in enumerate(decision.get("watchlist") or [], start=1):
-            remember(market, row, "watchlist", index)
+            identity = remember(market, row, "legacy", "WATCHLIST", index)
+            if identity is not None and identity == primary_identity:
+                roles[identity]["legacy"] = "PRIMARY"
+
     global_priority = (snapshot.get("global_decision") or {}).get("research_priority")
     if isinstance(global_priority, dict) and global_priority.get("market") in LIVE_MARKETS:
-        remember(str(global_priority["market"]), global_priority, "research")
+        remember(str(global_priority["market"]), global_priority, "research", "PRIORITY")
+
     production = snapshot.get("production_decision") or {}
-    for row in [production.get("primary"), *(production.get("qualified_candidates") or [])]:
-        if isinstance(row, dict) and row.get("market") in LIVE_MARKETS:
-            remember(str(row["market"]), row, "qualified")
-    return roles, ranks
+    primary = production.get("primary")
+    primary_identity = None
+    if isinstance(primary, dict) and primary.get("market") in LIVE_MARKETS:
+        primary_identity = remember(str(primary["market"]), primary, "production", "PRIMARY")
+    seen: set[tuple[str, str]] = set()
+    for row in [primary, *(production.get("qualified_candidates") or [])]:
+        if not isinstance(row, dict) or row.get("market") not in LIVE_MARKETS:
+            continue
+        market = str(row["market"])
+        code = normalize_live_code(row.get("code") or row.get("symbol"), market)
+        identity = remember(
+            market,
+            row,
+            "production",
+            "PRIMARY" if code and primary_identity == (market, code) else "QUALIFIED",
+        )
+        if identity is not None and identity not in seen:
+            seen.add(identity)
+            production_ranks[identity] = len(seen)
+    return roles, legacy_ranks, production_ranks
+
+
+def _effective_candidate_role(decision_roles: dict[str, str]) -> str:
+    """Return a compatibility role whose name still states its authority."""
+
+    if decision_roles.get("production") == "PRIMARY":
+        return "production_primary"
+    if decision_roles.get("production") == "QUALIFIED":
+        return "production_qualified"
+    if decision_roles.get("research") == "PRIORITY":
+        return "research_priority"
+    return {
+        "PRIMARY": "legacy_market_primary",
+        "BLOCKED": "legacy_blocked",
+        "WATCHLIST": "legacy_watchlist",
+    }.get(decision_roles.get("legacy"), "legacy_watchlist")
 
 
 def build_worker_ui_bootstrap(
@@ -1492,7 +1582,7 @@ def build_worker_ui_bootstrap(
 
 
 def build_worker_ui_candidates(snapshot: dict, source_snapshot_bytes: bytes) -> dict:
-    roles, ranks = _candidate_role_maps(snapshot)
+    roles, ranks, production_ranks = _candidate_role_maps(snapshot)
     candidates: dict[tuple[str, str], dict] = {}
     for market, raw_candidate in iter_live_candidates(snapshot):
         candidate = compact_ui_candidate(raw_candidate, market, detail=True)
@@ -1514,14 +1604,50 @@ def build_worker_ui_candidates(snapshot: dict, source_snapshot_bytes: bytes) -> 
     rows = []
     for identity in sorted(candidates, key=lambda item: (LIVE_MARKETS.index(item[0]), ranks.get(item, 10_000), item[1])):
         candidate = candidates[identity]
-        candidate["decision_role"] = roles.get(identity, "watchlist")
+        decision_roles = roles.get(
+            identity,
+            {"production": "NONE", "legacy": "NONE", "research": "NONE"},
+        )
+        candidate["role_contract_version"] = CANDIDATE_ROLE_CONTRACT_VERSION
+        candidate["decision_roles"] = copy.deepcopy(decision_roles)
+        candidate["decision_role"] = _effective_candidate_role(decision_roles)
         if identity in ranks:
             candidate["legacy_rank"] = ranks[identity]
+        if identity in production_ranks:
+            candidate["production_rank"] = production_ranks[identity]
         if identity in qualifications:
             candidate["production_qualification"] = qualifications[identity]
+        candidate["id"] = _candidate_asset_id(str(snapshot.get("snapshot_key") or ""), candidate)
         rows.append(candidate)
+    row_by_identity = {(row["market"], row["code"]): row for row in rows}
+    ordered_production = sorted(production_ranks, key=production_ranks.get)
+    missing_production = [identity for identity in ordered_production if identity not in row_by_identity]
+    if missing_production:
+        raise ValueError(f"production candidate roles are missing published rows: {missing_production!r}")
+    qualified_ids = [row_by_identity[identity]["id"] for identity in ordered_production]
+    primary_id = qualified_ids[0] if qualified_ids else None
+    if production.get("action") == "QUALIFIED_PICK":
+        if not qualified_ids:
+            raise ValueError("qualified production decision has no published primary candidate")
+        published_count = production.get("qualified_candidate_count")
+        if published_count != len(qualified_ids):
+            raise ValueError(
+                "production selection count does not match candidate roles: "
+                f"{published_count!r} != {len(qualified_ids)}"
+            )
+    elif qualified_ids:
+        raise ValueError("non-qualified production decision exposes qualified candidate roles")
+    production_selection = {
+        "role_contract_version": CANDIDATE_ROLE_CONTRACT_VERSION,
+        "action": production.get("action") or "NO_QUALIFIED_PICK",
+        "primary_candidate_id": primary_id,
+        "qualified_candidate_ids": qualified_ids,
+        "qualified_candidate_count": len(qualified_ids),
+    }
     payload = {
         **_ui_identity_envelope(snapshot, source_snapshot_bytes, WORKER_UI_CANDIDATES_CONTRACT_VERSION),
+        "role_contract_version": CANDIDATE_ROLE_CONTRACT_VERSION,
+        "production_selection": production_selection,
         "candidates": rows,
         "candidate_count": len(rows),
         "dual_low_model": compact_runtime_value(((snapshot.get("analysis_models") or {}).get("dual_low") or {})),
@@ -1539,18 +1665,9 @@ def build_worker_ui_events(snapshot: dict, source_snapshot_bytes: bytes) -> dict
     original_items = _snapshot_event_items(snapshot)
     sorted_items = sorted(original_items, key=_event_sort_key)
     bound_ids = _decision_bound_event_ids(snapshot)
+    production_bound_ids = _production_bound_event_ids(snapshot)
     bound_set = set(bound_ids)
-    available_ids = {
-        str(item.get("event_id"))
-        for item in sorted_items
-        if item.get("event_id")
-    }
-    missing_ids = sorted(bound_set - available_ids)
-    if missing_ids:
-        raise ValueError(
-            "decision-bound event evidence is missing from UI event source: "
-            + ", ".join(missing_ids)
-        )
+    _require_unique_bound_event_records(sorted_items, bound_ids, "UI event source")
     bound_items = [
         item for item in sorted_items
         if str(item.get("event_id") or "") in bound_set
@@ -1571,10 +1688,10 @@ def build_worker_ui_events(snapshot: dict, source_snapshot_bytes: bytes) -> dict
     }
 
     def candidate_payload(other_count: int) -> dict:
-        selected = sorted(
-            [*bound_items, *other_items[:other_count]],
-            key=_event_sort_key,
-        )
+        selected = [
+            *({**copy.deepcopy(item), "decision_bound": True} for item in bound_items),
+            *({**copy.deepcopy(item), "decision_bound": False} for item in other_items[:other_count]),
+        ]
         events = copy.deepcopy(event_metadata)
         if isinstance(raw_events, dict):
             events["items"] = copy.deepcopy(selected)
@@ -1590,6 +1707,9 @@ def build_worker_ui_events(snapshot: dict, source_snapshot_bytes: bytes) -> dict
                 "published": published,
                 "truncated": total - published,
                 "is_truncated": published < total,
+                "ordering_contract_version": EVENT_ORDERING_CONTRACT_VERSION,
+                "decision_bound_event_ids": list(bound_ids),
+                "production_bound_event_ids": list(production_bound_ids),
                 "decision_bound_event_count": len(bound_ids),
                 "decision_bound_record_count": len(bound_items),
             },
@@ -1690,23 +1810,40 @@ def _candidate_list_row(snapshot_key: str, candidate: dict) -> dict:
         or candidate.get("ten_day_trade_plan")
         or {}
     )
+    candidate_range = candidate.get("estimated_10d_range")
+    candidate_range = candidate_range if isinstance(candidate_range, dict) else {}
+    qualification_range = qualification.get("estimated_10d_range")
+    qualification_range = qualification_range if isinstance(qualification_range, dict) else {}
+    for field in ("low_pct", "high_pct", "horizon_trade_days"):
+        if (
+            field in candidate_range
+            and field in qualification_range
+            and candidate_range[field] != qualification_range[field]
+        ):
+            raise ValueError(
+                f"candidate and qualification ten-day range disagree for {field}"
+            )
+    # The source candidate carried method provenance before the qualification
+    # ledger did. Prefer that lossless contract for old snapshots; current v3
+    # qualification rows contain the same full horizon-range-v1 object.
+    published_range = candidate_range or qualification_range
     result = {
-        "id": _candidate_asset_id(snapshot_key, candidate),
+        "id": candidate.get("id") or _candidate_asset_id(snapshot_key, candidate),
         "market": candidate.get("market"),
         "code": candidate.get("code") or candidate.get("symbol"),
         "name": candidate.get("name"),
         "currency": candidate.get("currency") or realtime.get("currency"),
+        "role_contract_version": candidate.get("role_contract_version"),
+        "decision_roles": copy.deepcopy(candidate.get("decision_roles")),
         "decision_role": candidate.get("decision_role"),
+        "production_rank": candidate.get("production_rank"),
         "legacy_rank": candidate.get("legacy_rank"),
         "recommendation_degree": candidate.get("recommendation_degree"),
         "score": candidate.get("score"),
         "price": realtime.get("price") or candidate.get("entry_price"),
         "change_pct": realtime.get("change_pct"),
         "source_as_of": realtime.get("source_as_of"),
-        "estimated_10d_range": (
-            qualification.get("estimated_10d_range")
-            or candidate.get("estimated_10d_range")
-        ),
+        "estimated_10d_range": copy.deepcopy(published_range),
         "risk_reward": qualification.get("risk_reward") or candidate.get("risk_reward"),
         "reason_tags": candidate.get("reason_tags") or [],
         "qualification": {
@@ -1726,6 +1863,7 @@ def _candidate_list_row(snapshot_key: str, candidate: dict) -> dict:
             key: copy.deepcopy(plan.get(key))
             for key in (
                 "contract_version", "status", "horizon_trade_days",
+                "scenario_range",
                 "reference_quote", "entry_zone", "entry_trade_date",
                 "invalidation", "target", "position_limit",
                 "catalyst_expiry_date", "review_end_trade_date", "exit_rules",
@@ -1782,11 +1920,23 @@ def _scheduler_health(snapshot: dict, history_manifest: dict) -> dict:
     checkpoint_ledger = history_manifest.get("scheduler_checkpoint_ledger")
     checkpoint_ledger = checkpoint_ledger if isinstance(checkpoint_ledger, dict) else {}
     checkpoint_rows = checkpoint_ledger.get("checkpoints")
-    checkpoint_complete = (
+    checkpoint_ledger_valid = (
         checkpoint_ledger.get("contract_version") == "scheduler-checkpoint-ledger-v1"
-        and checkpoint_ledger.get("coverage_complete_24h") is True
         and isinstance(checkpoint_rows, list)
         and all(isinstance(row, dict) for row in checkpoint_rows)
+    )
+    if not checkpoint_ledger_valid:
+        try:
+            checkpoint_ledger = scheduler_checkpoint_ledger.aggregate_receipts(
+                [], evaluated_at=snapshot.get("generated_at")
+            )
+        except (TypeError, ValueError, scheduler_checkpoint_ledger.SchedulerReceiptError):
+            checkpoint_ledger = scheduler_checkpoint_ledger.aggregate_receipts([])
+        checkpoint_rows = checkpoint_ledger["checkpoints"]
+        checkpoint_ledger_valid = True
+    checkpoint_complete = bool(
+        checkpoint_ledger_valid
+        and checkpoint_ledger.get("coverage_complete_24h") is True
     )
     missed = (
         sum(str(row.get("status") or "").upper() == "MISSED" for row in checkpoint_rows)
@@ -1794,7 +1944,9 @@ def _scheduler_health(snapshot: dict, history_manifest: dict) -> dict:
         else None
     )
     checkpoint_coverage_status = (
-        "COMPLETE_24H_LEDGER" if checkpoint_complete else "UNAVAILABLE_NO_COMPLETE_LEDGER"
+        str(checkpoint_ledger.get("checkpoint_coverage_status") or "INITIALIZING_24H_LEDGER")
+        if checkpoint_ledger_valid
+        else "UNAVAILABLE_NO_COMPLETE_LEDGER"
     )
     start_delay = source_health.get(
         "scheduler_start_delay_seconds", automation.get("scheduler_delay_seconds")
@@ -1821,10 +1973,34 @@ def _scheduler_health(snapshot: dict, history_manifest: dict) -> dict:
         "scheduler_start_delay_seconds": start_delay,
         "generation_delay_seconds": generation_delay,
         "publication_delay_seconds": None,
+        "publication_slo_seconds": 45 * 60,
+        "publication_within_slo": None,
         "missed_checkpoints_24h": missed,
         "checkpoint_coverage_status": checkpoint_coverage_status,
         "checkpoint_evidence_contract_version": (
-            checkpoint_ledger.get("contract_version") if checkpoint_complete else None
+            checkpoint_ledger.get("contract_version") if checkpoint_ledger_valid else None
+        ),
+        "checkpoint_evidence_ready": checkpoint_complete,
+        "scheduler_readiness": (
+            checkpoint_ledger.get("readiness") if checkpoint_ledger_valid else "UNAVAILABLE"
+        ),
+        "expected_checkpoints_24h": (
+            checkpoint_ledger.get("expected_checkpoints_24h") if checkpoint_ledger_valid else None
+        ),
+        "published_on_time_24h": (
+            checkpoint_ledger.get("published_on_time_24h") if checkpoint_ledger_valid else None
+        ),
+        "late_recoveries_24h": (
+            checkpoint_ledger.get("late_recoveries_24h") if checkpoint_ledger_valid else None
+        ),
+        "ledger_started_at": (
+            checkpoint_ledger.get("ledger_started_at") if checkpoint_ledger_valid else None
+        ),
+        "evidence_lag_batches": (
+            checkpoint_ledger.get("evidence_lag_batches") if checkpoint_ledger_valid else None
+        ),
+        "scheduler_slo": (
+            copy.deepcopy(checkpoint_ledger.get("slo") or {}) if checkpoint_ledger_valid else None
         ),
         "recovery_mode": source_health.get("recovery_mode") or recovery_mode,
         "generation_started_at": source_health.get("generation_started_at"),
@@ -1904,6 +2080,8 @@ def build_data_manifest_assets(
     candidate_payload = {
         "contract_version": CANDIDATE_LIST_CONTRACT_VERSION,
         **identity,
+        "role_contract_version": CANDIDATE_ROLE_CONTRACT_VERSION,
+        "production_selection": copy.deepcopy(candidate_source.get("production_selection") or {}),
         "candidate_count": len(compact_rows),
         "scanned_count": scanned_count,
         "evaluated_count": evaluated_count,
@@ -1980,6 +2158,8 @@ def build_data_manifest_assets(
             "contract_version": CANDIDATE_DETAIL_CONTRACT_VERSION,
             **identity,
             "id": candidate_id,
+            "role_contract_version": CANDIDATE_ROLE_CONTRACT_VERSION,
+            "production_selection": copy.deepcopy(candidate_source.get("production_selection") or {}),
             "candidate": copy.deepcopy(detail),
         }
         key, digest, byte_size = _write_content_addressed_asset(
@@ -2024,6 +2204,26 @@ def build_data_manifest_assets(
         )
     except (TypeError, ValueError):
         manifest["scheduler_health"]["publication_delay_seconds"] = None
+    publication_delay = manifest["scheduler_health"]["publication_delay_seconds"]
+    generation_delay = manifest["scheduler_health"].get("generation_delay_seconds")
+    checkpoint_publication_delay = (
+        generation_delay + publication_delay
+        if isinstance(generation_delay, int) and isinstance(publication_delay, int)
+        else None
+    )
+    manifest["scheduler_health"]["checkpoint_publication_delay_seconds"] = (
+        checkpoint_publication_delay
+    )
+    manifest["scheduler_health"]["publication_within_slo"] = (
+        None
+        if manifest["scheduler_health"].get("scheduler_readiness") == "INITIALIZING"
+        else (
+            checkpoint_publication_delay
+            <= manifest["scheduler_health"]["publication_slo_seconds"]
+            if isinstance(checkpoint_publication_delay, int)
+            else None
+        )
+    )
     manifest["scheduler_health"]["published_at"] = published_at
     manifest_without_digest = _stable_json_bytes(manifest)
     manifest["manifest_sha256"] = hashlib.sha256(manifest_without_digest).hexdigest()
@@ -2313,6 +2513,9 @@ def main() -> None:
         "observation_ledger": observation_summary,
         "observation_performance": observation_performance,
         "rule_outcome_tracking": evaluation.get("rule_outcome_tracking") or {},
+        "scheduler_checkpoint_ledger": scheduler_checkpoint_ledger.aggregate_receipts(
+            scheduler_checkpoint_ledger.load_receipts()
+        ),
     }
     (public_picks / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),

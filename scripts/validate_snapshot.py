@@ -50,7 +50,11 @@ HISTORICAL_PRODUCTION_RULE_CONTRACTS = {
 }
 PRODUCTION_RULE_ACTION_BASIS = "dual_track_candidate_qualification_v4"
 PRODUCTION_RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v4"
-PRODUCTION_RULE_INPUTS_CONTRACT_VERSION = "production-rule-inputs-v2"
+PRODUCTION_RULE_INPUTS_CONTRACT_VERSION = "production-rule-inputs-v3"
+SUPPORTED_PRODUCTION_RULE_INPUTS_CONTRACT_VERSIONS = {
+    "production-rule-inputs-v2",
+    PRODUCTION_RULE_INPUTS_CONTRACT_VERSION,
+}
 PRODUCTION_RULE_MODEL_VERSION = "smart-selector-2026-08-29.1-two-tier-rule"
 CURRENT_PRODUCTION_RULE_CONTRACT = (
     PRODUCTION_RULE_ACTION_BASIS,
@@ -321,12 +325,60 @@ def _append_schedule_automation_errors(snapshot: dict, errors: list[str]) -> Non
             errors.append("late recovery effective invocation exceeds the twelve-hour window")
 
 
-def _append_ten_day_trade_plan_errors(plan, prefix: str, errors: list[str]) -> None:
+def _append_horizon_range_errors(value, field: str, errors: list[str]) -> None:
+    if not isinstance(value, dict):
+        errors.append(f"{field} must publish horizon-range-v1 provenance")
+        return
+    low = value.get("low_pct")
+    high = value.get("high_pct")
+    observations = value.get("source_observations")
+    if value.get("contract_version") != production_rule_model.HORIZON_RANGE_CONTRACT_VERSION:
+        errors.append(f"{field}.contract_version is invalid")
+    if not finite_number(low) or not finite_number(high) or not low < 0 < high:
+        errors.append(f"{field} bounds are invalid")
+    elif value.get("text") != f"{float(low):+.1f}% ~ {float(high):+.1f}%":
+        errors.append(f"{field}.text is inconsistent")
+    if value.get("horizon_trade_days") != 10:
+        errors.append(f"{field}.horizon_trade_days must be 10")
+    if value.get("method_id") != production_rule_model.HORIZON_RANGE_METHOD_ID:
+        errors.append(f"{field}.method_id is invalid")
+    if value.get("calibrated") is not False:
+        errors.append(f"{field}.calibrated must be false")
+    if type(observations) is not int or not 0 <= observations <= 20:
+        errors.append(f"{field}.source_observations is invalid")
+    start = value.get("source_window_start_date")
+    end = value.get("source_window_end_date")
+    if (start is None) != (end is None):
+        errors.append(f"{field} source window must publish both dates or neither")
+    elif start is not None:
+        try:
+            start_date = dt.date.fromisoformat(str(start))
+            end_date = dt.date.fromisoformat(str(end))
+        except ValueError:
+            errors.append(f"{field} source window is invalid")
+        else:
+            if start_date.isoformat() != start or end_date.isoformat() != end or start_date > end_date:
+                errors.append(f"{field} source window is invalid")
+
+
+def _append_ten_day_trade_plan_errors(
+    plan,
+    prefix: str,
+    errors: list[str],
+    *,
+    input_contract_version: str,
+    expected_range,
+) -> None:
     field = f"{prefix}.ten_day_trade_plan"
     if not isinstance(plan, dict):
         errors.append(f"{field} is required for current V4 qualified rows")
         return
-    if plan.get("contract_version") != "ten-day-trade-plan-v1":
+    expected_plan_version = (
+        production_rule_model.TEN_DAY_TRADE_PLAN_CONTRACT_VERSION
+        if input_contract_version == PRODUCTION_RULE_INPUTS_CONTRACT_VERSION
+        else "ten-day-trade-plan-v1"
+    )
+    if plan.get("contract_version") != expected_plan_version:
         errors.append(f"{field}.contract_version is invalid")
     if plan.get("status") != "REVIEW_REQUIRED":
         errors.append(f"{field}.status must be REVIEW_REQUIRED")
@@ -392,6 +444,17 @@ def _append_ten_day_trade_plan_errors(plan, prefix: str, errors: list[str]) -> N
         errors.append(f"{field}.exit_rules is invalid")
     if plan.get("is_personalized_advice") is not False:
         errors.append(f"{field}.is_personalized_advice must be false")
+    if input_contract_version == PRODUCTION_RULE_INPUTS_CONTRACT_VERSION:
+        scenario_range = plan.get("scenario_range")
+        _append_horizon_range_errors(
+            scenario_range,
+            f"{field}.scenario_range",
+            errors,
+        )
+        if scenario_range != expected_range:
+            errors.append(f"{field}.scenario_range must exactly match the qualified range")
+    elif "scenario_range" in plan:
+        errors.append(f"{field}.scenario_range is not valid for the legacy plan contract")
     for date_field in ("entry_trade_date", "review_end_trade_date"):
         try:
             dt.date.fromisoformat(str(plan.get(date_field) or ""))
@@ -446,6 +509,12 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
         errors.append("production_decision calibrated must be false")
     if decision.get("expected_net_utility") is not None:
         errors.append("production_decision expected_net_utility must be null")
+
+    raw_rule_inputs = snapshot.get("production_rule_inputs")
+    input_contract_version = str(
+        (raw_rule_inputs.get("contract_version") if isinstance(raw_rule_inputs, dict) else "")
+        or ""
+    )
 
     action = decision.get("action")
     if action not in {"QUALIFIED_PICK", "NO_QUALIFIED_PICK"}:
@@ -541,7 +610,19 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
                 if qualification_track == "event_catalyst" and not event_ids:
                     errors.append(f"{prefix} event_catalyst requires verified positive event evidence")
                 if exact_current_v4:
-                    _append_ten_day_trade_plan_errors(row.get("ten_day_trade_plan"), prefix, errors)
+                    if input_contract_version == PRODUCTION_RULE_INPUTS_CONTRACT_VERSION:
+                        _append_horizon_range_errors(
+                            row.get("estimated_10d_range"),
+                            f"{prefix}.estimated_10d_range",
+                            errors,
+                        )
+                    _append_ten_day_trade_plan_errors(
+                        row.get("ten_day_trade_plan"),
+                        prefix,
+                        errors,
+                        input_contract_version=input_contract_version,
+                        expected_range=row.get("estimated_10d_range"),
+                    )
             elif row.get("event_candidate_scanned") is not True or not row.get("verified_positive_event_ids"):
                 errors.append(f"{prefix} requires verified positive event evidence")
             candidate = row.get("candidate_snapshot")
@@ -608,7 +689,8 @@ def _append_current_v4_rule_input_errors(snapshot: dict, decision: dict, errors:
     if not isinstance(inputs, dict):
         errors.append("production_rule_inputs is required for current V4")
         return
-    if inputs.get("contract_version") != PRODUCTION_RULE_INPUTS_CONTRACT_VERSION:
+    input_contract_version = inputs.get("contract_version")
+    if input_contract_version not in SUPPORTED_PRODUCTION_RULE_INPUTS_CONTRACT_VERSIONS:
         errors.append("production_rule_inputs.contract_version is invalid")
     if inputs.get("action_basis") != PRODUCTION_RULE_ACTION_BASIS:
         errors.append("production_rule_inputs.action_basis is invalid")
@@ -648,10 +730,29 @@ def _append_current_v4_rule_input_errors(snapshot: dict, decision: dict, errors:
             errors.append(f"{prefix}.input_index is inconsistent")
         if entry.get("market") != expected_market or entry.get("code") != expected_code:
             errors.append(f"{prefix} identity does not match global evaluated candidate")
-        expected_input = production_rule_model.freeze_production_rule_input_row(global_row, index)
-        actual_input = production_rule_model.freeze_production_rule_input_row(entry, index)
+        projection_version = (
+            input_contract_version
+            if input_contract_version in SUPPORTED_PRODUCTION_RULE_INPUTS_CONTRACT_VERSIONS
+            else PRODUCTION_RULE_INPUTS_CONTRACT_VERSION
+        )
+        expected_input = production_rule_model.freeze_production_rule_input_row(
+            global_row,
+            index,
+            projection_version,
+        )
+        actual_input = production_rule_model.freeze_production_rule_input_row(
+            entry,
+            index,
+            projection_version,
+        )
         if actual_input != expected_input:
             errors.append(f"{prefix} rule fields do not match global evaluated candidate")
+        if input_contract_version == PRODUCTION_RULE_INPUTS_CONTRACT_VERSION:
+            _append_horizon_range_errors(
+                entry.get("estimated_10d_range"),
+                f"{prefix}.estimated_10d_range",
+                errors,
+            )
         identity = (str(entry.get("market") or ""), str(entry.get("code") or ""))
         if identity in identities:
             errors.append(f"{prefix} identity is duplicated")

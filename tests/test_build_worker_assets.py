@@ -1031,10 +1031,34 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         self.assertEqual(bootstrap["production_decision"]["qualified_candidate_count"], 1)
 
         candidates = assets["ui-candidates.json"]
+        self.assertEqual(candidates["contract_version"], "ui-candidates-v2")
+        self.assertEqual(candidates["role_contract_version"], "candidate-role-v1")
         self.assertIn("PFE", {row["code"] for row in candidates["candidates"]})
         self.assertTrue(any(row.get("kline") for row in candidates["candidates"]))
+        by_code = {row["code"]: row for row in candidates["candidates"]}
+        self.assertEqual(by_code["PFE"]["decision_role"], "production_primary")
+        self.assertEqual(
+            by_code["PFE"]["decision_roles"],
+            {"production": "PRIMARY", "legacy": "NONE", "research": "NONE"},
+        )
+        self.assertEqual(by_code["PFE"]["production_rank"], 1)
+        self.assertEqual(by_code["0700.HK"]["decision_role"], "research_priority")
+        self.assertEqual(by_code["0700.HK"]["decision_roles"]["legacy"], "PRIMARY")
+        self.assertEqual(by_code["0700.HK"]["decision_roles"]["production"], "NONE")
+        self.assertEqual(
+            candidates["production_selection"],
+            {
+                "role_contract_version": "candidate-role-v1",
+                "action": "QUALIFIED_PICK",
+                "primary_candidate_id": by_code["PFE"]["id"],
+                "qualified_candidate_ids": [by_code["PFE"]["id"]],
+                "qualified_candidate_count": 1,
+            },
+        )
         events = assets["ui-events.json"]
-        self.assertEqual(events["events"], snapshot["events"])
+        self.assertEqual(events["contract_version"], "ui-events-v2")
+        self.assertEqual(len(events["events"]), len(snapshot["events"]))
+        self.assertTrue(all(row["decision_bound"] is False for row in events["events"]))
 
     def test_worker_ui_events_keep_all_decision_evidence_and_trim_deterministically(self) -> None:
         snapshot = runtime_snapshot_fixture()
@@ -1086,6 +1110,25 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         self.assertEqual(bootstrap["event_stats"]["total"], len(bound_events) + len(filler))
         self.assertEqual(bootstrap["event_stats"]["model_signals"], 7)
         self.assertTrue(set(bound_ids).issubset(published_ids))
+        self.assertEqual(
+            [item["event_id"] for item in published_items[:len(bound_ids)]],
+            list(reversed(bound_ids)),
+        )
+        self.assertTrue(all(item["decision_bound"] is True for item in published_items[:len(bound_ids)]))
+        self.assertTrue(all(item["decision_bound"] is False for item in published_items[len(bound_ids):]))
+        self.assertEqual(events_payload["contract_version"], "ui-events-v2")
+        self.assertEqual(
+            events_payload["event_publication"]["ordering_contract_version"],
+            "decision-bound-first-then-published-desc-v1",
+        )
+        self.assertEqual(
+            events_payload["event_publication"]["decision_bound_event_ids"],
+            sorted(bound_ids),
+        )
+        self.assertEqual(
+            events_payload["event_publication"]["production_bound_event_ids"],
+            [bound_ids[0]],
+        )
         self.assertGreater(events_payload["event_publication"]["truncated"], 0)
         self.assertEqual(
             events_payload["event_publication"]["total"],
@@ -1109,6 +1152,18 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         snapshot["global_decision"]["primary"]["verified_positive_event_ids"] = ["evt-missing"]
         source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
         with self.assertRaisesRegex(ValueError, "decision-bound event evidence is missing"):
+            build_worker_assets.build_worker_ui_assets(snapshot, {}, source_bytes)
+
+    def test_worker_ui_assets_fail_closed_when_bound_event_is_duplicated(self) -> None:
+        snapshot = runtime_snapshot_fixture()
+        event_id = "evt-duplicate"
+        snapshot["global_decision"]["primary"]["verified_positive_event_ids"] = [event_id]
+        snapshot["events"] = [
+            {"event_id": event_id, "title": "first"},
+            {"event_id": event_id, "title": "second"},
+        ]
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+        with self.assertRaisesRegex(ValueError, "decision-bound event evidence is duplicated"):
             build_worker_assets.build_worker_ui_assets(snapshot, {}, source_bytes)
 
     def test_worker_live_index_collects_normalizes_and_deduplicates_visible_candidates(self) -> None:
@@ -1401,7 +1456,16 @@ class BuildWorkerAssetsTests(unittest.TestCase):
                 snapshot,
                 source_bytes,
                 ui_assets,
-                {"summaries": [oversized_history_row], "history_evaluation": {}},
+                {
+                    "summaries": [oversized_history_row],
+                    "history_evaluation": {},
+                    "scheduler_checkpoint_ledger": (
+                        build_worker_assets.scheduler_checkpoint_ledger.aggregate_receipts(
+                            [],
+                            evaluated_at="2026-08-26T10:30:00+08:00",
+                        )
+                    ),
+                },
                 data_root,
             )
 
@@ -1416,8 +1480,16 @@ class BuildWorkerAssetsTests(unittest.TestCase):
             self.assertIsNone(manifest["scheduler_health"]["missed_checkpoints_24h"])
             self.assertEqual(
                 manifest["scheduler_health"]["checkpoint_coverage_status"],
-                "UNAVAILABLE_NO_COMPLETE_LEDGER",
+                "INITIALIZING_24H_LEDGER",
             )
+            self.assertEqual(
+                manifest["scheduler_health"]["checkpoint_evidence_contract_version"],
+                "scheduler-checkpoint-ledger-v1",
+            )
+            self.assertFalse(manifest["scheduler_health"]["checkpoint_evidence_ready"])
+            self.assertEqual(manifest["scheduler_health"]["scheduler_readiness"], "INITIALIZING")
+            self.assertEqual(manifest["scheduler_health"]["publication_slo_seconds"], 2700)
+            self.assertIsNone(manifest["scheduler_health"]["publication_within_slo"])
             self.assertLess(
                 manifest["assets"]["summary"]["byte_size"],
                 build_worker_assets.MAX_DATA_SUMMARY_BYTES,

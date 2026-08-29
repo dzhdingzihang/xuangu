@@ -88,7 +88,11 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("进入交易复核", self.js)
         self.assertIn("仅继续研究", self.js)
         self.assertIn("今日不行动", self.js)
+        self.assertIn('published.contract_version === "ten-day-trade-plan-v2"', self.js)
         self.assertIn('published.contract_version !== "ten-day-trade-plan-v1"', self.js)
+        self.assertIn("历史波动情景、", self.js)
+        self.assertIn("未校准", self.js)
+        self.assertIn("个观测", self.js)
         self.assertIn("validateTenDayTradePlan", self.js)
         self.assertIn("TRADE_PLAN_EXIT_RULE_LABELS", self.js)
         for field in (
@@ -161,6 +165,31 @@ for (const mutate of [
 const eventPlan = JSON.parse(JSON.stringify(plan));
 eventPlan.catalyst_expiry_date = eventPlan.review_end_trade_date;
 assert.equal(validateTenDayTradePlan(eventPlan, { ...primary, qualification_track: "event_catalyst" }).valid, true);
+const range = {
+  contract_version: "horizon-range-v1", low_pct: -4, high_pct: 8,
+  text: "-4.0% ~ +8.0%", horizon_trade_days: 10,
+  method_id: "realized-vol-drift-shadow-v1", calibrated: false,
+  source_observations: 20,
+  source_window_start_date: "2026-07-31", source_window_end_date: "2026-08-28",
+};
+const v2Primary = { ...primary, estimated_10d_range: range };
+const v2Plan = { ...plan, contract_version: "ten-day-trade-plan-v2", scenario_range: range };
+assert.equal(validateTenDayTradePlan(v2Plan, v2Primary, { estimated_10d_range: range }).valid, true);
+const v2View = tenSessionTradePlan({ estimated_10d_range: range }, { ...v2Primary, ten_day_trade_plan: v2Plan });
+assert.equal(v2View.rangeProvenanceAvailable, true);
+assert.equal(v2View.rangeCalibrated, false);
+assert.equal(v2View.rangeObservationCount, 20);
+for (const mutate of [
+  (copy) => { copy.scenario_range.method_id = "invented"; },
+  (copy) => { copy.scenario_range.calibrated = true; },
+  (copy) => { copy.scenario_range.source_observations = 21; },
+  (copy) => { copy.scenario_range.text = "-4% ~ +8%"; },
+  (copy) => { copy.scenario_range.high_pct = 9; },
+]) {
+  const copy = JSON.parse(JSON.stringify(v2Plan));
+  mutate(copy);
+  assert.equal(validateTenDayTradePlan(copy, v2Primary, { estimated_10d_range: range }).valid, false);
+}
 """
         )
 
@@ -204,11 +233,34 @@ state.candidateFilters = { market: "us", risk: "all", route: "all", query: "Appl
 const candidateUrl = resourceListUrl("candidates", 1);
 assert.match(candidateUrl, /market=us/);
 assert.match(candidateUrl, /q=apple/);
-state.eventFilters = { market: "hk", type: "all", direction: "all", query: "Tencent" };
+state.eventFilters = { market: "hk", type: "results", direction: "positive", query: "Tencent" };
 const eventUrl = resourceListUrl("events", 2);
 assert.match(eventUrl, /market=hk/);
-assert.match(eventUrl, /issuer=tencent/);
+assert.match(eventUrl, /event_type=results/);
+assert.match(eventUrl, /direction=positive/);
+assert.match(eventUrl, /q=tencent/);
 assert.match(eventUrl, /page=2/);
+const eventPayload = {
+  contract_version: "event-list-v2",
+  snapshot_key: state.snapshot.snapshot_key,
+  generated_at: state.snapshot.generated_at,
+  source_snapshot: { ...state.snapshot.source_snapshot },
+  ordering_contract_version: "decision-bound-first-then-published-desc-v1",
+  event_publication: {
+    total: 1, published: 1, truncated: 0, is_truncated: false,
+    ordering_contract_version: "decision-bound-first-then-published-desc-v1",
+    decision_bound_event_ids: ["evt-1"], production_bound_event_ids: ["evt-1"],
+    decision_bound_event_count: 1, decision_bound_record_count: 1,
+  },
+  decision_bound: { total: 1, matched: 1, returned: 1, all_matched_returned: true, ids: ["evt-1"] },
+  page: 1, limit: 25, total: 1, has_more: false,
+  events: [{ event_id: "evt-1", market: "hk", decision_bound: true }],
+};
+validateResourcePayload("events", eventPayload, { queryKey: resourceQueryKey("events") });
+assert.throws(() => validateResourcePayload("events", {
+  ...eventPayload,
+  event_publication: { ...eventPayload.event_publication, decision_bound_event_count: 2 },
+}, { queryKey: resourceQueryKey("events") }));
 const payload = {
   contract_version: "candidate-list-v1",
   snapshot_key: state.snapshot.snapshot_key,
@@ -220,10 +272,75 @@ const payload = {
 };
 validateResourcePayload("candidates", payload, { queryKey: resourceQueryKey("candidates") });
 assert.equal(payload.scanned_count, 800);
-assert.throws(() => validateResourcePayload("candidates", { ...payload, contract_version: "candidate-list-v2" }));
+const roleSelection = {
+  role_contract_version: "candidate-role-v1", action: "NO_QUALIFIED_PICK",
+  primary_candidate_id: null, qualified_candidate_ids: [], qualified_candidate_count: 0,
+};
+const v2Payload = {
+  ...payload,
+  contract_version: "candidate-list-v2",
+  role_contract_version: "candidate-role-v1",
+  production_selection: roleSelection,
+  candidates: payload.candidates.map((row) => ({
+    ...row,
+    role_contract_version: "candidate-role-v1",
+    decision_roles: { production: "NONE", legacy: "PRIMARY", research: "NONE" },
+    decision_role: "legacy_market_primary",
+  })),
+};
+validateResourcePayload("candidates", v2Payload, { queryKey: resourceQueryKey("candidates") });
+assert.throws(() => validateResourcePayload("candidates", {
+  ...v2Payload,
+  candidates: v2Payload.candidates.map((row) => ({
+    ...row,
+    decision_roles: { ...row.decision_roles, production: "PRIMARY" },
+    decision_role: "production_primary",
+    production_rank: 1,
+  })),
+}));
 assert.throws(() => validateResourcePayload("candidates", {
   ...payload, source_snapshot: { ...payload.source_snapshot, byte_size: 1235 },
 }));
+const qualified = {
+  status: "QUALIFIED", market: "us", code: "AAPL", name: "Apple",
+  qualification_id: "qual_0123456789abcdef01234567", qualification_score: 80,
+  rule_model_id: "ten-day-audited-rule-ensemble-v4", score_kind: "RULE_QUALIFICATION_SCORE",
+  probability: null, calibrated: false,
+  candidate_snapshot: { market: "us", code: "AAPL", name: "Apple" },
+};
+state.snapshot = {
+  ...state.snapshot,
+  contract_version: "ui-bootstrap-v1",
+  model_version: CURRENT_PRODUCTION_MODEL_VERSION,
+  production_decision: {
+    contract_version: "production-rule-10d-v1", decision_scope: "global_10d_bounded_recall",
+    action_basis: "dual_track_candidate_qualification_v4", action: "QUALIFIED_PICK",
+    rule_model_id: "ten-day-audited-rule-ensemble-v4", score_kind: "RULE_QUALIFICATION_SCORE",
+    probability: null, calibrated: false, primary: qualified,
+    qualified_candidates: [qualified], qualified_candidate_count: 1,
+  },
+};
+state.status = {
+  ok: true, snapshot_key: state.snapshot.snapshot_key, generated_at: state.snapshot.generated_at,
+  source_snapshot_sha256: state.snapshot.source_snapshot.sha256,
+  source_snapshot_byte_size: state.snapshot.source_snapshot.byte_size,
+  freshness_state: "fresh",
+  snapshot_use: { mode: "CURRENT_RESEARCH", current_decision_allowed: true, execution_review_allowed: true },
+};
+const productionCandidate = {
+  ...v2Payload.candidates[0],
+  decision_roles: { production: "PRIMARY", legacy: "PRIMARY", research: "NONE" },
+  decision_role: "production_primary", production_rank: 1,
+};
+const legacyOnlyCandidate = {
+  ...productionCandidate,
+  decision_roles: { production: "NONE", legacy: "PRIMARY", research: "NONE" },
+  decision_role: "legacy_market_primary",
+};
+assert.equal(candidateDecisionRole(productionCandidate, "us"), "production_primary");
+assert.equal(decisionRoleLabel("production_primary"), "规则主候选");
+assert.equal(candidateDecisionRole(legacyOnlyCandidate, "us"), "legacy_market_primary");
+assert.equal(decisionRoleLabel("legacy_market_primary"), "Legacy首选");
 const savedAny = AbortSignal.any;
 AbortSignal.any = undefined;
 const parent = new AbortController();
@@ -237,18 +354,45 @@ AbortSignal.any = savedAny;
         )
 
     def test_scheduler_health_is_contract_bound_and_never_hardcodes_success(self) -> None:
-        self.assertIn('scheduler: new Set(["scheduler-health-v1"])', self.js)
+        self.assertIn(
+            'scheduler: new Set(["scheduler-health-v2", "scheduler-health-v1"])',
+            self.js,
+        )
         self.assertIn('health: ["scheduler"]', self.js)
         self.assertIn('getJson("/api/gate-status", { signal })', self.js)
-        self.assertIn("主调度未启用", self.js)
+        self.assertIn("GitHub Actions 主调度", self.js)
+        self.assertIn("Cloudflare dispatch（可选）", self.js)
+        self.assertIn("可选 dispatch 未启用（不影响主调度）", self.js)
         self.assertIn("watchdog 状态未知", self.js)
-        self.assertIn("watchdog 生效（唯一自动刷新）", self.js)
+        self.assertIn("30 分钟 watchdog 已配置", self.js)
+        self.assertIn("github_actions_primary_with_30m_watchdog", self.js)
         self.assertIn("active_refresh_mode", self.js)
         self.assertIn("next_active_refresh", self.js)
+        for field in (
+            "scheduler_primary_provider",
+            "scheduler_primary_enabled",
+            "cloudflare_dispatch_enabled",
+            "publication_slo_seconds",
+            "publication_within_slo",
+            "scheduler_readiness",
+            "checkpoint_evidence_ready",
+            "expected_checkpoints_24h",
+            "published_on_time_24h",
+            "late_recoveries_24h",
+            "evidence_lag_batches",
+            "scheduler_slo",
+            "research_decision_ready",
+            "unattended_refresh_ready",
+            "calibrated_execution_ready",
+        ):
+            self.assertIn(field, self.js)
+        self.assertIn("证据初始化中", self.js)
+        self.assertIn("发布服务目标（非保证）", self.js)
         self.assertIn("us-post-close-schedule-v1", self.js)
         self.assertIn("04:17", self.js)
         self.assertIn("05:17", self.js)
         self.assertNotIn('badge("已配置"', self.js)
+        self.assertNotIn('label: "Cloudflare 主调度"', self.js)
         self.assertNotIn("；>${esc(scheduler.usScheduleDays)}", self.js)
         self.assertIn("全池结构风险筛查", self.js)
         self.assertIn("当前 R2 未启用，内嵌同代资产生效", self.js)
@@ -262,24 +406,41 @@ state.snapshot = {
 };
 const gate = {
   ok: true,
-  contract_version: "scheduler-health-v1",
+  contract_version: "scheduler-health-v2",
   snapshot_key: state.snapshot.snapshot_key,
   generated_at: state.snapshot.generated_at,
   generation_started_at: "2026-08-29T10:18:00+08:00",
-  published_at: "2026-08-29T10:29:00+08:00",
-  publication_backend: "r2",
-  source_invocation_slot: "2026-08-29T10:17:00+08:00",
+  published_at: null,
+  publication_backend: "embedded",
+  source_invocation_slot: null,
   effective_checkpoint: "2026-08-29T10:17:00+08:00",
   effective_invocation_slot: "2026-08-29T10:17:00+08:00",
   scheduler_start_delay_seconds: 60,
   generation_delay_seconds: 600,
-  publication_delay_seconds: 720,
-  missed_checkpoints_24h: 0,
-  checkpoint_coverage_status: "COMPLETE_24H_LEDGER",
+  publication_delay_seconds: null,
+  missed_checkpoints_24h: null,
+  checkpoint_coverage_status: "INITIALIZING_24H_LEDGER",
   checkpoint_evidence_contract_version: "scheduler-checkpoint-ledger-v1",
   recovery_mode: "none",
-  scheduler_enabled: false,
-  scheduler_gap: "GITHUB_WORKFLOW_DISPATCH_TOKEN_NOT_PROVISIONED",
+  scheduler_primary_provider: "github_actions",
+  scheduler_primary_enabled: true,
+  cloudflare_dispatch_enabled: false,
+  publication_slo_seconds: 2700,
+  publication_within_slo: null,
+  scheduler_readiness: "INITIALIZING",
+  checkpoint_evidence_ready: false,
+  unattended_refresh_ready: false,
+  expected_checkpoints_24h: 0,
+  published_on_time_24h: 0,
+  late_recoveries_24h: 0,
+  evidence_lag_batches: 1,
+  scheduler_slo: {
+    contract_version: "scheduler-slo-v1",
+    guaranteed: false,
+    public_data_source_sla: false,
+    target_publication_within_minutes: 45,
+    coverage_window_hours: 24,
+  },
 };
 assert.equal(validateResourcePayload("scheduler", gate), gate);
 state.schedulerGate = gate;
@@ -289,8 +450,14 @@ state.status = {
   generated_at: state.snapshot.generated_at,
   source_snapshot_sha256: state.snapshot.source_snapshot.sha256,
   source_snapshot_byte_size: state.snapshot.source_snapshot.byte_size,
-  scheduler_primary_enabled: false,
-  active_refresh_mode: "github_watchdog_only",
+  scheduler_primary_provider: "github_actions",
+  scheduler_primary_enabled: true,
+  cloudflare_dispatch_enabled: false,
+  active_refresh_mode: "github_actions_primary_with_30m_watchdog",
+  research_decision_ready: true,
+  checkpoint_evidence_ready: false,
+  unattended_refresh_ready: false,
+  calibrated_execution_ready: false,
   next_active_refresh: "2026-09-01T08:47:00+08:00",
   schedule_us_post_close: {
     contract_version: "us-post-close-schedule-v1",
@@ -304,27 +471,101 @@ state.status = {
 };
 assert.equal(validActiveRefreshStatus(), true);
 let view = schedulerHealthPresentation();
-assert.equal(view.primaryState, "DISABLED");
-assert.equal(view.primaryLabel, "主调度未启用");
-assert.equal(view.watchdogLabel, "watchdog 生效（唯一自动刷新）");
+assert.equal(view.primaryState, "ENABLED");
+assert.equal(view.primaryLabel, "GitHub Actions 主调度已启用");
+assert.equal(view.cloudflareDispatchLabel, "可选 dispatch 未启用（不影响主调度）");
+assert.equal(view.watchdogLabel, "30 分钟 watchdog 已配置");
 assert.equal(view.nextActiveRefresh, state.status.next_active_refresh);
 assert.equal(view.usPrimaryCheckpoints, "04:17 夏令时 / 05:17 冬令时");
-assert.equal(view.hasBatchPublicationEvidence, true);
-assert.match(view.checkpointEvidence, /24 小时遗漏 0 个/);
+assert.equal(view.schedulerReadiness, "INITIALIZING");
+assert.equal(view.readinessLabel, "证据初始化中");
+assert.equal(view.hasBatchPublicationEvidence, false);
+assert.match(view.checkpointEvidence, /证据初始化中/);
+assert.doesNotMatch(view.checkpointEvidence, /\b0\b/);
+assert.match(view.publicationSlo, /非保证/);
+assert.match(view.publicationSlo, /证据初始化中/);
+assert.equal(view.readinessLayers.research.label, "已就绪");
+assert.equal(view.readinessLayers.checkpoint.label, "证据初始化中");
+assert.equal(view.readinessLayers.unattended.label, "证据初始化中");
+assert.equal(view.readinessLayers.calibrated.label, "证据初始化中");
 assert.throws(() => validateResourcePayload("scheduler", { ...gate, snapshot_key: "other.json" }));
-assert.throws(() => validateResourcePayload("scheduler", { ...gate, scheduler_enabled: true }));
+assert.throws(() => validateResourcePayload("scheduler", { ...gate, scheduler_primary_provider: "cloudflare" }));
+assert.throws(() => validateResourcePayload("scheduler", {
+  ...gate, scheduler_slo: { ...gate.scheduler_slo, guaranteed: true },
+}));
+assert.throws(() => validateResourcePayload("scheduler", { ...gate, publication_within_slo: false }));
+
+const readyGate = {
+  ...gate,
+  published_at: "2026-08-29T10:29:00+08:00",
+  source_invocation_slot: "2026-08-29T10:17:00+08:00",
+  publication_delay_seconds: 720,
+  missed_checkpoints_24h: 0,
+  checkpoint_coverage_status: "COMPLETE_24H_LEDGER",
+  publication_within_slo: true,
+  scheduler_readiness: "READY",
+  checkpoint_evidence_ready: true,
+  unattended_refresh_ready: true,
+  expected_checkpoints_24h: 7,
+  published_on_time_24h: 7,
+};
+assert.equal(validateResourcePayload("scheduler", readyGate), readyGate);
+state.schedulerGate = readyGate;
 state.status = {
   ...state.status,
-  scheduler_primary_enabled: true,
-  active_refresh_mode: "cloudflare_primary_with_github_watchdog",
+  checkpoint_evidence_ready: true,
+  unattended_refresh_ready: true,
 };
 view = schedulerHealthPresentation();
-assert.equal(view.primaryState, "UNKNOWN", "status and gate disagreement must fail closed");
-assert.equal(view.watchdogLabel, "watchdog 状态未知");
+assert.equal(view.schedulerReadiness, "READY");
+assert.equal(view.readinessLabel, "调度证据就绪");
+assert.match(view.checkpointEvidence, /应有 7/);
+assert.match(view.checkpointEvidence, /按时 7/);
+assert.match(view.publicationSlo, /最近批次在目标内/);
+assert.equal(view.readinessLayers.checkpoint.label, "已就绪");
+assert.equal(view.readinessLayers.unattended.label, "已就绪");
+assert.equal(view.readinessLayers.calibrated.label, "未就绪");
+
+const degradedGate = {
+  ...readyGate,
+  scheduler_readiness: "DEGRADED",
+  publication_within_slo: false,
+  published_on_time_24h: 6,
+  late_recoveries_24h: 1,
+  checkpoint_evidence_ready: true,
+  unattended_refresh_ready: false,
+};
+assert.equal(validateResourcePayload("scheduler", degradedGate), degradedGate);
+state.schedulerGate = degradedGate;
+state.status = { ...state.status, checkpoint_evidence_ready: true, unattended_refresh_ready: false };
+view = schedulerHealthPresentation();
+assert.equal(view.schedulerReadiness, "DEGRADED");
+assert.equal(view.readinessLabel, "调度证据降级");
+assert.equal(view.readinessLayers.checkpoint.label, "已就绪", "complete degraded evidence is still inspectable");
+assert.equal(view.readinessLayers.unattended.label, "未就绪");
+assert.match(view.publicationSlo, /最近批次超出目标/);
+
+state.status = { ...state.status, cloudflare_dispatch_enabled: true };
+view = schedulerHealthPresentation();
+assert.equal(schedulerHealthPresentation().primaryState, "UNKNOWN");
+
+const legacyGate = {
+  ...gate,
+  contract_version: "scheduler-health-v1",
+  published_at: "2026-08-29T10:29:00+08:00",
+  source_invocation_slot: "2026-08-29T10:17:00+08:00",
+  publication_delay_seconds: 720,
+  missed_checkpoints_24h: 0,
+  checkpoint_coverage_status: "COMPLETE_24H_LEDGER",
+  scheduler_enabled: false,
+  scheduler_gap: "GITHUB_WORKFLOW_DISPATCH_TOKEN_NOT_PROVISIONED",
+};
+assert.equal(validateResourcePayload("scheduler", legacyGate), legacyGate);
+state.schedulerGate = legacyGate;
 state.status = {};
 view = schedulerHealthPresentation();
-assert.equal(view.primaryState, "DISABLED", "older status may use the validated gate for primary state only");
-assert.equal(view.watchdogLabel, "watchdog 状态未知");
+assert.equal(view.primaryState, "UNKNOWN", "v1 is accepted read-only, never promoted to GitHub primary evidence");
+assert.match(view.gapLabel, /旧版调度合同/);
 state.schedulerGate = null;
 assert.equal(schedulerHealthPresentation().primaryState, "UNKNOWN");
 """
@@ -378,7 +619,8 @@ assert.equal(schedulerHealthPresentation().primaryState, "UNKNOWN");
         self.assertIn("resourceQueryKey", self.js)
         self.assertIn("resourceListUrl", self.js)
         self.assertIn('url.searchParams.set("q", query)', self.js)
-        self.assertIn('url.searchParams.set("issuer", query)', self.js)
+        self.assertIn('url.searchParams.set("event_type", eventType)', self.js)
+        self.assertIn('url.searchParams.set("direction", direction)', self.js)
         self.assertIn("reloadPagedResource", self.js)
         self.assertIn("candidateDialogFocusables", self.js)
         self.assertIn('element.setAttribute("inert", "")', self.js)
@@ -767,7 +1009,11 @@ assert.equal(afterTruth.executable.primary.code, beforeTruth.executable.primary.
 assert.deepEqual(afterEvidence, beforeEvidence);
 assert.equal(publishedEventStats().modelSignals, 3);
 assert.equal(__roots.get("#healthView").innerHTML, beforeHealth);
-assert.deepEqual(automaticEventFeed().map((item) => item.event_id), ["unbound-newer"]);
+assert.deepEqual(
+  automaticEventFeed().map((item) => item.event_id),
+  ["evt-global-primary", "unbound-newer"],
+  "bootstrap-bound evidence remains visible after lazy event loading",
+);
 """
         )
 
@@ -933,7 +1179,9 @@ assert.doesNotMatch(html, /仍需核对交易计划/);
         self.assertIn("qualifiedCount: currentQualified ? qualifiedRows.length : 0", self.js)
         self.assertIn("publishedCount !== rows.length", self.js)
         self.assertIn("const publishedQualified = productionQualifiedRows(state.snapshot, market)", self.js)
-        self.assertIn("const rolePriority = { qualified: 0", self.js)
+        self.assertIn("production_primary: 0", self.js)
+        self.assertIn('production_primary: "规则主候选"', self.js)
+        self.assertIn('legacy_market_primary: "Legacy首选"', self.js)
         self.assertIn("syncPreferredCandidate({ revealQualified: true })", self.js)
         self.assertIn("productionPrimary.rule_model_id || item.production_decision?.rule_model_id", self.js)
         self.assertIn("全局校准模型结论", self.js)
@@ -950,7 +1198,7 @@ assert.doesNotMatch(html, /仍需核对交易计划/);
     def test_v4_dual_track_qualification_is_named_without_inventing_event_evidence(self) -> None:
         self.assertIn('decision.action_basis === "dual_track_candidate_qualification_v4"', self.js)
         self.assertIn('decision.rule_model_id === "ten-day-audited-rule-ensemble-v4"', self.js)
-        self.assertIn('inputs.contract_version !== "production-rule-inputs-v2"', self.js)
+        self.assertIn('["production-rule-inputs-v2", "production-rule-inputs-v3"]', self.js)
         self.assertRegex(self.js, r"function qualificationTrackLabel\(track\)")
         self.assertIn('event_catalyst: "事件催化合格"', self.js)
         self.assertIn('quality_technical: "质量趋势合格"', self.js)
@@ -1417,12 +1665,42 @@ state.snapshot = {
   },
 };
 
+const boundEvidence = state.snapshot.events.items[0];
+state.snapshot.decision_evidence = {
+  bound_event_ids: [boundEvidence.event_id],
+  bound_event_count: 1,
+  items: [boundEvidence],
+};
+delete state.snapshot.events;
+state.eventsPayload = {
+  events: [{
+    ...boundEvidence,
+    event_id: "evt:newer-unbound",
+    symbol: "0700.HK",
+    company: "腾讯",
+    title: "首屏非绑定事件",
+    decision_bound: false,
+  }],
+  total: 485,
+  event_publication: {
+    total: 485, published: 485, truncated: 0,
+    decision_bound_event_ids: [boundEvidence.event_id],
+    decision_bound_event_count: 1,
+  },
+};
+assert.deepEqual(
+  publishedEventItems().map((event) => event.event_id),
+  ["evt:midea", "evt:newer-unbound"],
+  "bootstrap-bound evidence must survive a lazy first page without that id",
+);
+
 renderEvents();
 const html = __roots.get("#eventsView").innerHTML;
 for (const text of [
   "美的集团", "威瑞森通讯(Verizon)", "辉瑞",
   "规则资格分 88.8", "规则资格分 76.3", "规则资格分 76.6",
   "事件催化合格", "质量趋势合格", "evt:midea",
+  "1 / 1", "已解析 1 / 1 个绑定 event_id",
 ]) assert.ok(html.includes(text), `missing event audit text: ${text}`);
 assert.equal((html.match(/全池结构化风险筛查通过当前规则；不等于官方确认不存在全部负面事件；本通道不要求正向催化深扫/g) || []).length, 2);
 assert.equal((html.match(/合格候选（非主候选）/g) || []).length, 2);
