@@ -301,7 +301,11 @@ jobs:
                 git worktree remove --force "${settlement_tree}"
                 exit 1
               fi
-              git worktree remove "${settlement_tree}"
+              # Asset generation intentionally updates manifests inside this
+              # disposable worktree. The verified deployment is complete, so
+              # remove the temporary checkout even though those build outputs
+              # are dirty.
+              git worktree remove --force "${settlement_tree}"
               exit 0
             fi
 
@@ -343,7 +347,9 @@ jobs:
                 git worktree remove --force "${settlement_tree}"
                 exit 1
               fi
-              git worktree remove "${settlement_tree}"
+              # publish_history_only builds generated assets in this disposable
+              # checkout; force is required after the deployment is verified.
+              git worktree remove --force "${settlement_tree}"
               echo "Observation settlements published successfully."
               exit 0
             fi

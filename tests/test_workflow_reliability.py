@@ -499,6 +499,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertEqual(workflow.count('publish_history_only "${settlement_tree}"'), 2)
         self.assertEqual(workflow.count('history_publish_status="$?"'), 2)
         self.assertNotIn('if ! publish_history_only', workflow)
+        self.assertNotIn('git worktree remove "${settlement_tree}"', workflow)
         self.assertNotIn("git add data\n", workflow)
         self.assertNotIn("continue-on-error", workflow)
         self.assertNotIn("--retries 2", workflow)
