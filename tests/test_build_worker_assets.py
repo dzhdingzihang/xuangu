@@ -1356,6 +1356,17 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         }
         snapshot["production_decision"]["primary"]["ten_day_trade_plan"] = copy.deepcopy(trade_plan)
         snapshot["production_decision"]["qualified_candidates"][0]["ten_day_trade_plan"] = copy.deepcopy(trade_plan)
+        for row in (
+            snapshot["production_decision"]["primary"],
+            snapshot["production_decision"]["qualified_candidates"][0],
+        ):
+            row["qualification_track"] = "event_catalyst"
+            row["event_candidate_scanned"] = True
+            row["verified_positive_event_ids"] = ["event-1", "event-2"]
+        snapshot["events"] = [
+            {"event_id": "event-1"},
+            {"event_id": "event-2"},
+        ]
         source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
         latest_summary = {
             "snapshot_key": snapshot["snapshot_key"],
@@ -1417,6 +1428,16 @@ class BuildWorkerAssetsTests(unittest.TestCase):
             )
             candidate_list = json.loads((data_root / manifest["candidates_key"]).read_text())
             self.assertTrue(candidate_list["candidates"])
+            self.assertEqual(
+                candidate_list["evaluated_count"],
+                snapshot["production_decision"]["evaluated_candidate_count"],
+            )
+            pfe_row = next(row for row in candidate_list["candidates"] if row["code"] == "PFE")
+            self.assertTrue(pfe_row["qualification"]["event_candidate_scanned"])
+            self.assertEqual(
+                pfe_row["qualification"]["verified_positive_event_ids"],
+                ["event-1", "event-2"],
+            )
             history_list = json.loads((data_root / manifest["history_key"]).read_text())
             history_row = history_list["history"][0]
             self.assertNotIn("analysis_models", history_row)
@@ -1440,7 +1461,6 @@ class BuildWorkerAssetsTests(unittest.TestCase):
                 runtime_payload["global_decision"]["event_coverage"],
                 snapshot["global_decision"]["event_coverage"],
             )
-            pfe_row = next(row for row in candidate_list["candidates"] if row["code"] == "PFE")
             self.assertEqual(pfe_row["ten_day_trade_plan"], trade_plan)
             candidate_id = candidate_list["candidates"][0]["id"]
             detail = json.loads(

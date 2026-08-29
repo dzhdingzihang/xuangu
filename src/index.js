@@ -2421,6 +2421,9 @@ async function handleApi(request, env) {
           snapshot_sha256: asset.snapshot_sha256,
           source_snapshot: asset.source_snapshot,
           scanned_count: asset.scanned_count || 0,
+          evaluated_count: asset.evaluated_count
+            ?? runtime?.production_decision?.evaluated_candidate_count
+            ?? 0,
           candidate_count: filtered.length,
           page: page.page,
           limit: page.limit,

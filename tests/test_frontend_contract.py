@@ -164,6 +164,33 @@ assert.equal(validateTenDayTradePlan(eventPlan, { ...primary, qualification_trac
 """
         )
 
+    def test_shortlist_distinguishes_recall_from_rule_evaluation_and_projects_event_evidence(self) -> None:
+        self.assertIn("const recalled = num(state.candidatePayload?.scanned_count", self.js)
+        self.assertIn("const evaluated = num(state.candidatePayload?.evaluated_count", self.js)
+        self.assertIn("召回 ${fmt(recalled, 0)} · 规则评估 ${fmt(evaluated, 0)}", self.js)
+        run_app_node(
+            r"""
+assert.equal(candidateEventGrade({
+  qualification: {
+    status: "QUALIFIED",
+    qualification_track: "event_catalyst",
+    event_candidate_scanned: true,
+    verified_positive_event_ids: ["event-1"],
+  },
+}), "正向证据已核验");
+assert.equal(candidateEventGrade({
+  qualification: {
+    status: "QUALIFIED",
+    qualification_track: "quality_technical",
+    event_candidate_scanned: false,
+    verified_positive_event_ids: [],
+  },
+}), "结构化风险筛查 PASS");
+assert.equal(candidateEventGrade({ event_candidate_scanned: true }), "事件已扫描");
+assert.equal(candidateEventGrade({}), "覆盖待确认");
+"""
+        )
+
     def test_paged_api_filters_identity_and_abort_timeout_fallback_fail_closed(self) -> None:
         run_app_node(
             r"""
@@ -305,7 +332,7 @@ assert.equal(schedulerHealthPresentation().primaryState, "UNKNOWN");
 
     def test_shortlist_is_list_first_and_loads_details_on_demand(self) -> None:
         self.assertIn("决策短名单", self.html + self.js)
-        self.assertIn("已扫描 ${fmt(scanned, 0)}，只展示 ${fmt(published, 0)}", self.js)
+        self.assertIn("召回 ${fmt(recalled, 0)} · 规则评估 ${fmt(evaluated, 0)} · 发布 ${fmt(published, 0)}", self.js)
         self.assertIn("candidateApiId", self.js)
         self.assertIn("/api/candidates/${encodeURIComponent(apiId)}", self.js)
         self.assertIn("candidate-detail-host", self.js + self.css)

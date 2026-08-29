@@ -2948,7 +2948,7 @@ function renderDecision() {
   const entryZone = Number.isFinite(Number(plan.entryZoneLow)) || Number.isFinite(Number(plan.entryZoneHigh))
     ? `${tradePlanValue(plan.entryZoneLow, plan.currency)} – ${tradePlanValue(plan.entryZoneHigh, plan.currency)}`
     : "待发布";
-  const scannedCount = num(state.candidatePayload?.scanned_count, production.serverDecision?.evaluated_candidate_count);
+  const scannedCount = num(production.serverDecision?.evaluated_candidate_count, state.candidatePayload?.evaluated_count);
   const publishedCount = num(state.candidatePayload?.total, state.candidates.length || production.currentQualifiedCount);
   const defaultBlockerCopy = decisionState === "NO_ACTION"
     ? "详细门禁原因已收纳到高级详情，默认视图不展示内部原因码。"
@@ -3204,10 +3204,20 @@ function candidateDownsideLabel(candidate, risk = candidateRiskLevel(candidate))
 function candidateEventGrade(candidate) {
   const riskScreen = candidate?.risk_screen || candidate?.risk_event_screen || {};
   const enrichment = candidate?.positive_event_enrichment || {};
+  const qualification = candidate?.qualification || candidate?.production_qualification || {};
+  const verifiedEventIds = enrichment.verified_positive_event_ids
+    || candidate?.verified_positive_event_ids
+    || qualification.verified_positive_event_ids
+    || [];
   if (String(riskScreen.status || "").toUpperCase() === "BLOCKED") return "负面风险阻断";
-  if ((enrichment.verified_positive_event_ids || candidate?.verified_positive_event_ids || []).length) return "正向证据已核验";
+  if (verifiedEventIds.length) return "正向证据已核验";
   if (String(riskScreen.status || "").toUpperCase() === "PASS") return "结构化风险筛查 PASS";
-  return candidate?.event_candidate_scanned === true ? "事件已扫描" : "覆盖待确认";
+  if (qualification.status === "QUALIFIED" && qualification.qualification_track === "quality_technical") {
+    return "结构化风险筛查 PASS";
+  }
+  return candidate?.event_candidate_scanned === true || qualification.event_candidate_scanned === true
+    ? "事件已扫描"
+    : "覆盖待确认";
 }
 
 function restoreCandidateDialogBackground() {
@@ -3274,7 +3284,8 @@ function renderCandidates() {
   const rows = filteredCandidates();
   const selected = selectedCandidateRow(rows);
   const all = allCandidates();
-  const scanned = num(state.candidatePayload?.scanned_count, production.serverDecision?.evaluated_candidate_count);
+  const recalled = num(state.candidatePayload?.scanned_count, production.serverDecision?.evaluated_candidate_count);
+  const evaluated = num(state.candidatePayload?.evaluated_count, production.serverDecision?.evaluated_candidate_count);
   const published = num(state.candidatePayload?.total, all.length);
   const blocked = all.filter((row) => candidateRiskLevel(row.candidate, row.market) === "blocked").length;
   const withLineage = all.filter((row) => routeNames(row.candidate).length).length;
@@ -3307,7 +3318,7 @@ function renderCandidates() {
   };
   root.innerHTML = `
     <div class="toolbar candidates-toolbar">
-      <div class="toolbar-left"><div><h2>决策短名单</h2><p><strong>已扫描 ${fmt(scanned, 0)}，只展示 ${fmt(published, 0)}</strong> · 点击候选后再按需读取完整证据</p></div></div>
+      <div class="toolbar-left"><div><h2>决策短名单</h2><p><strong>召回 ${fmt(recalled, 0)} · 规则评估 ${fmt(evaluated, 0)} · 展示 ${fmt(published, 0)}</strong> · 点击候选后再按需读取完整证据</p></div></div>
       <div class="toolbar-right"><label class="search-field">${icon("ph-magnifying-glass")}<input id="candidateSearch" type="search" value="${esc(state.candidateFilters.query)}" placeholder="搜索公司 / 代码" aria-label="搜索候选"></label></div>
     </div>
     <div class="callout ${production.qualifiedCount ? "info" : historicalOnly ? "warning" : ["warning", "negative"].includes(tenDayPresentation.tone) ? tenDayPresentation.tone : ""} section-callout shadow-model-callout">${icon(production.qualifiedCount ? "ph-check-circle" : historicalOnly ? "ph-warning-octagon" : tenDayPresentation.icon)}<div><strong>${esc(candidateTrackTitle)}</strong><br>${esc(candidateTrackDetail)} 两条轨道分开展示；规则资格分不是上涨概率。<span class="formal-candidate-count">当前规则合格 ${fmt(production.currentQualifiedCount, 0)} · 历史发布合格 ${fmt(production.historicalQualifiedCount, 0)} · 校准可执行 ${fmt(truth.executableCount, 0)}</span>${tenDayPresentation.reasonCodes.length ? `<small>校准轨原因码：${esc(tenDayPresentation.reasonCodes.join(" · "))}</small>` : ""}</div></div>
@@ -3325,8 +3336,8 @@ function renderCandidates() {
       }),
     ])}
     <div class="master-detail candidate-master-detail">
-      <section class="panel candidate-table-panel"><header class="panel-header"><div><h3 class="panel-title">决策短名单</h3><p class="panel-subtitle">先看结论、十日区间、下行风险和事件覆盖；推荐度不是收益概率，评分细项放在详情</p></div><span class="shortlist-count">已扫描 ${fmt(scanned, 0)} · 发布 ${fmt(published, 0)}</span></header>
-        ${rows.length ? `<div class="data-table-wrap"><table class="data-table candidate-shortlist-table"><caption class="visually-hidden">决策短名单：已扫描 ${fmt(scanned, 0)} 只，当前发布 ${fmt(published, 0)} 只</caption><thead><tr><th>市场</th><th>公司 / 代码</th><th>统一结论</th><th>十日情景</th><th>下行风险</th><th>事件覆盖</th><th></th></tr></thead><tbody>${rows.map((row) => {
+      <section class="panel candidate-table-panel"><header class="panel-header"><div><h3 class="panel-title">决策短名单</h3><p class="panel-subtitle">先看结论、十日区间、下行风险和事件覆盖；推荐度不是收益概率，评分细项放在详情</p></div><span class="shortlist-count">召回 ${fmt(recalled, 0)} · 规则评估 ${fmt(evaluated, 0)} · 发布 ${fmt(published, 0)}</span></header>
+        ${rows.length ? `<div class="data-table-wrap"><table class="data-table candidate-shortlist-table"><caption class="visually-hidden">决策短名单：召回 ${fmt(recalled, 0)} 只，规则评估 ${fmt(evaluated, 0)} 只，当前发布 ${fmt(published, 0)} 只</caption><thead><tr><th>市场</th><th>公司 / 代码</th><th>统一结论</th><th>十日情景</th><th>下行风险</th><th>事件覆盖</th><th></th></tr></thead><tbody>${rows.map((row) => {
           const c = row.candidate;
           const key = candidateId(row.candidate, row.market);
           const risk = candidateRiskLevel(c, row.market);

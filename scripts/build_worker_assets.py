@@ -1716,6 +1716,7 @@ def _candidate_list_row(snapshot_key: str, candidate: dict) -> dict:
                 "qualification_score", "score_kind", "probability_status",
                 "data_quality_score", "entry_price", "entry_trade_date",
                 "forecast_end_trade_date", "estimated_10d_range", "risk_reward",
+                "event_candidate_scanned", "verified_positive_event_ids",
             )
             if key in qualification
         } or None,
@@ -1897,11 +1898,15 @@ def build_data_manifest_assets(
         )
         for market in LIVE_MARKETS
     )
+    production_decision = snapshot.get("production_decision")
+    production_decision = production_decision if isinstance(production_decision, dict) else {}
+    evaluated_count = int(production_decision.get("evaluated_candidate_count") or 0)
     candidate_payload = {
         "contract_version": CANDIDATE_LIST_CONTRACT_VERSION,
         **identity,
         "candidate_count": len(compact_rows),
         "scanned_count": scanned_count,
+        "evaluated_count": evaluated_count,
         "candidates": compact_rows,
         "dual_low_model": copy.deepcopy(candidate_source.get("dual_low_model") or {}),
     }

@@ -524,7 +524,8 @@ class WorkerApiContractTests(unittest.TestCase):
             const liveIndex = {{ contract_version: "worker-live-index-v1", ...identity }};
             const summary = {{ contract_version: "ui-bootstrap-v1", ...identity, markets: {{}} }};
             const candidates = {{
-              contract_version: "candidate-list-v1", ...identity, scanned_count: 800,
+              contract_version: "candidate-list-v1", ...identity,
+              scanned_count: 800, evaluated_count: 799,
               candidates: [
                 {{ id: "cand_00000000000000000001", market: "us", code: "AAPL", name: "Apple", decision_role: "qualified" }},
                 {{ id: "cand_00000000000000000002", market: "us", code: "AMD", name: "Advanced Micro Devices", decision_role: "watchlist" }},
@@ -610,6 +611,7 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(list.total, 1);
             assert.equal(list.returned_count, 1);
             assert.equal(list.scanned_count, 800);
+            assert.equal(list.evaluated_count, 799);
             assert.equal(list.candidates[0].code, "AAPL");
             assert.deepEqual(list.source_snapshot, source);
             assert.equal(listResponse.headers.get("etag"), null);
