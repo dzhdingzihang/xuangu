@@ -36,6 +36,7 @@ import history_evaluation
 import model_observation_ledger
 import observation_outcome_ledger
 import production_rule_model
+import rule_outcome_ledger
 
 try:
     import ten_day_model
@@ -51,6 +52,11 @@ try:
     import ten_day_rank_model
 except ImportError:  # The parallel excess-return model must fail closed while it is collecting data.
     ten_day_rank_model = None
+
+try:
+    import rank_sample_pipeline
+except ImportError:  # Point-in-time rank samples are optional only at import time.
+    rank_sample_pipeline = None
 
 from market_calendar import (
     CALENDAR_VERSION,
@@ -76,7 +82,7 @@ HK_US_KLINE_CACHE = CACHE / "runtime-cache" / "hk_us_daily.json"
 MARKET_RECALL_EXPANSION_PATH = CACHE / "universes" / "market_recall_expansion_v2.json"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
-MODEL_VERSION = "smart-selector-2026-08-26.2-dual-track-rule"
+MODEL_VERSION = "smart-selector-2026-08-29.1-two-tier-rule"
 FORECAST_TRADE_DAYS = 10
 FORECAST_LABEL = "未来2周"
 TEN_DAY_LABEL_VERSION = "r10-net-total-return-v1"
@@ -2557,11 +2563,15 @@ def history_payload(limit: int = 30, view: str = "daily") -> dict:
     view = "raw" if view == "raw" else "daily"
     selected_rows = rows if view == "raw" else days
     history = selected_rows[:limit]
+    rule_outcome_batches = rule_outcome_ledger.load_rule_outcome_batches(
+        OUTCOMES / "rule-settlements"
+    )
     evaluation = history_evaluation.build_history_evaluation(
         rows,
         snapshots,
         shadow_inventory,
         executable_inventory,
+        rule_outcome_batches,
     )
     observation_cohorts = model_observation_ledger.load_observation_cohorts(
         OUTCOMES / "observations"
@@ -2602,6 +2612,7 @@ def history_payload(limit: int = 30, view: str = "daily") -> dict:
     meta["executable_ledger"] = evaluation["executable_ledger"]
     meta["observation_ledger"] = observation_summary
     meta["observation_performance"] = observation_performance
+    meta["rule_outcome_tracking"] = evaluation["rule_outcome_tracking"]
     return {
         "ok": True,
         "time": now_cn().isoformat(timespec="seconds"),
@@ -2650,15 +2661,36 @@ def automation_metadata() -> dict:
     else:
         run_id = f"local:{now_cn().strftime('%Y%m%dT%H%M%S%z')}:{generation_attempt}"
     scheduler_delay = os.environ.get("SCHEDULER_DELAY_SECONDS")
+    scheduled_slot = os.environ.get("SCHEDULED_SLOT") or os.environ.get("SCHEDULE_GATE_SLOT") or None
+    scheduled_invocation = os.environ.get("SCHEDULED_INVOCATION_SLOT") or None
+    source_invocation = os.environ.get("SCHEDULED_SOURCE_INVOCATION_SLOT") or None
+    recovery_mode = os.environ.get("SCHEDULE_RECOVERY_MODE") or "none"
+    generation_started_at = (
+        os.environ.get("SCHEDULE_GENERATION_STARTED_AT")
+        or os.environ.get("SCHEDULE_GATE_EVALUATED_AT")
+        or now_cn().isoformat(timespec="seconds")
+    )
     return {
         "trigger": os.environ.get("AUTOMATION_TRIGGER") or os.environ.get("GITHUB_EVENT_NAME") or "local",
-        "scheduled_slot": os.environ.get("SCHEDULED_SLOT") or os.environ.get("SCHEDULE_GATE_SLOT") or None,
-        "scheduled_invocation_slot": os.environ.get("SCHEDULED_INVOCATION_SLOT") or None,
-        "source_invocation_slot": os.environ.get("SCHEDULED_SOURCE_INVOCATION_SLOT") or None,
+        "scheduled_slot": scheduled_slot,
+        "scheduled_invocation_slot": scheduled_invocation,
+        "source_invocation_slot": source_invocation,
         "scheduler_delay_seconds": int(scheduler_delay) if scheduler_delay else None,
-        "recovery_mode": os.environ.get("SCHEDULE_RECOVERY_MODE") or "none",
+        "recovery_mode": recovery_mode,
         "generation_attempt": generation_attempt,
         "run_id": run_id,
+        "scheduler_health": {
+            "contract_version": "scheduler-health-v1",
+            "source_invocation_slot": source_invocation,
+            "effective_checkpoint": scheduled_slot,
+            "effective_invocation_slot": scheduled_invocation,
+            "scheduler_start_delay_seconds": int(scheduler_delay) if scheduler_delay else None,
+            "recovery_mode": recovery_mode,
+            "generation_started_at": generation_started_at,
+            "generation_delay_seconds": None,
+            "publication_delay_seconds": None,
+            "missed_checkpoints_24h": None,
+        },
     }
 
 
@@ -4503,6 +4535,33 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
             material_negative = any(
                 _material_negative_event(item, snapshot, market_key=market_key, symbol=code) for item in events
             )
+            structural_risk_blockers: list[str] = []
+            if hard_blocked:
+                structural_risk_blockers.append("CANDIDATE_EXECUTION_BLOCKED")
+            if not gates_ready:
+                structural_risk_blockers.append("DECISION_GATES_NOT_ALL_PASS")
+            if not quality_ready:
+                structural_risk_blockers.append("REQUIRED_INPUTS_INCOMPLETE")
+            if candidate.get("legacy_complete") is False or candidate.get("score_tier") == "technical_only":
+                structural_risk_blockers.append("LEGACY_DEEP_SCORE_MISSING")
+            if material_negative:
+                structural_risk_blockers.append("MATERIAL_NEGATIVE_EVENT")
+            structural_risk_status = (
+                "BLOCKED"
+                if hard_blocked or material_negative
+                else "INCOMPLETE"
+                if structural_risk_blockers
+                else "PASS"
+            )
+            positive_enrichment_status = (
+                "SOURCE_UNAVAILABLE"
+                if not market_pipeline_scanned
+                else "NOT_SELECTED"
+                if not candidate_event_scanned
+                else "SCANNED_WITH_POSITIVE"
+                if positive_events
+                else "SCANNED_NO_POSITIVE"
+            )
             prediction = _candidate_prediction(model, market_key, code) if model_ready else None
             shadow_prediction = _candidate_shadow_prediction(model, market_key, code)
             if prediction:
@@ -4595,6 +4654,19 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 "shadow_model": shadow_prediction,
                 "event_candidate_scanned": candidate_event_scanned,
                 "verified_positive_event_ids": [item.get("event_id") for item in positive_events if item.get("event_id")],
+                "risk_screen": {
+                    "contract_version": "candidate-structural-risk-v1",
+                    "scope": "full_candidate_pool",
+                    "status": structural_risk_status,
+                    "official_filing_checked": candidate_event_scanned,
+                    "blocker_codes": list(dict.fromkeys(structural_risk_blockers)),
+                },
+                "positive_event_enrichment": {
+                    "contract_version": "official-positive-event-enrichment-v1",
+                    "scope": "bounded_priority_sample",
+                    "status": positive_enrichment_status,
+                    "event_ids": [item.get("event_id") for item in positive_events if item.get("event_id")],
+                },
                 "blocker_codes": list(dict.fromkeys(candidate_blockers)),
             }
             evaluated.append(row)
@@ -4686,6 +4758,64 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
     executable.sort(key=lambda item: item["expected_net_utility"], reverse=True)
     action = "REVIEW_EXECUTABLE_PICK" if executable and not blocker_codes else "NO_VALID_PICK"
     selected = executable[0] if action == "REVIEW_EXECUTABLE_PICK" else None
+    risk_status_counts = {
+        status: sum(
+            ((row.get("risk_screen") or {}).get("status") == status)
+            for row in evaluated
+        )
+        for status in ("PASS", "BLOCKED", "INCOMPLETE")
+    }
+    enrichment_status_counts = {
+        status: sum(
+            ((row.get("positive_event_enrichment") or {}).get("status") == status)
+            for row in evaluated
+        )
+        for status in (
+            "SCANNED_WITH_POSITIVE",
+            "SCANNED_NO_POSITIVE",
+            "NOT_SELECTED",
+            "SOURCE_UNAVAILABLE",
+        )
+    }
+    risk_by_market = {}
+    enrichment_by_market = {}
+    for market_key in ("a_share", "hk", "us"):
+        market_rows = [row for row in evaluated if row.get("market") == market_key]
+        market_risk = {
+            status: sum(
+                ((row.get("risk_screen") or {}).get("status") == status)
+                for row in market_rows
+            )
+            for status in ("PASS", "BLOCKED", "INCOMPLETE")
+        }
+        market_enrichment = {
+            status: sum(
+                ((row.get("positive_event_enrichment") or {}).get("status") == status)
+                for row in market_rows
+            )
+            for status in (
+                "SCANNED_WITH_POSITIVE",
+                "SCANNED_NO_POSITIVE",
+                "NOT_SELECTED",
+                "SOURCE_UNAVAILABLE",
+            )
+        }
+        risk_by_market[market_key] = {
+            "evaluated_candidate_count": len(market_rows),
+            "pass_count": market_risk["PASS"],
+            "blocked_count": market_risk["BLOCKED"],
+            "incomplete_count": market_risk["INCOMPLETE"],
+        }
+        enrichment_by_market[market_key] = {
+            "scanned_candidate_count": (
+                market_enrichment["SCANNED_WITH_POSITIVE"]
+                + market_enrichment["SCANNED_NO_POSITIVE"]
+            ),
+            "with_positive_count": market_enrichment["SCANNED_WITH_POSITIVE"],
+            "scanned_no_positive_count": market_enrichment["SCANNED_NO_POSITIVE"],
+            "not_selected_count": market_enrichment["NOT_SELECTED"],
+            "source_unavailable_count": market_enrichment["SOURCE_UNAVAILABLE"],
+        }
     return {
         "contract_version": "global-10d-v1",
         "decision_scope": "global_10d",
@@ -4703,6 +4833,29 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
         "event_pipeline_status": str(pipeline.get("status") or "UNKNOWN").upper(),
         "event_pipeline_scanned": pipeline_scanned,
         "automatic_external_evidence_count": len(automatic_external),
+        "event_coverage": {
+            "contract_version": "two-tier-event-coverage-v1",
+            "risk_screen": {
+                "scope": "full_candidate_pool",
+                "evaluated_candidate_count": len(evaluated),
+                "pass_count": risk_status_counts["PASS"],
+                "blocked_count": risk_status_counts["BLOCKED"],
+                "incomplete_count": risk_status_counts["INCOMPLETE"],
+                "by_market": risk_by_market,
+            },
+            "positive_event_enrichment": {
+                "scope": "bounded_priority_sample",
+                "scanned_candidate_count": (
+                    enrichment_status_counts["SCANNED_WITH_POSITIVE"]
+                    + enrichment_status_counts["SCANNED_NO_POSITIVE"]
+                ),
+                "with_positive_count": enrichment_status_counts["SCANNED_WITH_POSITIVE"],
+                "scanned_no_positive_count": enrichment_status_counts["SCANNED_NO_POSITIVE"],
+                "not_selected_count": enrichment_status_counts["NOT_SELECTED"],
+                "source_unavailable_count": enrichment_status_counts["SOURCE_UNAVAILABLE"],
+                "by_market": enrichment_by_market,
+            },
+        },
     }
 
 
@@ -8636,14 +8789,37 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
                 "items": [],
                 "stats": {"automatic_external": 0, "decision_eligible": 0},
             }
+    # ``generated_at`` remains the scheduler/run identity.  This separate
+    # cutoff freezes the last evidence timestamp visible to the prediction and
+    # prevents a few seconds of legitimate in-run observations from being
+    # rejected as forward data during later rank-sample joins.
+    result["feature_cutoff_at"] = now_cn().isoformat(timespec="microseconds")
     result.setdefault("analysis_models", {})["ten_day_return"] = build_ten_day_shadow_model_contract(
         result,
         generated_at,
     )
-    result["analysis_models"]["ten_day_excess_rank"] = (
-        ten_day_rank_model.build_collecting_contract()
-        if ten_day_rank_model is not None
-        else {
+    if ten_day_rank_model is not None and rank_sample_pipeline is not None:
+        try:
+            rank_samples, rank_diagnostics = rank_sample_pipeline.load_mature_rank_samples(
+                OUTCOMES / "observations",
+                OUTCOMES / "observation-settlements",
+                PICKS,
+                return_diagnostics=True,
+            )
+            rank_contract = ten_day_rank_model.fit_walk_forward(
+                rank_samples,
+                collection_diagnostics=rank_diagnostics,
+            )
+        except Exception as exc:
+            rank_contract = ten_day_rank_model.build_collecting_contract(
+                collection_diagnostics={
+                    "error_type": type(exc).__name__,
+                    "sample_count": 0,
+                },
+                additional_reason_codes=("POINT_IN_TIME_LEDGER_INVALID",),
+            )
+    else:
+        rank_contract = {
             "model_id": "ten-day-excess-rank-shadow-v2",
             "status": "UNAVAILABLE",
             "calibrated": False,
@@ -8653,6 +8829,9 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "production_eligible": False,
             "reason_codes": ["RANK_MODEL_MODULE_UNAVAILABLE"],
         }
+    result["analysis_models"]["ten_day_excess_rank"] = rank_contract
+    result["rule_outcome_tracking"] = history_evaluation.evaluate_rule_outcome_performance(
+        rule_outcome_ledger.load_rule_outcome_batches(OUTCOMES / "rule-settlements")
     )
     result = enrich_snapshot_v2(result)
     cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

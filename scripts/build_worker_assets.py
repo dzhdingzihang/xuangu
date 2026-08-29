@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 import history_evaluation
 import model_observation_ledger
 import observation_outcome_ledger
+import rule_outcome_ledger
 
 
 PUBLIC = ROOT / "public"
@@ -29,15 +30,16 @@ REQUIRED_STATIC_FILES = ("index.html", "styles.css", "app.js")
 MANIFEST_VERSION = "selector-manifest-v2"
 MAX_PUBLIC_FULL_SNAPSHOT_DAYS = 30
 MAX_QUALIFIED_SUMMARY_CANDIDATES = 20
-CURRENT_PRODUCTION_MODEL_VERSION = "smart-selector-2026-08-26.2-dual-track-rule"
+CURRENT_PRODUCTION_MODEL_VERSION = "smart-selector-2026-08-29.1-two-tier-rule"
 PRODUCTION_RULE_CONTRACTS = {
     ("strict_rule_qualification_v1", "ten-day-audited-rule-ensemble-v1"),
     ("candidate_level_rule_qualification_v2", "ten-day-audited-rule-ensemble-v2"),
     ("dual_track_candidate_qualification_v3", "ten-day-audited-rule-ensemble-v3"),
+    ("dual_track_candidate_qualification_v4", "ten-day-audited-rule-ensemble-v4"),
 }
 CURRENT_PRODUCTION_RULE_CONTRACT = (
-    "dual_track_candidate_qualification_v3",
-    "ten-day-audited-rule-ensemble-v3",
+    "dual_track_candidate_qualification_v4",
+    "ten-day-audited-rule-ensemble-v4",
 )
 PRODUCTION_CANDIDATE_SUMMARY_FIELDS = (
     "qualification_id",
@@ -69,6 +71,7 @@ PRODUCTION_CANDIDATE_SUMMARY_FIELDS = (
     "calendar_version",
     "estimated_10d_range",
     "risk_reward",
+    "ten_day_trade_plan",
     "blocker_codes",
 )
 DUAL_LOW_SUMMARY_FIELDS = (
@@ -160,6 +163,11 @@ WORKER_LIVE_INDEX_CONTRACT_VERSION = "worker-live-index-v1"
 WORKER_UI_BOOTSTRAP_CONTRACT_VERSION = "ui-bootstrap-v1"
 WORKER_UI_CANDIDATES_CONTRACT_VERSION = "ui-candidates-v1"
 WORKER_UI_EVENTS_CONTRACT_VERSION = "ui-events-v1"
+DATA_MANIFEST_CONTRACT_VERSION = "data-manifest-v1"
+CANDIDATE_LIST_CONTRACT_VERSION = "candidate-list-v1"
+CANDIDATE_DETAIL_CONTRACT_VERSION = "candidate-detail-v1"
+EVENT_LIST_CONTRACT_VERSION = "event-list-v1"
+HISTORY_LIST_CONTRACT_VERSION = "history-list-v1"
 WORKER_RUNTIME_IDENTITY_FIELDS = (
     "schema_version",
     "selector_mode",
@@ -172,8 +180,12 @@ WORKER_AUTOMATION_FIELDS = (
     "trigger",
     "scheduled_slot",
     "scheduled_invocation_slot",
+    "source_invocation_slot",
+    "scheduler_delay_seconds",
+    "recovery_mode",
     "generation_attempt",
     "run_id",
+    "scheduler_health",
 )
 GLOBAL_RUNTIME_DECISION_FIELDS = (
     "contract_version",
@@ -187,6 +199,7 @@ GLOBAL_RUNTIME_DECISION_FIELDS = (
     "blocker_codes",
     "market_states",
     "automatic_external_evidence_count",
+    "event_coverage",
 )
 GLOBAL_RUNTIME_PREDICTION_FIELDS = (
     "prediction_id",
@@ -221,6 +234,11 @@ MAX_WORKER_LIVE_INDEX_BYTES = 512 * 1024
 MAX_WORKER_UI_BOOTSTRAP_BYTES = 192 * 1024
 MAX_WORKER_UI_CANDIDATES_BYTES = 768 * 1024
 MAX_WORKER_UI_EVENTS_BYTES = 512 * 1024
+MAX_DATA_SUMMARY_BYTES = 100 * 1024
+MAX_DATA_CANDIDATE_LIST_BYTES = 100 * 1024
+MAX_DATA_CANDIDATE_DETAIL_BYTES = 100 * 1024
+MAX_DATA_EVENT_ROW_BYTES = 2 * 1024
+MAX_DATA_HISTORY_ROW_BYTES = 20 * 1024
 WORKER_LIVE_CODE_NORMALIZATION = "worker-facing-live-code-v1"
 RUNTIME_FORBIDDEN_KEYS = {
     "candidate_snapshot",
@@ -557,6 +575,13 @@ def summarize_analysis_models(pick: dict) -> dict:
             for key in TEN_DAY_RANK_SUMMARY_FIELDS
             if key in rank_model
         }
+        validation = rank_model.get("validation")
+        if isinstance(validation, dict):
+            rank_summary["validation"] = {
+                key: copy.deepcopy(validation.get(key))
+                for key in ("combined_shadow", "final_holdout", "coverage", "per_market")
+                if key in validation
+            }
         if rank_summary:
             result["ten_day_excess_rank"] = rank_summary
     return result
@@ -577,10 +602,10 @@ def summarize_global_decision(pick: dict) -> dict | None:
             "probability_status",
             "probability",
             "calibrated",
-            "research_priority",
             "blocker_codes",
             "market_states",
             "automatic_external_evidence_count",
+            "event_coverage",
         )
         if key in decision
     }
@@ -611,6 +636,33 @@ def summarize_global_decision(pick: dict) -> dict | None:
         }
     else:
         summary["primary"] = None
+    research_priority = decision.get("research_priority")
+    if isinstance(research_priority, dict):
+        summary["research_priority"] = {
+            key: research_priority.get(key)
+            for key in (
+                "prediction_id",
+                "status",
+                "label_version",
+                "market",
+                "code",
+                "name",
+                "entry_trade_date",
+                "forecast_end_trade_date",
+                "calendar_id",
+                "calendar_version",
+                "score_kind",
+                "probability",
+                "expected_net_utility",
+                "transaction_cost",
+                "tail_risk",
+                "model_id",
+                "calibrated",
+            )
+            if key in research_priority
+        }
+    else:
+        summary["research_priority"] = None
     return summary
 
 
@@ -652,8 +704,8 @@ def valid_production_rule_contract(pick: dict, decision: dict) -> bool:
     pair = (decision.get("action_basis"), decision.get("rule_model_id"))
     if pair not in PRODUCTION_RULE_CONTRACTS:
         return False
-    # CURRENT model <-> V3 contract is a strict bijection.  Historical V1/V2
-    # contracts remain readable, while a V3 decision under an older (or
+    # CURRENT model <-> V4 contract is a strict bijection. Historical V1-V3
+    # contracts remain readable, while a V4 decision under an older (or
     # missing) model version is excluded from both history and status assets.
     if (
         pick.get("model_version") == CURRENT_PRODUCTION_MODEL_VERSION
@@ -779,6 +831,7 @@ def build_worker_runtime(
         "generated_at": generated_at,
         "target_date": snapshot.get("target_date"),
         "signal_date": snapshot.get("signal_date"),
+        "feature_cutoff_at": snapshot.get("feature_cutoff_at"),
         **{
             key: copy.deepcopy(snapshot.get(key))
             for key in WORKER_RUNTIME_IDENTITY_FIELDS
@@ -1401,7 +1454,7 @@ def build_worker_ui_bootstrap(
         **{
             key: copy.deepcopy(snapshot.get(key))
             for key in (
-                "target_date", "signal_date", "generated_label", "forecast_end_date",
+                "target_date", "signal_date", "feature_cutoff_at", "generated_label", "forecast_end_date",
                 "forecast_horizon", "schema_version", "selector_mode", "model_version",
                 "weights_version", "universe_version", "calendar_version",
             )
@@ -1608,6 +1661,348 @@ def write_worker_runtime_assets(
         )
 
 
+def _stable_json_bytes(payload: dict) -> bytes:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _candidate_asset_id(snapshot_key: str, candidate: dict) -> str:
+    market = str(candidate.get("market") or "")
+    code = str(candidate.get("code") or candidate.get("symbol") or "")
+    digest = hashlib.sha256(f"{snapshot_key}|{market}|{code}".encode()).hexdigest()[:20]
+    return f"cand_{digest}"
+
+
+def _candidate_list_row(snapshot_key: str, candidate: dict) -> dict:
+    """Keep the first-page shortlist small while retaining decision fields."""
+
+    qualification = candidate.get("production_qualification")
+    qualification = qualification if isinstance(qualification, dict) else {}
+    realtime = candidate.get("realtime")
+    realtime = realtime if isinstance(realtime, dict) else {}
+    plan = (
+        qualification.get("ten_day_trade_plan")
+        or candidate.get("ten_day_trade_plan")
+        or {}
+    )
+    result = {
+        "id": _candidate_asset_id(snapshot_key, candidate),
+        "market": candidate.get("market"),
+        "code": candidate.get("code") or candidate.get("symbol"),
+        "name": candidate.get("name"),
+        "currency": candidate.get("currency") or realtime.get("currency"),
+        "decision_role": candidate.get("decision_role"),
+        "legacy_rank": candidate.get("legacy_rank"),
+        "recommendation_degree": candidate.get("recommendation_degree"),
+        "score": candidate.get("score"),
+        "price": realtime.get("price") or candidate.get("entry_price"),
+        "change_pct": realtime.get("change_pct"),
+        "source_as_of": realtime.get("source_as_of"),
+        "estimated_10d_range": (
+            qualification.get("estimated_10d_range")
+            or candidate.get("estimated_10d_range")
+        ),
+        "risk_reward": qualification.get("risk_reward") or candidate.get("risk_reward"),
+        "reason_tags": candidate.get("reason_tags") or [],
+        "qualification": {
+            key: copy.deepcopy(qualification.get(key))
+            for key in (
+                "qualification_id", "status", "qualification_track",
+                "qualification_score", "score_kind", "probability_status",
+                "data_quality_score", "entry_price", "entry_trade_date",
+                "forecast_end_trade_date", "estimated_10d_range", "risk_reward",
+            )
+            if key in qualification
+        } or None,
+        # This is a lossless projection of the server-owned trade-plan
+        # contract.  The asset layer must never infer prices or rename fields.
+        "ten_day_trade_plan": {
+            key: copy.deepcopy(plan.get(key))
+            for key in (
+                "contract_version", "status", "horizon_trade_days",
+                "reference_quote", "entry_zone", "entry_trade_date",
+                "invalidation", "target", "position_limit",
+                "catalyst_expiry_date", "review_end_trade_date", "exit_rules",
+                "is_personalized_advice",
+            )
+            if key in plan
+        } if isinstance(plan, dict) else {},
+        "detail_available": True,
+    }
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _write_content_addressed_asset(
+    data_root: pathlib.Path,
+    kind: str,
+    payload: dict,
+) -> tuple[str, str, int]:
+    encoded = _stable_json_bytes(payload)
+    digest = hashlib.sha256(encoded).hexdigest()
+    key = f"{kind}/{digest}.json"
+    target = data_root / key
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(encoded)
+    return key, digest, len(encoded)
+
+
+def _scheduler_health(snapshot: dict, history_manifest: dict) -> dict:
+    automation = snapshot.get("automation")
+    automation = automation if isinstance(automation, dict) else {}
+    source_health = automation.get("scheduler_health")
+    source_health = source_health if isinstance(source_health, dict) else {}
+
+    def parsed(value: object) -> dt.datetime | None:
+        try:
+            result = dt.datetime.fromisoformat(str(value or ""))
+        except (TypeError, ValueError):
+            return None
+        return result if result.tzinfo is not None and result.utcoffset() is not None else None
+
+    generated = parsed(snapshot.get("generated_at"))
+    checkpoint = parsed(
+        source_health.get("effective_checkpoint") or automation.get("scheduled_slot")
+    )
+    generation_delay = (
+        max(0, int((generated - checkpoint).total_seconds()))
+        if generated is not None and checkpoint is not None
+        else None
+    )
+    # Snapshot history is deliberately selective (latest daily run, qualified
+    # rules, and formal observations).  It is not a complete scheduler ledger
+    # and therefore cannot truthfully prove that omitted checkpoints were
+    # missed.  Publish an explicit unknown until a complete checkpoint ledger
+    # is introduced; never turn retention policy into a false SLA incident.
+    checkpoint_ledger = history_manifest.get("scheduler_checkpoint_ledger")
+    checkpoint_ledger = checkpoint_ledger if isinstance(checkpoint_ledger, dict) else {}
+    checkpoint_rows = checkpoint_ledger.get("checkpoints")
+    checkpoint_complete = (
+        checkpoint_ledger.get("contract_version") == "scheduler-checkpoint-ledger-v1"
+        and checkpoint_ledger.get("coverage_complete_24h") is True
+        and isinstance(checkpoint_rows, list)
+        and all(isinstance(row, dict) for row in checkpoint_rows)
+    )
+    missed = (
+        sum(str(row.get("status") or "").upper() == "MISSED" for row in checkpoint_rows)
+        if checkpoint_complete
+        else None
+    )
+    checkpoint_coverage_status = (
+        "COMPLETE_24H_LEDGER" if checkpoint_complete else "UNAVAILABLE_NO_COMPLETE_LEDGER"
+    )
+    start_delay = source_health.get(
+        "scheduler_start_delay_seconds", automation.get("scheduler_delay_seconds")
+    )
+    if not isinstance(start_delay, int) or isinstance(start_delay, bool) or start_delay < 0:
+        start_delay = None
+    recovery_mode = str(automation.get("recovery_mode") or "none")
+    if recovery_mode == "late_cron_recovery" and start_delay == 0:
+        start_delay = None
+    source_invocation = source_health.get(
+        "source_invocation_slot", automation.get("source_invocation_slot")
+    )
+    effective_checkpoint = source_health.get(
+        "effective_checkpoint", automation.get("scheduled_slot")
+    )
+    effective_invocation = source_health.get(
+        "effective_invocation_slot", automation.get("scheduled_invocation_slot")
+    )
+    return {
+        "contract_version": "scheduler-health-v1",
+        "source_invocation_slot": source_invocation,
+        "effective_checkpoint": effective_checkpoint,
+        "effective_invocation_slot": effective_invocation,
+        "scheduler_start_delay_seconds": start_delay,
+        "generation_delay_seconds": generation_delay,
+        "publication_delay_seconds": None,
+        "missed_checkpoints_24h": missed,
+        "checkpoint_coverage_status": checkpoint_coverage_status,
+        "checkpoint_evidence_contract_version": (
+            checkpoint_ledger.get("contract_version") if checkpoint_complete else None
+        ),
+        "recovery_mode": source_health.get("recovery_mode") or recovery_mode,
+        "generation_started_at": source_health.get("generation_started_at"),
+        "generated_at": snapshot.get("generated_at"),
+        "published_at": None,
+    }
+
+
+def build_data_manifest_assets(
+    snapshot: dict,
+    source_snapshot_bytes: bytes,
+    ui_assets: dict[str, dict],
+    history_manifest: dict,
+    data_root: pathlib.Path,
+) -> dict:
+    """Build one identity-bound immutable data generation plus a small alias.
+
+    The generated files are also shipped as Worker assets.  Production can
+    publish the exact same files to R2, while a missing R2 binding/object safely
+    falls back to this last-known-good generation without mixing identities.
+    """
+
+    snapshot_key = str(snapshot.get("snapshot_key") or "")
+    generated_at = str(snapshot.get("generated_at") or "")
+    source_sha256 = hashlib.sha256(source_snapshot_bytes).hexdigest()
+    source_byte_size = len(source_snapshot_bytes)
+    identity = {
+        "snapshot_key": snapshot_key,
+        "generated_at": generated_at,
+        "snapshot_sha256": source_sha256,
+        "snapshot_byte_size": source_byte_size,
+        "source_snapshot": {
+            "sha256": source_sha256,
+            "byte_size": source_byte_size,
+        },
+    }
+
+    summary_payload = copy.deepcopy(ui_assets["ui-bootstrap.json"])
+    runtime_payload = json.loads((data_root / "picks" / "runtime.json").read_text(encoding="utf-8"))
+    live_index_payload = json.loads((data_root / "picks" / "live-index.json").read_text(encoding="utf-8"))
+    candidate_source = ui_assets["ui-candidates.json"]
+    candidate_rows = [
+        row for row in (candidate_source.get("candidates") or [])
+        if isinstance(row, dict)
+    ]
+    compact_rows = [_candidate_list_row(snapshot_key, row) for row in candidate_rows]
+    scanned_count = sum(
+        int(
+            (((snapshot.get("markets") or {}).get(market) or {}).get("stats") or {}).get(
+                "recall_selected_size"
+            )
+            or 0
+        )
+        for market in LIVE_MARKETS
+    )
+    candidate_payload = {
+        "contract_version": CANDIDATE_LIST_CONTRACT_VERSION,
+        **identity,
+        "candidate_count": len(compact_rows),
+        "scanned_count": scanned_count,
+        "candidates": compact_rows,
+        "dual_low_model": copy.deepcopy(candidate_source.get("dual_low_model") or {}),
+    }
+    event_source = ui_assets["ui-events.json"]
+    raw_events = event_source.get("events")
+    event_items = raw_events.get("items") if isinstance(raw_events, dict) else raw_events
+    event_payload = {
+        "contract_version": EVENT_LIST_CONTRACT_VERSION,
+        **identity,
+        "event_count": len(event_items or []),
+        "event_publication": copy.deepcopy(event_source.get("event_publication") or {}),
+        "events": copy.deepcopy(event_items or []),
+    }
+    for index, row in enumerate(event_payload["events"]):
+        byte_size = len(_stable_json_bytes(row))
+        if byte_size > MAX_DATA_EVENT_ROW_BYTES:
+            raise ValueError(
+                f"event list row {index} exceeds {MAX_DATA_EVENT_ROW_BYTES} bytes: {byte_size}"
+            )
+    history_payload = {
+        "contract_version": HISTORY_LIST_CONTRACT_VERSION,
+        **identity,
+        "history": copy.deepcopy(history_manifest.get("summaries") or []),
+        "history_evaluation": copy.deepcopy(history_manifest.get("history_evaluation") or {}),
+        "observation_ledger": copy.deepcopy(history_manifest.get("observation_ledger") or {}),
+        "observation_performance": copy.deepcopy(history_manifest.get("observation_performance") or {}),
+        "rule_outcome_tracking": copy.deepcopy(history_manifest.get("rule_outcome_tracking") or {}),
+    }
+    for index, row in enumerate(history_payload["history"]):
+        byte_size = len(_stable_json_bytes(row))
+        if byte_size > MAX_DATA_HISTORY_ROW_BYTES:
+            raise ValueError(
+                f"history list row {index} exceeds {MAX_DATA_HISTORY_ROW_BYTES} bytes: {byte_size}"
+            )
+
+    runtime_key, runtime_sha, runtime_size = _write_content_addressed_asset(
+        data_root, "runtime", runtime_payload
+    )
+    live_index_key, live_index_sha, live_index_size = _write_content_addressed_asset(
+        data_root, "live-index", live_index_payload
+    )
+    summary_key, summary_sha, summary_size = _write_content_addressed_asset(
+        data_root, "summary", summary_payload
+    )
+    candidates_key, candidates_sha, candidates_size = _write_content_addressed_asset(
+        data_root, "candidates", candidate_payload
+    )
+    events_key, events_sha, events_size = _write_content_addressed_asset(
+        data_root, "events", event_payload
+    )
+    history_key, history_sha, history_size = _write_content_addressed_asset(
+        data_root, "history", history_payload
+    )
+    if summary_size > MAX_DATA_SUMMARY_BYTES:
+        raise ValueError(f"data summary exceeds {MAX_DATA_SUMMARY_BYTES} bytes: {summary_size}")
+    if candidates_size > MAX_DATA_CANDIDATE_LIST_BYTES:
+        raise ValueError(
+            f"candidate list exceeds {MAX_DATA_CANDIDATE_LIST_BYTES} bytes: {candidates_size}"
+        )
+
+    detail_keys: dict[str, str] = {}
+    detail_meta: dict[str, dict] = {}
+    for compact, detail in zip(compact_rows, candidate_rows, strict=True):
+        candidate_id = str(compact["id"])
+        payload = {
+            "contract_version": CANDIDATE_DETAIL_CONTRACT_VERSION,
+            **identity,
+            "id": candidate_id,
+            "candidate": copy.deepcopy(detail),
+        }
+        key, digest, byte_size = _write_content_addressed_asset(
+            data_root, "candidate-details", payload
+        )
+        if byte_size > MAX_DATA_CANDIDATE_DETAIL_BYTES:
+            raise ValueError(
+                f"candidate detail {candidate_id} exceeds {MAX_DATA_CANDIDATE_DETAIL_BYTES} bytes: {byte_size}"
+            )
+        detail_keys[candidate_id] = key
+        detail_meta[candidate_id] = {"sha256": digest, "byte_size": byte_size}
+
+    manifest = {
+        "contract_version": DATA_MANIFEST_CONTRACT_VERSION,
+        **identity,
+        "runtime_key": runtime_key,
+        "live_index_key": live_index_key,
+        "summary_key": summary_key,
+        "candidates_key": candidates_key,
+        "events_key": events_key,
+        "history_key": history_key,
+        "candidate_detail_keys": detail_keys,
+        "scheduler_health": _scheduler_health(snapshot, history_manifest),
+        "assets": {
+            "runtime": {"key": runtime_key, "sha256": runtime_sha, "byte_size": runtime_size},
+            "live_index": {"key": live_index_key, "sha256": live_index_sha, "byte_size": live_index_size},
+            "summary": {"key": summary_key, "sha256": summary_sha, "byte_size": summary_size},
+            "candidates": {"key": candidates_key, "sha256": candidates_sha, "byte_size": candidates_size},
+            "events": {"key": events_key, "sha256": events_sha, "byte_size": events_size},
+            "history": {"key": history_key, "sha256": history_sha, "byte_size": history_size},
+            "candidate_details": detail_meta,
+        },
+    }
+    published_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    manifest["published_at"] = published_at
+    manifest["publication_mode"] = "embedded-worker-asset-v1"
+    try:
+        generated = dt.datetime.fromisoformat(generated_at)
+        published = dt.datetime.fromisoformat(published_at)
+        manifest["scheduler_health"]["publication_delay_seconds"] = max(
+            0, int((published - generated).total_seconds())
+        )
+    except (TypeError, ValueError):
+        manifest["scheduler_health"]["publication_delay_seconds"] = None
+    manifest["scheduler_health"]["published_at"] = published_at
+    manifest_without_digest = _stable_json_bytes(manifest)
+    manifest["manifest_sha256"] = hashlib.sha256(manifest_without_digest).hexdigest()
+    (data_root / "latest-manifest.json").write_bytes(_stable_json_bytes(manifest))
+    return manifest
+
+
 def history_kind(global_decision: dict | None) -> str:
     if (
         isinstance(global_decision, dict)
@@ -1686,6 +2081,7 @@ def summarize_pick(
     summary = {
         "target_date": pick.get("target_date"),
         "signal_date": pick.get("signal_date"),
+        "feature_cutoff_at": pick.get("feature_cutoff_at"),
         "generated_at": pick.get("generated_at"),
         "generated_label": pick.get("generated_label"),
         "snapshot_key": pick.get("snapshot_key") or path.name,
@@ -1697,6 +2093,7 @@ def summarize_pick(
         "model_version": pick.get("model_version"),
         "weights_version": pick.get("weights_version"),
         "universe_version": pick.get("universe_version"),
+        "automation": compact_runtime_value(pick.get("automation") or {}),
         "history_kind": kind,
         "decision_scope": "global_10d" if is_global_contract else "legacy_market_rules",
         "action": action,
@@ -1782,6 +2179,9 @@ def main() -> None:
     )
     shadow_outcome_map = shadow_inventory["records"]
     executable_outcome_map = executable_inventory["records"]
+    rule_outcome_batches = rule_outcome_ledger.load_rule_outcome_batches(
+        outcome_root / "rule-settlements"
+    )
     summaries = []
     snapshots = {}
     for path in sorted(PICKS.glob("*.json")):
@@ -1840,6 +2240,7 @@ def main() -> None:
         snapshots,
         shadow_inventory,
         executable_inventory,
+        rule_outcome_batches,
     )
     observation_cohorts = model_observation_ledger.load_observation_cohorts(
         outcome_root / "observations"
@@ -1883,11 +2284,24 @@ def main() -> None:
         "executable_ledger": evaluation["executable_ledger"],
         "observation_ledger": observation_summary,
         "observation_performance": observation_performance,
+        "rule_outcome_tracking": evaluation.get("rule_outcome_tracking") or {},
     }
     (public_picks / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    if public_latest.is_file():
+        ui_assets = {
+            name: json.loads((public_picks / name).read_text(encoding="utf-8"))
+            for name in ("ui-bootstrap.json", "ui-candidates.json", "ui-events.json")
+        }
+        build_data_manifest_assets(
+            public_latest_snapshot,
+            source_snapshot_bytes,
+            ui_assets,
+            manifest,
+            PUBLIC / "data",
+        )
 
 
 if __name__ == "__main__":

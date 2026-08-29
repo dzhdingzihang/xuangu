@@ -96,7 +96,7 @@ class ProductionRuleModelTests(unittest.TestCase):
         source["production_rule_inputs"] = inputs
         decision = build_production_decision(source)
 
-        self.assertEqual(inputs["contract_version"], "production-rule-inputs-v1")
+        self.assertEqual(inputs["contract_version"], "production-rule-inputs-v2")
         self.assertEqual(inputs["evaluated_candidate_count"], 2)
         self.assertRegex(inputs["ledger_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(
@@ -159,8 +159,8 @@ class ProductionRuleModelTests(unittest.TestCase):
 
         self.assertEqual(source["global_decision"], before)
         self.assertEqual(decision["contract_version"], "production-rule-10d-v1")
-        self.assertEqual(decision["action_basis"], "dual_track_candidate_qualification_v3")
-        self.assertEqual(decision["rule_model_id"], "ten-day-audited-rule-ensemble-v3")
+        self.assertEqual(decision["action_basis"], "dual_track_candidate_qualification_v4")
+        self.assertEqual(decision["rule_model_id"], "ten-day-audited-rule-ensemble-v4")
         self.assertEqual(decision["action"], "QUALIFIED_PICK")
         self.assertEqual(decision["score_kind"], "RULE_QUALIFICATION_SCORE")
         self.assertEqual(decision["qualified_candidate_count"], 1)
@@ -180,6 +180,34 @@ class ProductionRuleModelTests(unittest.TestCase):
         )
         self.assertEqual(primary["track_evaluations"][0]["status"], "PASS")
 
+    def test_score_rounding_matches_worker_at_half_cent_boundary(self):
+        row = candidate(legacy_recommendation_degree=67.15)
+
+        evaluated = build_production_decision(snapshot(row))["evaluated_candidates"][0]
+
+        self.assertEqual(evaluated["score_components"]["legacy_recommendation"], 20.15)
+
+    def test_qualified_candidate_publishes_a_bounded_ten_day_review_plan(self):
+        source = snapshot(candidate())
+        source_candidate = source["markets"]["hk"]["_candidate_pool"][0]
+        source_candidate["stop_loss"] = 75.2
+        source_candidate["take_profit_reference"] = 87.6
+        source_candidate["realtime"]["source_as_of"] = "2026-08-25T16:08:00+08:00"
+
+        plan = build_production_decision(source)["primary"]["ten_day_trade_plan"]
+
+        self.assertEqual(plan["contract_version"], "ten-day-trade-plan-v1")
+        self.assertEqual(plan["status"], "REVIEW_REQUIRED")
+        self.assertEqual(plan["reference_quote"]["price"], 80.0)
+        self.assertEqual(plan["reference_quote"]["source_as_of"], "2026-08-25T16:08:00+08:00")
+        self.assertEqual(plan["entry_zone"], {"low": 79.2, "high": 80.4, "currency": "HKD"})
+        self.assertEqual(plan["invalidation"]["price"], 75.2)
+        self.assertEqual(plan["target"]["price"], 87.6)
+        self.assertEqual(plan["position_limit"]["max_single_name_weight_pct"], 10.0)
+        self.assertEqual(plan["catalyst_expiry_date"], "2026-09-08")
+        self.assertEqual(plan["review_end_trade_date"], "2026-09-08")
+        self.assertFalse(plan["is_personalized_advice"])
+
     def test_publishes_exact_dual_track_policy(self):
         policy = build_production_decision(snapshot(candidate()))["policy"]
 
@@ -195,15 +223,58 @@ class ProductionRuleModelTests(unittest.TestCase):
         self.assertEqual(
             quality["market_thresholds"],
             {
-                "a_share": {"minimum_legacy": 66.0, "maximum_downside": 6.0, "minimum_upside": 6.0},
+                "a_share": {"minimum_legacy": 64.0, "maximum_downside": 6.0, "minimum_upside": 6.0},
                 "hk": {"minimum_legacy": 67.0, "maximum_downside": 6.0, "minimum_upside": 6.0},
-                "us": {"minimum_legacy": 68.0, "maximum_downside": 7.5, "minimum_upside": 6.5},
+                "us": {"minimum_legacy": 67.0, "maximum_downside": 7.5, "minimum_upside": 6.5},
             },
         )
         self.assertEqual(quality["maximum_v2_rank_fraction"], 0.10)
         self.assertEqual(quality["minimum_data_quality"], 95.0)
         self.assertEqual(quality["minimum_risk_reward_ratio"], 1.50)
         self.assertEqual(quality["minimum_qualification_score"], 72.0)
+        self.assertFalse(quality["event_scan_required"])
+
+    def test_quality_legacy_boundaries_match_each_market_score_scale(self):
+        rows = [
+            candidate(
+                market="a_share",
+                code="600000",
+                name="A boundary",
+                legacy_recommendation_degree=64,
+                v2_rank=1,
+                v2_rank_universe_size=300,
+                event_candidate_scanned=False,
+                verified_positive_event_ids=[],
+                estimated_10d_range={"low_pct": -4.0, "high_pct": 8.0},
+                blocker_codes=["EVENT_CANDIDATE_NOT_SCANNED", "VERIFIED_POSITIVE_EVENT_MISSING"],
+            ),
+            candidate(
+                market="us",
+                code="V",
+                name="Visa",
+                legacy_recommendation_degree=67,
+                v2_rank=1,
+                v2_rank_universe_size=300,
+                event_candidate_scanned=False,
+                verified_positive_event_ids=[],
+                estimated_10d_range={"low_pct": -4.0, "high_pct": 8.0},
+                blocker_codes=["EVENT_CANDIDATE_NOT_SCANNED", "VERIFIED_POSITIVE_EVENT_MISSING"],
+            ),
+        ]
+
+        decision = build_production_decision(snapshot(*rows))
+
+        self.assertEqual(decision["qualified_candidate_count"], 2)
+        self.assertEqual(
+            {
+                (row["market"], row["code"], row["qualification_track"])
+                for row in decision["qualified_candidates"]
+            },
+            {
+                ("a_share", "600000", "quality_technical"),
+                ("us", "V", "quality_technical"),
+            },
+        )
 
     def test_quality_technical_track_can_qualify_without_positive_event(self):
         row = candidate(
@@ -238,9 +309,39 @@ class ProductionRuleModelTests(unittest.TestCase):
             primary["track_evaluations"][1]["blocker_codes"],
         )
 
+    def test_quality_technical_track_does_not_require_official_event_deep_scan(self):
+        row = candidate(
+            market="us",
+            code="VZ",
+            name="Verizon",
+            legacy_recommendation_degree=75,
+            v2_rank=1,
+            v2_rank_universe_size=299,
+            event_candidate_scanned=False,
+            verified_positive_event_ids=[],
+            estimated_10d_range={"low_pct": -4.0, "high_pct": 8.0},
+            blocker_codes=[
+                "TEN_DAY_MODEL_NOT_READY",
+                "TEN_DAY_PREDICTION_MISSING",
+                "EVENT_CANDIDATE_NOT_SCANNED",
+                "VERIFIED_POSITIVE_EVENT_MISSING",
+            ],
+        )
+
+        primary = build_production_decision(snapshot(row))["primary"]
+
+        self.assertEqual(primary["qualification_track"], "quality_technical")
+        event_track, quality_track = primary["track_evaluations"]
+        self.assertEqual(event_track["status"], "FAIL")
+        self.assertIn("EVENT_CANDIDATE_NOT_SCANNED", event_track["blocker_codes"])
+        self.assertIn("VERIFIED_POSITIVE_EVENT_MISSING", event_track["blocker_codes"])
+        self.assertEqual(quality_track["status"], "PASS")
+        self.assertNotIn("EVENT_CANDIDATE_NOT_SCANNED", quality_track["blocker_codes"])
+        self.assertNotIn("VERIFIED_POSITIVE_EVENT_MISSING", quality_track["blocker_codes"])
+
     def test_quality_technical_track_has_stricter_non_event_gates(self):
         cases = {
-            "legacy": ({"legacy_recommendation_degree": 67.99}, "QUALITY_LEGACY_BELOW_THRESHOLD"),
+            "legacy": ({"legacy_recommendation_degree": 66.99}, "QUALITY_LEGACY_BELOW_THRESHOLD"),
             "rank": ({"v2_rank": 31}, "QUALITY_V2_TOP_DECILE_REQUIRED"),
             "quality": ({"source_data_quality": 94.99}, "QUALITY_DATA_QUALITY_BELOW_THRESHOLD"),
             "upside": ({"estimated_10d_range": {"low_pct": -4.0, "high_pct": 6.49}}, "QUALITY_TEN_DAY_UPSIDE_BELOW_THRESHOLD"),
@@ -285,7 +386,6 @@ class ProductionRuleModelTests(unittest.TestCase):
             "DATA_SOURCE_UNKNOWN",
             "MATERIAL_NEGATIVE_EVENT",
             "NON_POSITIVE_EXPECTED_NET_UTILITY",
-            "EVENT_CANDIDATE_NOT_SCANNED",
         ):
             with self.subTest(blocker=blocker):
                 row = candidate(
@@ -295,7 +395,7 @@ class ProductionRuleModelTests(unittest.TestCase):
                     legacy_recommendation_degree=75,
                     v2_rank=1,
                     v2_rank_universe_size=299,
-                    event_candidate_scanned=blocker != "EVENT_CANDIDATE_NOT_SCANNED",
+                    event_candidate_scanned=True,
                     verified_positive_event_ids=[],
                     estimated_10d_range={"low_pct": -4.0, "high_pct": 8.0},
                     blocker_codes=["VERIFIED_POSITIVE_EVENT_MISSING", blocker],

@@ -103,6 +103,9 @@ class EventPipelineTests(unittest.TestCase):
             result = event_pipeline.collect_for_snapshot(snap, "run-1", now=NOW)
 
         self.assertEqual(result["pipeline"]["status"], "READY_EMPTY")
+        self.assertEqual(result["pipeline"]["scan_purpose"], "positive_event_enrichment")
+        self.assertEqual(result["pipeline"]["selection_policy"], "rule_priority_and_published_decision_v1")
+        self.assertEqual(result["pipeline"]["candidate_limit_per_market"], 16)
         self.assertEqual(
             choose.call_args_list,
             [

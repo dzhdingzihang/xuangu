@@ -41,6 +41,11 @@ const sandbox = {{
   }},
   location: {{ hash: "", origin: "https://xuangu.test" }},
   URL,
+  AbortController,
+  AbortSignal,
+  DOMException,
+  setTimeout,
+  clearTimeout,
 }};
 vm.createContext(sandbox);
 source += "\\n" + {json.dumps(body)};
@@ -73,6 +78,285 @@ class FrontendContractTests(unittest.TestCase):
             self.assertIn(f'id="panel-{tab}"', self.html)
             self.assertIn(f'data-tab="{tab}"', self.html)
         self.assertEqual(self.html.count('role="tabpanel"'), 6)
+
+    def test_frontend_exposes_one_user_decision_and_a_server_trade_plan(self) -> None:
+        self.assertRegex(self.js, r"function userDecisionState\(")
+        for state_name in ("ENTER_TRADE_REVIEW", "RESEARCH_ONLY", "NO_ACTION"):
+            self.assertIn(state_name, self.js)
+        self.assertIn('data-user-decision-state="${esc(decisionState)}"', self.js)
+        self.assertIn("唯一用户结论", self.js)
+        self.assertIn("进入交易复核", self.js)
+        self.assertIn("仅继续研究", self.js)
+        self.assertIn("今日不行动", self.js)
+        self.assertIn('published.contract_version !== "ten-day-trade-plan-v1"', self.js)
+        self.assertIn("validateTenDayTradePlan", self.js)
+        self.assertIn("TRADE_PLAN_EXIT_RULE_LABELS", self.js)
+        for field in (
+            "reference_quote?.price",
+            "reference_quote?.source_as_of",
+            "entry_zone",
+            "invalidation.price",
+            "target.price",
+            "max_single_name_weight_pct",
+            "catalyst_expiry_date",
+            "review_end_trade_date",
+            "is_personalized_advice",
+        ):
+            self.assertIn(field, self.js)
+        self.assertIn("规则资格分不是上涨概率，也不是收益保证", self.js)
+        self.assertIn("advanced-decision-details", self.js + self.css)
+        self.assertNotIn("<details class=\"advanced-decision-details\" open", self.js)
+
+    def test_trade_plan_contract_is_semantically_validated_without_browser_inference(self) -> None:
+        run_app_node(
+            r"""
+const primary = {
+  market: "us",
+  qualification_track: "quality_technical",
+  estimated_10d_range: { low_pct: -4, high_pct: 8 },
+  risk_reward: { ratio: 2 },
+};
+const plan = {
+  contract_version: "ten-day-trade-plan-v1",
+  status: "REVIEW_REQUIRED",
+  horizon_trade_days: 10,
+  reference_quote: {
+    price: 100, currency: "USD", source: "published_quote",
+    source_as_of: "2026-08-28T16:00:00-04:00", quote_status: "LAST_CLOSE",
+    kind: "published_snapshot_quote",
+  },
+  entry_zone: { low: 99, high: 100.5, currency: "USD" },
+  entry_trade_date: "2026-08-31",
+  invalidation: { price: 94, currency: "USD", source: "candidate_stop_loss" },
+  target: { price: 108, currency: "USD", source: "ten_day_scenario_upper_bound" },
+  position_limit: { max_single_name_weight_pct: 10, policy: "strategy_safety_cap_not_personalized" },
+  catalyst_expiry_date: null,
+  review_end_trade_date: "2026-09-11",
+  exit_rules: [
+    "EXIT_IF_INVALIDATION_PRICE_BREACHED",
+    "REVIEW_AT_TENTH_SESSION_CLOSE",
+    "DO_NOT_CHASE_ABOVE_ENTRY_ZONE",
+  ],
+  is_personalized_advice: false,
+};
+assert.equal(validateTenDayTradePlan(plan, primary).valid, true);
+const view = tenSessionTradePlan({}, { ...primary, ten_day_trade_plan: plan });
+assert.equal(view.currency, "USD");
+assert.equal(view.quoteStatus, "LAST_CLOSE");
+assert.equal(view.invalidationSource, "candidate_stop_loss");
+assert.equal(view.targetSource, "ten_day_scenario_upper_bound");
+assert.deepEqual(view.exitRules, plan.exit_rules);
+for (const mutate of [
+  (copy) => { copy.reference_quote.currency = "HKD"; },
+  (copy) => { copy.reference_quote.quote_status = ""; },
+  (copy) => { copy.invalidation.source = ""; },
+  (copy) => { copy.exit_rules.reverse(); },
+  (copy) => { copy.position_limit.max_single_name_weight_pct = 100; },
+  (copy) => { copy.entry_trade_date = "2026-02-30"; },
+]) {
+  const copy = JSON.parse(JSON.stringify(plan));
+  mutate(copy);
+  assert.equal(validateTenDayTradePlan(copy, primary).valid, false);
+}
+const eventPlan = JSON.parse(JSON.stringify(plan));
+eventPlan.catalyst_expiry_date = eventPlan.review_end_trade_date;
+assert.equal(validateTenDayTradePlan(eventPlan, { ...primary, qualification_track: "event_catalyst" }).valid, true);
+"""
+        )
+
+    def test_paged_api_filters_identity_and_abort_timeout_fallback_fail_closed(self) -> None:
+        run_app_node(
+            r"""
+state.snapshot = {
+  contract_version: "ui-bootstrap-v1",
+  snapshot_key: "2026-08-29_fixture.json",
+  generated_at: "2026-08-29T10:17:00+08:00",
+  source_snapshot: { sha256: "a".repeat(64), byte_size: 1234 },
+};
+state.candidateFilters = { market: "us", risk: "all", route: "all", query: "Apple" };
+const candidateUrl = resourceListUrl("candidates", 1);
+assert.match(candidateUrl, /market=us/);
+assert.match(candidateUrl, /q=apple/);
+state.eventFilters = { market: "hk", type: "all", direction: "all", query: "Tencent" };
+const eventUrl = resourceListUrl("events", 2);
+assert.match(eventUrl, /market=hk/);
+assert.match(eventUrl, /issuer=tencent/);
+assert.match(eventUrl, /page=2/);
+const payload = {
+  contract_version: "candidate-list-v1",
+  snapshot_key: state.snapshot.snapshot_key,
+  generated_at: state.snapshot.generated_at,
+  source_snapshot: { ...state.snapshot.source_snapshot },
+  scanned_count: 800,
+  page: 1, limit: 25, total: 1, has_more: false,
+  candidates: [{ id: "cand_0123456789abcdef0123", market: "us", code: "AAPL", name: "Apple" }],
+};
+validateResourcePayload("candidates", payload, { queryKey: resourceQueryKey("candidates") });
+assert.equal(payload.scanned_count, 800);
+assert.throws(() => validateResourcePayload("candidates", { ...payload, contract_version: "candidate-list-v2" }));
+assert.throws(() => validateResourcePayload("candidates", {
+  ...payload, source_snapshot: { ...payload.source_snapshot, byte_size: 1235 },
+}));
+const savedAny = AbortSignal.any;
+AbortSignal.any = undefined;
+const parent = new AbortController();
+const bounded = requestSignal(1000, parent.signal);
+assert.notEqual(bounded.signal, parent.signal, "parent signal must not replace the timeout signal");
+parent.abort();
+assert.equal(bounded.signal.aborted, true);
+bounded.cleanup();
+AbortSignal.any = savedAny;
+"""
+        )
+
+    def test_scheduler_health_is_contract_bound_and_never_hardcodes_success(self) -> None:
+        self.assertIn('scheduler: new Set(["scheduler-health-v1"])', self.js)
+        self.assertIn('health: ["scheduler"]', self.js)
+        self.assertIn('getJson("/api/gate-status", { signal })', self.js)
+        self.assertIn("主调度未启用", self.js)
+        self.assertIn("watchdog 状态未知", self.js)
+        self.assertIn("watchdog 生效（唯一自动刷新）", self.js)
+        self.assertIn("active_refresh_mode", self.js)
+        self.assertIn("next_active_refresh", self.js)
+        self.assertIn("us-post-close-schedule-v1", self.js)
+        self.assertIn("04:17", self.js)
+        self.assertIn("05:17", self.js)
+        self.assertNotIn('badge("已配置"', self.js)
+        self.assertNotIn("；>${esc(scheduler.usScheduleDays)}", self.js)
+        self.assertIn("全池结构风险筛查", self.js)
+        self.assertIn("当前 R2 未启用，内嵌同代资产生效", self.js)
+        run_app_node(
+            r"""
+state.snapshot = {
+  contract_version: "ui-bootstrap-v1",
+  snapshot_key: "2026-08-29_fixture.json",
+  generated_at: "2026-08-29T10:17:00+08:00",
+  source_snapshot: { sha256: "a".repeat(64), byte_size: 1234 },
+};
+const gate = {
+  ok: true,
+  contract_version: "scheduler-health-v1",
+  snapshot_key: state.snapshot.snapshot_key,
+  generated_at: state.snapshot.generated_at,
+  generation_started_at: "2026-08-29T10:18:00+08:00",
+  published_at: "2026-08-29T10:29:00+08:00",
+  publication_backend: "r2",
+  source_invocation_slot: "2026-08-29T10:17:00+08:00",
+  effective_checkpoint: "2026-08-29T10:17:00+08:00",
+  effective_invocation_slot: "2026-08-29T10:17:00+08:00",
+  scheduler_start_delay_seconds: 60,
+  generation_delay_seconds: 600,
+  publication_delay_seconds: 720,
+  missed_checkpoints_24h: 0,
+  checkpoint_coverage_status: "COMPLETE_24H_LEDGER",
+  checkpoint_evidence_contract_version: "scheduler-checkpoint-ledger-v1",
+  recovery_mode: "none",
+  scheduler_enabled: false,
+  scheduler_gap: "GITHUB_WORKFLOW_DISPATCH_TOKEN_NOT_PROVISIONED",
+};
+assert.equal(validateResourcePayload("scheduler", gate), gate);
+state.schedulerGate = gate;
+state.status = {
+  ok: true,
+  snapshot_key: state.snapshot.snapshot_key,
+  generated_at: state.snapshot.generated_at,
+  source_snapshot_sha256: state.snapshot.source_snapshot.sha256,
+  source_snapshot_byte_size: state.snapshot.source_snapshot.byte_size,
+  scheduler_primary_enabled: false,
+  active_refresh_mode: "github_watchdog_only",
+  next_active_refresh: "2026-09-01T08:47:00+08:00",
+  schedule_us_post_close: {
+    contract_version: "us-post-close-schedule-v1",
+    market_time_zone: "America/New_York",
+    market_checkpoint: "16:17",
+    primary_beijing_variants: ["04:17 夏令时", "05:17 冬令时"],
+    watchdog_beijing_variants: ["04:47 夏令时", "05:47 冬令时"],
+    china_days: "周二至周六",
+    dst_variant_selected_at_runtime: true,
+  },
+};
+assert.equal(validActiveRefreshStatus(), true);
+let view = schedulerHealthPresentation();
+assert.equal(view.primaryState, "DISABLED");
+assert.equal(view.primaryLabel, "主调度未启用");
+assert.equal(view.watchdogLabel, "watchdog 生效（唯一自动刷新）");
+assert.equal(view.nextActiveRefresh, state.status.next_active_refresh);
+assert.equal(view.usPrimaryCheckpoints, "04:17 夏令时 / 05:17 冬令时");
+assert.equal(view.hasBatchPublicationEvidence, true);
+assert.match(view.checkpointEvidence, /24 小时遗漏 0 个/);
+assert.throws(() => validateResourcePayload("scheduler", { ...gate, snapshot_key: "other.json" }));
+assert.throws(() => validateResourcePayload("scheduler", { ...gate, scheduler_enabled: true }));
+state.status = {
+  ...state.status,
+  scheduler_primary_enabled: true,
+  active_refresh_mode: "cloudflare_primary_with_github_watchdog",
+};
+view = schedulerHealthPresentation();
+assert.equal(view.primaryState, "UNKNOWN", "status and gate disagreement must fail closed");
+assert.equal(view.watchdogLabel, "watchdog 状态未知");
+state.status = {};
+view = schedulerHealthPresentation();
+assert.equal(view.primaryState, "DISABLED", "older status may use the validated gate for primary state only");
+assert.equal(view.watchdogLabel, "watchdog 状态未知");
+state.schedulerGate = null;
+assert.equal(schedulerHealthPresentation().primaryState, "UNKNOWN");
+"""
+        )
+
+    def test_shortlist_is_list_first_and_loads_details_on_demand(self) -> None:
+        self.assertIn("决策短名单", self.html + self.js)
+        self.assertIn("已扫描 ${fmt(scanned, 0)}，只展示 ${fmt(published, 0)}", self.js)
+        self.assertIn("candidateApiId", self.js)
+        self.assertIn("/api/candidates/${encodeURIComponent(apiId)}", self.js)
+        self.assertIn("candidate-detail-host", self.js + self.css)
+        self.assertIn("candidate-detail-back", self.js + self.css)
+        self.assertIn("返回决策短名单", self.js)
+        self.assertIn("position: fixed", self.css)
+        self.assertIn("max-height: calc(100vh - 112px)", self.css)
+
+    def test_event_clustering_and_history_maturity_are_visible(self) -> None:
+        self.assertRegex(self.js, r"function clusterEvents\(")
+        for helper in (
+            "eventMaterialityLabel",
+            "eventPriceReactionLabel",
+            "eventExpiryLabel",
+            "eventAgeDays",
+        ):
+            self.assertIn(helper, self.js)
+        self.assertIn("按公司、事件类型与生效日期去重", self.js)
+        self.assertIn("two-tier-event-coverage-v1", self.js)
+        self.assertIn("PASS 不等于官方确认", self.js)
+        self.assertIn("history-maturity-progress", self.js + self.css)
+        self.assertIn("先走满 10 个交易日，再评价模型", self.js)
+        self.assertIn("reliabilityDayThreshold = Math.max(60", self.js)
+        self.assertIn("指标将在样本成熟后显示", self.js)
+        self.assertIn("不展示空指标网格", self.js)
+
+    def test_requests_search_and_tabs_are_resilient_and_accessible(self) -> None:
+        self.assertIn("class HttpError", self.js)
+        self.assertIn("AbortSignal.timeout", self.js)
+        self.assertIn("AbortSignal.any", self.js)
+        self.assertIn("requestControllers.tab?.abort", self.js)
+        self.assertIn("requestControllers.detail?.abort", self.js)
+        self.assertIn("const SEARCH_DEBOUNCE_MS = 150", self.js)
+        self.assertIn("debounceSearch", self.js)
+        for key in ("ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown", "Home", "End"):
+            self.assertIn(key, self.js)
+        self.assertIn('button.setAttribute("tabindex", active ? "0" : "-1")', self.js)
+        self.assertIn('tabindex="0"', self.html)
+        self.assertIn('tabindex="-1"', self.html)
+        self.assertIn("min-height: 44px", self.css)
+        self.assertIn("font-size: 14px", self.css)
+        self.assertIn("chart-data-summary", self.js + self.css)
+        self.assertIn("resourceQueryKey", self.js)
+        self.assertIn("resourceListUrl", self.js)
+        self.assertIn('url.searchParams.set("q", query)', self.js)
+        self.assertIn('url.searchParams.set("issuer", query)', self.js)
+        self.assertIn("reloadPagedResource", self.js)
+        self.assertIn("candidateDialogFocusables", self.js)
+        self.assertIn('element.setAttribute("inert", "")', self.js)
+        self.assertIn('event.key === "Tab"', self.js)
+        self.assertIn("body.has-modal-dialog", self.css)
 
     def test_frontend_uses_published_cloud_snapshot_only(self) -> None:
         self.assertIn('getJson("/api/latest-summary")', self.js)
@@ -107,7 +391,8 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('id="nextRefreshTime"', self.html)
         self.assertIn("snapshot_as_of", self.js)
         self.assertIn("next_refresh", self.js)
-        self.assertIn("下次计划检查点（含健康补跑）", self.html + self.js)
+        self.assertIn("next_active_refresh", self.js)
+        self.assertIn("下次实际自动刷新", self.html + self.js)
         self.assertIn("当前证据与模型条件不足以生成跨市场买入结论", self.js)
 
     def test_missing_quote_provenance_is_not_presented_as_market_data(self) -> None:
@@ -308,9 +593,12 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('getJson("/api/latest-summary")', initialize)
         self.assertNotIn('getJson("/api/latest")', initialize)
         self.assertNotIn("getHistoryPayload()", initialize.split("initialize();", 1)[0])
-        self.assertIn('getJson("/api/candidates")', self.js)
-        self.assertIn('getJson("/api/events")', self.js)
-        self.assertIn("snapshotKey !== state.snapshot?.snapshot_key", self.js)
+        self.assertIn('resourceListUrl("history", page)', self.js)
+        self.assertIn('resourceListUrl(resource, 1)', self.js)
+        self.assertIn('resourceListUrl(resource, nextPage)', self.js)
+        self.assertIn("tabRequestStillCurrent", self.js)
+        self.assertIn("payloadIdentityMatchesSnapshot", self.js)
+        self.assertIn("validateResourcePayload", self.js)
 
     def test_lazy_snapshot_use_merges_monotonically_and_checkpoint_poll_has_no_five_minute_gap(self) -> None:
         run_app_node(
@@ -469,7 +757,7 @@ const candidate = {
 const primary = {
   qualification_id: "qual_0123456789abcdef01234567", status: "QUALIFIED",
   market: "us", code: "VZ", name: "Verizon",
-  rule_model_id: "ten-day-audited-rule-ensemble-v3",
+  rule_model_id: "ten-day-audited-rule-ensemble-v4",
   score_kind: "RULE_QUALIFICATION_SCORE", qualification_score: 75,
   probability: null, calibrated: false, candidate_snapshot: candidate,
 };
@@ -483,8 +771,8 @@ const snapshot = {
   production_decision: {
     contract_version: "production-rule-10d-v1",
     decision_scope: "global_10d_bounded_recall",
-    action: "QUALIFIED_PICK", action_basis: "dual_track_candidate_qualification_v3",
-    rule_model_id: "ten-day-audited-rule-ensemble-v3",
+    action: "QUALIFIED_PICK", action_basis: "dual_track_candidate_qualification_v4",
+    rule_model_id: "ten-day-audited-rule-ensemble-v4",
     score_kind: "RULE_QUALIFICATION_SCORE", probability: null, calibrated: false,
     primary, qualified_candidates: [primary], qualified_candidate_count: 1,
     rejected_candidate_count: 797, evaluated_candidate_count: 798, blocker_codes: [],
@@ -522,8 +810,9 @@ assert.equal(candidateDecisionRole(candidate, "us"), "historical_qualified");
 __roots.set("#decisionView", { innerHTML: "" });
 renderDecision();
 const html = __roots.get("#decisionView").innerHTML;
-assert.match(html, /历史快照曾规则合格/);
-assert.match(html, /暂停执行/);
+assert.match(html, /data-user-decision-state="NO_ACTION"/);
+assert.match(html, /今日不行动/);
+assert.match(html, /所有历史候选均暂停执行/);
 assert.doesNotMatch(html, /今日质量趋势合格/);
 assert.doesNotMatch(html, /仍需核对交易计划/);
 """
@@ -591,16 +880,22 @@ assert.doesNotMatch(html, /仍需核对交易计划/);
         self.assertRegex(self.js, r"function productionQualifiedRows\(")
         self.assertRegex(self.js, r"function syncPreferredCandidate\(")
         self.assertIn('decision.contract_version === "production-rule-10d-v1"', self.js)
-        self.assertIn('decision.action_basis === "strict_rule_qualification_v1"', self.js)
-        self.assertIn('decision.rule_model_id === "ten-day-audited-rule-ensemble-v1"', self.js)
-        self.assertIn('decision.action_basis === "candidate_level_rule_qualification_v2"', self.js)
-        self.assertIn('decision.rule_model_id === "ten-day-audited-rule-ensemble-v2"', self.js)
+        for historical_model, action_basis, rule_model in (
+            ("smart-selector-2026-08-25.1-production-rule", "strict_rule_qualification_v1", "ten-day-audited-rule-ensemble-v1"),
+            ("smart-selector-2026-08-26.1-candidate-rule", "candidate_level_rule_qualification_v2", "ten-day-audited-rule-ensemble-v2"),
+            ("smart-selector-2026-08-26.2-dual-track-rule", "dual_track_candidate_qualification_v3", "ten-day-audited-rule-ensemble-v3"),
+        ):
+            self.assertIn(historical_model, self.js)
+            self.assertIn(f'actionBasis: "{action_basis}"', self.js)
+            self.assertIn(f'ruleModelId: "{rule_model}"', self.js)
+        self.assertIn('decision.action_basis === "dual_track_candidate_qualification_v4"', self.js)
+        self.assertIn('decision.rule_model_id === "ten-day-audited-rule-ensemble-v4"', self.js)
         self.assertIn('["QUALIFIED_PICK", "NO_QUALIFIED_PICK"].includes(String(decision.action || ""))', self.js)
         self.assertIn('decision.score_kind === "RULE_QUALIFICATION_SCORE"', self.js)
         self.assertIn("decision.probability === null", self.js)
         self.assertIn("decision.calibrated === false", self.js)
         self.assertIn("serverPrimary?.qualification_score", self.js)
-        self.assertIn('const currentAction = snapshotUse.currentDecisionAllowed', self.js)
+        self.assertIn('const currentAction = !currentContract', self.js)
         self.assertIn("const selected = production.qualified || production.historicalQualified;", self.js)
         self.assertIn("浏览器绝不把它们自行升级为 QUALIFIED_PICK", self.js)
         self.assertIn("规则资格分（非概率）", self.js)
@@ -615,7 +910,7 @@ assert.doesNotMatch(html, /仍需核对交易计划/);
         self.assertIn("syncPreferredCandidate({ revealQualified: true })", self.js)
         self.assertIn("productionPrimary.rule_model_id || item.production_decision?.rule_model_id", self.js)
         self.assertIn("全局校准模型结论", self.js)
-        self.assertIn("生产规则资格模型 · V3", self.js)
+        self.assertIn("生产规则资格模型 · V4", self.js)
         self.assertIn("推荐度 64 / 63 / 64", self.js)
         self.assertIn("规则资格轨已通过", self.js)
         self.assertIn("规则轨 ${esc(production.action)} · 校准轨", self.js)
@@ -625,9 +920,10 @@ assert.doesNotMatch(html, /仍需核对交易计划/);
         self.assertNotRegex(self.js, r"qualification_score\s*/\s*100")
         self.assertNotRegex(self.js, r"pct\([^\n)]*qualification_score")
 
-    def test_v3_dual_track_qualification_is_named_without_inventing_event_evidence(self) -> None:
-        self.assertIn('decision.action_basis === "dual_track_candidate_qualification_v3"', self.js)
-        self.assertIn('decision.rule_model_id === "ten-day-audited-rule-ensemble-v3"', self.js)
+    def test_v4_dual_track_qualification_is_named_without_inventing_event_evidence(self) -> None:
+        self.assertIn('decision.action_basis === "dual_track_candidate_qualification_v4"', self.js)
+        self.assertIn('decision.rule_model_id === "ten-day-audited-rule-ensemble-v4"', self.js)
+        self.assertIn('inputs.contract_version !== "production-rule-inputs-v2"', self.js)
         self.assertRegex(self.js, r"function qualificationTrackLabel\(track\)")
         self.assertIn('event_catalyst: "事件催化合格"', self.js)
         self.assertIn('quality_technical: "质量趋势合格"', self.js)
@@ -635,19 +931,19 @@ assert.doesNotMatch(html, /仍需核对交易计划/);
         self.assertIn("qualificationTrackLabel(qualification.qualification_track)", self.js)
         self.assertIn("qualificationTrackLabel(displayPrimary.qualification_track)", self.js)
         self.assertIn("qualificationTrackLabel(productionPrimary.qualification_track)", self.js)
-        self.assertIn("已完成事件扫描且未发现重大负面；本通道不要求正向催化", self.js)
+        self.assertIn("全池结构化风险筛查通过当前规则；不等于官方确认不存在全部负面事件；本通道不要求正向催化深扫", self.js)
         self.assertIn("质量趋势通道不绑定正向事件", self.js)
-        self.assertIn("生产规则资格模型 · V3", self.js)
+        self.assertIn("生产规则资格模型 · V4", self.js)
         self.assertIn("事件催化轨", self.js)
         self.assertIn("推荐度 64 / 63 / 64", self.js)
         self.assertIn("Top 20% · 正向事件 ≥1 · RR ≥1.20", self.js)
         self.assertIn("质量趋势轨", self.js)
-        self.assertIn("推荐度 66 / 67 / 68", self.js)
+        self.assertIn("推荐度 64 / 67 / 67", self.js)
         self.assertIn("Top 10% · 数据质量 ≥95 · RR ≥1.50 · 资格分 ≥72", self.js)
         self.assertIn("A/H 上行≥6% 且下行≤6%", self.js)
         self.assertIn("US 上行≥6.5% 且下行≤7.5%", self.js)
 
-    def test_v3_malformed_qualified_rows_fail_closed_at_browser_runtime(self) -> None:
+    def test_v4_malformed_qualified_rows_fail_closed_at_browser_runtime(self) -> None:
         run_app_node(
             r"""
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -683,7 +979,7 @@ const makeRow = (track = "event_catalyst") => ({
   name: "Audit Candidate",
   status: "QUALIFIED",
   qualification_track: track,
-  rule_model_id: "ten-day-audited-rule-ensemble-v3",
+  rule_model_id: "ten-day-audited-rule-ensemble-v4",
   score_kind: "RULE_QUALIFICATION_SCORE",
   probability: null,
   probability_status: "NOT_APPLICABLE",
@@ -743,18 +1039,27 @@ const inputForRow = (source, row, index = 0) => ({
   source_data_quality_score: row.data_quality_score,
   candidate_snapshot: clone(row.candidate_snapshot),
 });
-const makeSnapshot = (row, version = 3) => {
+const makeSnapshot = (row, version = 4) => {
+  const historicalModelVersions = {
+    1: "smart-selector-2026-08-25.1-production-rule",
+    2: "smart-selector-2026-08-26.1-candidate-rule",
+    3: "smart-selector-2026-08-26.2-dual-track-rule",
+  };
   const ledgerHash = "a".repeat(64);
   const decision = {
     contract_version: "production-rule-10d-v1",
     decision_scope: "global_10d_bounded_recall",
-    action_basis: version === 3
-      ? "dual_track_candidate_qualification_v3"
+    action_basis: version === 4
+      ? "dual_track_candidate_qualification_v4"
+      : version === 3
+        ? "dual_track_candidate_qualification_v3"
       : version === 2
         ? "candidate_level_rule_qualification_v2"
         : "strict_rule_qualification_v1",
-    rule_model_id: version === 3
-      ? "ten-day-audited-rule-ensemble-v3"
+    rule_model_id: version === 4
+      ? "ten-day-audited-rule-ensemble-v4"
+      : version === 3
+        ? "ten-day-audited-rule-ensemble-v3"
       : version === 2
         ? "ten-day-audited-rule-ensemble-v2"
         : "ten-day-audited-rule-ensemble-v1",
@@ -771,25 +1076,25 @@ const makeSnapshot = (row, version = 3) => {
     blocker_codes: [],
   };
   const snapshot = {
-    model_version: version === 3
-      ? "smart-selector-2026-08-26.2-dual-track-rule"
-      : `archived-production-rule-v${version}`,
+    model_version: version === 4
+      ? "smart-selector-2026-08-29.1-two-tier-rule"
+      : historicalModelVersions[version],
     markets: { a_share: { decision: {} }, hk: { decision: {} }, us: { decision: {} } },
     production_decision: decision,
   };
-  if (version === 3) {
+  if (version === 4) {
     const source = sourceForRow(row);
     snapshot.global_decision = { evaluated_candidates: [source] };
     snapshot.production_rule_inputs = {
-      contract_version: "production-rule-inputs-v1",
-      action_basis: "dual_track_candidate_qualification_v3",
-      rule_model_id: "ten-day-audited-rule-ensemble-v3",
+      contract_version: "production-rule-inputs-v2",
+      action_basis: "dual_track_candidate_qualification_v4",
+      rule_model_id: "ten-day-audited-rule-ensemble-v4",
       evaluated_candidate_count: 1,
       rows: [inputForRow(source, row)],
       ledger_sha256: ledgerHash,
     };
     Object.assign(decision, {
-      source_rule_inputs_contract_version: "production-rule-inputs-v1",
+      source_rule_inputs_contract_version: "production-rule-inputs-v2",
       source_rule_inputs_sha256: ledgerHash,
       source_rule_input_count: 1,
     });
@@ -820,7 +1125,7 @@ assertRejected("event catalyst evidence missing", (row) => { row.verified_positi
 
 const mixedSnapshot = makeSnapshot(makeRow());
 mixedSnapshot.production_decision.primary.event_candidate_scanned = false;
-assert.equal(productionQualifiedRows(mixedSnapshot).length, 0, "a valid duplicate must not launder a malformed V3 primary");
+assert.equal(productionQualifiedRows(mixedSnapshot).length, 0, "a valid duplicate must not launder a malformed V4 primary");
 assert.equal(productionDecisionTruth(mixedSnapshot).action, "NO_QUALIFIED_PICK");
 
 const evilPrimary = makeSnapshot(makeRow());
@@ -835,7 +1140,7 @@ assert.equal(productionQualifiedRows(evilQualifiedMirror).length, 0, "nested EVI
 const forgedQuality = makeSnapshot(makeRow("quality_technical"));
 forgedQuality.global_decision.evaluated_candidates[0].legacy_recommendation_degree = 64;
 forgedQuality.production_rule_inputs.rows[0].legacy_recommendation_degree = 64;
-assert.equal(productionQualifiedRows(forgedQuality).length, 0, "forged quality PASS below the US Legacy 68 gate must be rejected");
+assert.equal(productionQualifiedRows(forgedQuality).length, 0, "forged quality PASS below the US Legacy 67 gate must be rejected");
 
 const sharedBlockerBypass = makeSnapshot(makeRow("quality_technical"));
 sharedBlockerBypass.global_decision.evaluated_candidates[0].blocker_codes.push("MATERIAL_NEGATIVE_EVENT");
@@ -844,10 +1149,36 @@ assert.equal(productionQualifiedRows(sharedBlockerBypass).length, 0, "quality tr
 
 const qualitySnapshot = makeSnapshot(makeRow("quality_technical"));
 assert.equal(productionQualifiedRows(qualitySnapshot).length, 1, "valid quality row remains accepted without positive events");
+state.snapshot = qualitySnapshot;
+state.status = null;
+assert.equal(userDecisionState(qualitySnapshot), "ENTER_TRADE_REVIEW", "only the current V4 pair can enter review");
 
-const downgradedV3 = makeSnapshot(makeRow("quality_technical"));
-downgradedV3.model_version = "archived-production-rule-v2";
-assert.equal(productionQualifiedRows(downgradedV3).length, 0, "V3 cannot bypass strict checks under an older model_version");
+const qualityWithoutDeepScan = makeSnapshot(makeRow("quality_technical"));
+qualityWithoutDeepScan.global_decision.evaluated_candidates[0].blocker_codes.push("EVENT_CANDIDATE_NOT_SCANNED");
+qualityWithoutDeepScan.global_decision.evaluated_candidates[0].event_candidate_scanned = false;
+qualityWithoutDeepScan.production_rule_inputs.rows[0].blocker_codes.push("EVENT_CANDIDATE_NOT_SCANNED");
+qualityWithoutDeepScan.production_rule_inputs.rows[0].event_candidate_scanned = false;
+for (const row of [
+  qualityWithoutDeepScan.production_decision.primary,
+  qualityWithoutDeepScan.production_decision.qualified_candidates[0],
+  qualityWithoutDeepScan.production_decision.evaluated_candidates[0],
+]) {
+  row.event_candidate_scanned = false;
+  row.track_evaluations[0].blocker_codes = ["VERIFIED_POSITIVE_EVENT_MISSING", "EVENT_CANDIDATE_NOT_SCANNED"];
+}
+assert.equal(
+  productionQualifiedRows(qualityWithoutDeepScan).length,
+  1,
+  "quality track remains valid without bounded positive-event deep scan",
+);
+
+const downgradedV4 = makeSnapshot(makeRow("quality_technical"));
+downgradedV4.model_version = "smart-selector-2026-08-26.2-dual-track-rule";
+assert.equal(productionQualifiedRows(downgradedV4).length, 0, "V4 cannot bypass strict checks under an older model_version");
+
+const unknownHistorical = makeSnapshot(makeRow());
+unknownHistorical.model_version = "archived-production-rule-v3";
+assert.equal(productionQualifiedRows(unknownHistorical).length, 0, "unknown historical versions fail closed");
 
 const bothPassWrongSelection = makeSnapshot(makeRow());
 for (const row of [
@@ -886,7 +1217,17 @@ forgedOrder.production_decision.evaluated_candidates = [clone(lowRow), clone(hig
 forgedOrder.production_decision.qualified_candidates = [clone(lowRow), clone(highRow)];
 forgedOrder.production_decision.primary = clone(lowRow);
 assert.equal(productionQualifiedRows(forgedOrder).length, 0, "a lower score cannot become primary by reordering every published mirror");
-assert.equal(productionDecisionTruth(forgedOrder).action, "NO_QUALIFIED_PICK", "reordered V3 primary must fail closed");
+assert.equal(productionDecisionTruth(forgedOrder).action, "NO_QUALIFIED_PICK", "reordered V4 primary must fail closed");
+
+const archivedV3Row = makeRow();
+archivedV3Row.rule_model_id = "ten-day-audited-rule-ensemble-v3";
+const archivedV3Snapshot = makeSnapshot(archivedV3Row, 3);
+assert.equal(productionQualifiedRows(archivedV3Snapshot).length, 1, "archived V3 remains readable");
+assert.equal(productionDecisionTruth(archivedV3Snapshot).action, "HISTORICAL_ONLY", "archived V3 never becomes current");
+state.snapshot = archivedV3Snapshot;
+state.status = null;
+assert.equal(candidateDecisionRole(archivedV3Row.candidate_snapshot, "us"), "historical_qualified");
+assert.equal(userDecisionState(archivedV3Snapshot), "NO_ACTION", "archived V3 is read-only");
 
 const archivedV2Row = makeRow();
 archivedV2Row.rule_model_id = "ten-day-audited-rule-ensemble-v2";
@@ -896,7 +1237,7 @@ delete archivedV2Row.event_candidate_scanned;
 delete archivedV2Row.verified_positive_event_ids;
 assert.equal(productionQualifiedRows(makeSnapshot(archivedV2Row, 2)).length, 1, "archived V2 remains compatible");
 const currentVersionWithV2 = makeSnapshot(archivedV2Row, 2);
-currentVersionWithV2.model_version = "smart-selector-2026-08-26.2-dual-track-rule";
+currentVersionWithV2.model_version = "smart-selector-2026-08-29.1-two-tier-rule";
 assert.equal(productionQualifiedRows(currentVersionWithV2).length, 0, "current model_version cannot publish a V2 decision");
 
 const archivedV1Row = clone(archivedV2Row);
@@ -905,7 +1246,7 @@ assert.equal(productionQualifiedRows(makeSnapshot(archivedV1Row, 1)).length, 1, 
 """
         )
 
-    def test_event_tab_audits_every_v3_qualified_candidate_without_promoting_secondaries(self) -> None:
+    def test_event_tab_audits_every_v4_qualified_candidate_without_promoting_secondaries(self) -> None:
         run_app_node(
             r"""
 const candidate = (market, code, name, track, score, eventIds = []) => ({
@@ -931,7 +1272,7 @@ const candidate = (market, code, name, track, score, eventIds = []) => ({
   name,
   status: "QUALIFIED",
   qualification_track: track,
-  rule_model_id: "ten-day-audited-rule-ensemble-v3",
+  rule_model_id: "ten-day-audited-rule-ensemble-v4",
   score_kind: "RULE_QUALIFICATION_SCORE",
   probability: null,
   probability_status: "NOT_APPLICABLE",
@@ -996,16 +1337,16 @@ const inputRows = sources.map((source, index) => ({
 }));
 const ledgerHash = "b".repeat(64);
 state.snapshot = {
-  model_version: "smart-selector-2026-08-26.2-dual-track-rule",
+  model_version: "smart-selector-2026-08-29.1-two-tier-rule",
   generated_at: "2026-08-26T08:00:00+08:00",
   target_date: "2026-08-26",
   forecast_end_date: "2026-09-08",
   markets: { a_share: { decision: {} }, hk: { decision: {} }, us: { decision: {} } },
   global_decision: { evaluated_candidates: sources },
   production_rule_inputs: {
-    contract_version: "production-rule-inputs-v1",
-    action_basis: "dual_track_candidate_qualification_v3",
-    rule_model_id: "ten-day-audited-rule-ensemble-v3",
+    contract_version: "production-rule-inputs-v2",
+    action_basis: "dual_track_candidate_qualification_v4",
+    rule_model_id: "ten-day-audited-rule-ensemble-v4",
     evaluated_candidate_count: 3,
     rows: inputRows,
     ledger_sha256: ledgerHash,
@@ -1030,8 +1371,8 @@ state.snapshot = {
   production_decision: {
     contract_version: "production-rule-10d-v1",
     decision_scope: "global_10d_bounded_recall",
-    action_basis: "dual_track_candidate_qualification_v3",
-    rule_model_id: "ten-day-audited-rule-ensemble-v3",
+    action_basis: "dual_track_candidate_qualification_v4",
+    rule_model_id: "ten-day-audited-rule-ensemble-v4",
     action: "QUALIFIED_PICK",
     score_kind: "RULE_QUALIFICATION_SCORE",
     probability: null,
@@ -1042,7 +1383,7 @@ state.snapshot = {
     evaluated_candidates: qualified,
     evaluated_candidate_count: 3,
     rejected_candidate_count: 0,
-    source_rule_inputs_contract_version: "production-rule-inputs-v1",
+    source_rule_inputs_contract_version: "production-rule-inputs-v2",
     source_rule_inputs_sha256: ledgerHash,
     source_rule_input_count: 3,
     blocker_codes: [],
@@ -1056,7 +1397,7 @@ for (const text of [
   "规则资格分 88.8", "规则资格分 76.3", "规则资格分 76.6",
   "事件催化合格", "质量趋势合格", "evt:midea",
 ]) assert.ok(html.includes(text), `missing event audit text: ${text}`);
-assert.equal((html.match(/已完成事件扫描且未发现重大负面；本通道不要求正向催化/g) || []).length, 2);
+assert.equal((html.match(/全池结构化风险筛查通过当前规则；不等于官方确认不存在全部负面事件；本通道不要求正向催化深扫/g) || []).length, 2);
 assert.equal((html.match(/合格候选（非主候选）/g) || []).length, 2);
 assert.equal((html.match(/主候选 ·/g) || []).length, 1);
 assert.equal(productionDecisionTruth().primary.code, "0300.HK", "secondary audit must not replace primary");
@@ -1111,7 +1452,7 @@ const inputs = sources.map((item, index) => ({
   source_data_quality_score: 100,
 }));
 const publishedRow = (sourceRow, input, qualificationId) => {
-  const expected = expectedV3Qualification(sourceRow, input);
+  const expected = expectedCurrentQualification(sourceRow, input);
   const row = {
     market: expected.market,
     code: expected.code,
@@ -1119,7 +1460,7 @@ const publishedRow = (sourceRow, input, qualificationId) => {
     status: expected.qualificationTrack ? "QUALIFIED" : "REJECTED",
     qualification_track: expected.qualificationTrack,
     track_evaluations: clone(expected.trackEvaluations),
-    rule_model_id: "ten-day-audited-rule-ensemble-v3",
+    rule_model_id: "ten-day-audited-rule-ensemble-v4",
     score_kind: "RULE_QUALIFICATION_SCORE",
     qualification_score: expected.score,
     score_components: clone(expected.components),
@@ -1161,8 +1502,8 @@ const ledgerHash = "c".repeat(64);
 const decision = {
   contract_version: "production-rule-10d-v1",
   decision_scope: "global_10d_bounded_recall",
-  action_basis: "dual_track_candidate_qualification_v3",
-  rule_model_id: "ten-day-audited-rule-ensemble-v3",
+  action_basis: "dual_track_candidate_qualification_v4",
+  rule_model_id: "ten-day-audited-rule-ensemble-v4",
   action: "QUALIFIED_PICK",
   score_kind: "RULE_QUALIFICATION_SCORE",
   probability: null,
@@ -1173,19 +1514,19 @@ const decision = {
   primary: clone(vz),
   qualified_candidates: [clone(vz), clone(pfe)],
   evaluated_candidates: [clone(vz), clone(pfe), clone(dash), clone(cmb), clone(shell)],
-  source_rule_inputs_contract_version: "production-rule-inputs-v1",
+  source_rule_inputs_contract_version: "production-rule-inputs-v2",
   source_rule_inputs_sha256: ledgerHash,
   source_rule_input_count: 5,
   blocker_codes: [],
 };
 const snapshot = {
-  model_version: "smart-selector-2026-08-26.2-dual-track-rule",
+  model_version: "smart-selector-2026-08-29.1-two-tier-rule",
   markets: { a_share: { decision: {} }, hk: { decision: {} }, us: { decision: {} } },
   global_decision: { evaluated_candidates: sources },
   production_rule_inputs: {
-    contract_version: "production-rule-inputs-v1",
-    action_basis: "dual_track_candidate_qualification_v3",
-    rule_model_id: "ten-day-audited-rule-ensemble-v3",
+    contract_version: "production-rule-inputs-v2",
+    action_basis: "dual_track_candidate_qualification_v4",
+    rule_model_id: "ten-day-audited-rule-ensemble-v4",
     evaluated_candidate_count: 5,
     rows: inputs,
     ledger_sha256: ledgerHash,
@@ -1196,7 +1537,7 @@ const snapshot = {
 const rows = productionQualifiedRows(snapshot);
 const truth = productionDecisionTruth(snapshot);
 assert.deepEqual(
-  deterministicV3Order(v3RuleInputContext(snapshot, decision), decision.evaluated_candidates)
+  deterministicCurrentOrder(currentRuleInputContext(snapshot, decision), decision.evaluated_candidates)
     .map((row) => row.code),
   ["VZ", "PFE", "DASH", "3968.HK", "SHEL"],
   "published Python-rounded scores remain the deterministic order key",

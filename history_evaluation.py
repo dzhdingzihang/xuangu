@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 import model_observation_ledger
 import observation_outcome_ledger
+import rule_outcome_ledger
 
 
 HISTORY_EVALUATION_SCHEMA = "history-evaluation-v1"
@@ -1301,11 +1302,175 @@ def evaluate_formal_performance(rows: Iterable[dict[str, Any]]) -> dict[str, Any
     }
 
 
+def _rule_metric_summary(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    samples = [dict(row) for row in rows if row.get("status") == "SETTLED"]
+    count = len(samples)
+    returns = [float(row["net_total_return"]) for row in samples]
+    excess = [float(row["net_excess_return"]) for row in samples]
+    adverse = [float(row["maximum_adverse_excursion"]) for row in samples]
+    primary = [float(row["net_total_return"]) for row in samples if row.get("is_primary") is True]
+    if count:
+        ordered = sorted(returns)
+        middle = count // 2
+        median = (
+            ordered[middle]
+            if count % 2
+            else (ordered[middle - 1] + ordered[middle]) / 2.0
+        )
+        tail_count = max(1, math.ceil(count * 0.10))
+        expected_shortfall = sum(ordered[:tail_count]) / tail_count
+    else:
+        median = expected_shortfall = None
+        tail_count = 0
+    metrics = {
+        "mean_net_return": _metric(
+            sum(returns) / count if count else None,
+            count,
+            unit="ratio",
+            method="arithmetic mean of immutable next-open to tenth-close net returns",
+        ),
+        "median_net_return": _metric(
+            median,
+            count,
+            unit="ratio",
+            method="median immutable net return",
+        ),
+        "positive_rate": _metric(
+            sum(value > 0 for value in returns) / count if count else None,
+            count,
+            unit="ratio",
+            method="share of rule settlements with net_total_return greater than zero",
+        ),
+        "top1_net_return": _metric(
+            sum(primary) / len(primary) if primary else None,
+            len(primary),
+            unit="ratio",
+            method="mean realized net return of rows frozen as the published primary pick",
+        ),
+        "mean_net_excess_return": _metric(
+            sum(excess) / count if count else None,
+            count,
+            unit="ratio",
+            method="mean net return minus exact-window registered benchmark net return",
+        ),
+        "expected_shortfall_10pct": _metric(
+            expected_shortfall,
+            tail_count,
+            unit="ratio",
+            method="mean of worst ceil(10%) immutable rule net returns",
+            minimum=MINIMUM_TAIL_SAMPLE,
+        ),
+        "mean_maximum_adverse_excursion": _metric(
+            sum(adverse) / count if count else None,
+            count,
+            unit="ratio",
+            method="mean lowest adjusted low versus entry open across each ten-session window",
+        ),
+        "worst_maximum_adverse_excursion": _metric(
+            min(adverse) if adverse else None,
+            count,
+            unit="ratio",
+            method="worst adjusted maximum adverse excursion among immutable rule settlements",
+        ),
+    }
+    return {
+        "sample_count": count,
+        "primary_sample_count": len(primary),
+        "metrics": metrics,
+    }
+
+
+def evaluate_rule_outcome_performance(
+    batches: Mapping[str, Mapping[str, Any]] | Iterable[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Summarize rule qualifications without mixing them into probability stats."""
+
+    values = list((batches or {}).values()) if isinstance(batches, Mapping) else list(batches or [])
+    prediction_count = pending_maturity = pending_data = invalid_batch_count = 0
+    raw_settled: list[dict[str, Any]] = []
+    date_market_cells: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    snapshot_count = 0
+    for raw in values:
+        try:
+            batch = rule_outcome_ledger.validate_rule_outcome_batch(raw)
+        except (rule_outcome_ledger.RuleOutcomeContractError, rule_outcome_ledger.RuleOutcomeConflictError):
+            invalid_batch_count += 1
+            continue
+        snapshot_count += 1
+        prediction_count += int(batch["prediction_count"])
+        pending_maturity += int(batch["status_counts"].get("PENDING_MATURITY", 0))
+        pending_data += int(batch["status_counts"].get("PENDING_DATA", 0))
+        for raw_row in batch["outcomes"]:
+            row = dict(raw_row)
+            date_market_cells[(str(batch["signal_date"]), str(row.get("market") or ""))].append(row)
+            if row.get("status") == "SETTLED":
+                raw_settled.append(row)
+    settled: list[dict[str, Any]] = []
+    complete_cell_count = incomplete_cell_count = data_incomplete_cell_count = 0
+    for rows in date_market_cells.values():
+        if rows and all(row.get("status") == "SETTLED" for row in rows):
+            complete_cell_count += 1
+            settled.extend(rows)
+        else:
+            incomplete_cell_count += 1
+            if any(row.get("status") == "PENDING_DATA" for row in rows):
+                data_incomplete_cell_count += 1
+    primary_rows = [row for row in settled if row.get("is_primary") is True]
+    per_market = {
+        market: _rule_metric_summary(row for row in settled if row.get("market") == market)
+        for market in rule_outcome_ledger.VALID_MARKETS
+    }
+    per_track = {
+        track: _rule_metric_summary(
+            row for row in settled if row.get("qualification_track") == track
+        )
+        for track in sorted(rule_outcome_ledger.VALID_TRACKS)
+    }
+    if not prediction_count and not invalid_batch_count:
+        status = "NO_SAMPLE"
+    elif invalid_batch_count:
+        status = "PARTIAL_DATA" if raw_settled else "INVALID_DATA"
+    elif pending_data:
+        status = "PARTIAL_DATA" if raw_settled else "PENDING_DATA"
+    elif settled:
+        status = "READY" if len(primary_rows) >= MINIMUM_RELIABLE_SAMPLE else "EARLY_SAMPLE"
+    else:
+        status = "PENDING_MATURITY"
+    return {
+        "schema_version": "rule-outcome-performance-v1",
+        "track": rule_outcome_ledger.TRACK,
+        "status": status,
+        "minimum_reliable_primary_sample": MINIMUM_RELIABLE_SAMPLE,
+        "snapshot_count": snapshot_count,
+        "prediction_count": prediction_count,
+        "pending_maturity_count": pending_maturity,
+        "pending_data_count": pending_data,
+        "settled_count": len(raw_settled),
+        "metric_eligible_settled_count": len(settled),
+        "excluded_partial_cell_settled_count": len(raw_settled) - len(settled),
+        "complete_date_market_cell_count": complete_cell_count,
+        "incomplete_date_market_cell_count": incomplete_cell_count,
+        "data_incomplete_date_market_cell_count": data_incomplete_cell_count,
+        "settlement_coverage": round(len(raw_settled) / prediction_count, 6) if prediction_count else None,
+        "invalid_batch_count": invalid_batch_count,
+        "primary_picks": _rule_metric_summary(primary_rows),
+        "all_qualified": _rule_metric_summary(settled),
+        "per_market": per_market,
+        "per_qualification_track": per_track,
+        "included_in_calibrated_probability_statistics": False,
+        "included_in_shadow_research": False,
+        "included_in_executable_performance": False,
+        "authorizes_production": False,
+        "authorization_status": "DIAGNOSTIC_RULE_OUTCOMES_ONLY",
+    }
+
+
 def build_history_evaluation(
     rows: list[dict[str, Any]],
     snapshots: dict[str, dict[str, Any]] | None = None,
     shadow_inventory: dict[str, Any] | None = None,
     executable_inventory: dict[str, Any] | None = None,
+    rule_outcome_batches: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     snapshots = snapshots or {}
     shadow_inventory = shadow_inventory or empty_ledger_inventory(SHADOW_TRACK)
@@ -1315,4 +1480,5 @@ def build_history_evaluation(
         "performance": evaluate_formal_performance(rows),
         "shadow_ledger": ledger_statistics(snapshots, shadow_inventory, SHADOW_TRACK),
         "executable_ledger": ledger_statistics(snapshots, executable_inventory, EXECUTABLE_TRACK),
+        "rule_outcome_tracking": evaluate_rule_outcome_performance(rule_outcome_batches),
     }

@@ -104,6 +104,36 @@ def legacy_observation_cohort(cohort: dict) -> dict:
 
 
 class ModelObservationLedgerTests(unittest.TestCase):
+    def test_revision_v2_freezes_and_rechecks_source_snapshot_identity(self) -> None:
+        payload = snapshot()
+        revision = ledger.build_observation_revision(payload)
+        expected = ledger.source_snapshot_identity(payload)
+
+        self.assertEqual(revision["schema_version"], ledger.REVISION_SCHEMA_VERSION)
+        self.assertEqual(revision["source_snapshot_hash_contract"], expected["source_snapshot_hash_contract"])
+        self.assertEqual(revision["source_snapshot_sha256"], expected["source_snapshot_sha256"])
+        self.assertEqual(revision["source_snapshot_byte_size"], expected["source_snapshot_byte_size"])
+        self.assertEqual(revision["feature_cutoff_at"], payload["generated_at"])
+        self.assertEqual(ledger.validate_source_snapshot_binding(payload, revision), expected)
+
+        replaced = copy.deepcopy(payload)
+        replaced["point_in_time_universe"] = {
+            "markets": {"a_share": {"members": [{"code": "600000", "technical": -70}]}}
+        }
+        with self.assertRaisesRegex(
+            ledger.ObservationConflictError,
+            "source snapshot content identity mismatch",
+        ):
+            ledger.validate_source_snapshot_binding(replaced, revision)
+
+        wrong_key = copy.deepcopy(payload)
+        wrong_key["snapshot_key"] = "different-immutable-snapshot.json"
+        with self.assertRaisesRegex(
+            ledger.ObservationConflictError,
+            "critical identity mismatch",
+        ):
+            ledger.validate_source_snapshot_binding(wrong_key, revision)
+
     def test_future_prediction_or_fit_cutoff_fails_closed(self) -> None:
         for field in ("prediction_as_of", "fit_data_cutoff"):
             payload = snapshot()

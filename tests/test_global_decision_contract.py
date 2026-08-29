@@ -582,6 +582,48 @@ class GlobalDecisionContractTests(unittest.TestCase):
         self.assertTrue(decision["event_pipeline_scanned"])
         self.assertEqual(decision["automatic_external_evidence_count"], 0)
 
+    def test_two_tier_event_coverage_separates_full_risk_screen_from_bounded_enrichment(self) -> None:
+        snapshot = executable_builder_input()
+        extra = copy.deepcopy(snapshot["markets"]["us"]["decision"]["primary"])
+        extra.update({"code": "MSFT", "symbol": "MSFT", "name": "Microsoft"})
+        snapshot["markets"]["us"]["_candidate_pool"] = [
+            snapshot["markets"]["us"]["decision"]["primary"],
+            extra,
+        ]
+
+        decision = server.build_global_ten_day_decision(snapshot)
+
+        extra_row = next(
+            row for row in decision["evaluated_candidates"]
+            if row["market"] == "us" and row["code"] == "MSFT"
+        )
+        self.assertEqual(extra_row["risk_screen"]["status"], "PASS")
+        self.assertEqual(extra_row["risk_screen"]["scope"], "full_candidate_pool")
+        self.assertFalse(extra_row["risk_screen"]["official_filing_checked"])
+        self.assertEqual(extra_row["positive_event_enrichment"]["status"], "NOT_SELECTED")
+        self.assertIn("EVENT_CANDIDATE_NOT_SCANNED", extra_row["blocker_codes"])
+
+        coverage = decision["event_coverage"]
+        self.assertEqual(coverage["contract_version"], "two-tier-event-coverage-v1")
+        self.assertEqual(coverage["risk_screen"]["evaluated_candidate_count"], 4)
+        self.assertEqual(coverage["risk_screen"]["pass_count"], 4)
+        self.assertEqual(coverage["positive_event_enrichment"]["scanned_candidate_count"], 3)
+        self.assertEqual(coverage["positive_event_enrichment"]["not_selected_count"], 1)
+        self.assertEqual(
+            coverage["risk_screen"]["by_market"]["us"],
+            {"evaluated_candidate_count": 2, "pass_count": 2, "blocked_count": 0, "incomplete_count": 0},
+        )
+        self.assertEqual(
+            coverage["positive_event_enrichment"]["by_market"]["us"],
+            {
+                "scanned_candidate_count": 1,
+                "with_positive_count": 1,
+                "scanned_no_positive_count": 0,
+                "not_selected_count": 1,
+                "source_unavailable_count": 0,
+            },
+        )
+
     def test_old_positive_filing_does_not_unlock_the_strict_gate(self) -> None:
         snapshot = executable_builder_input()
         for event in snapshot["events"]["items"]:

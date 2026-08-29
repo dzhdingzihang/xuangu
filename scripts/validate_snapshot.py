@@ -32,15 +32,37 @@ VALID_MODEL_STATUSES = {"available", "unavailable"}
 VALID_CANDIDATE_STATUSES = {"ranked", "rejected", "unavailable", "not_applicable"}
 VALID_EXECUTABLE_SCORE_KINDS = {"TEN_DAY_EXPECTED_NET_UTILITY"}
 PRODUCTION_CONTRACT_VERSION = "production-rule-10d-v1"
-PRODUCTION_RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v3"
 PRODUCTION_SCORE_KIND = "RULE_QUALIFICATION_SCORE"
-PRODUCTION_RULE_ACTION_BASIS = "dual_track_candidate_qualification_v3"
 PRODUCTION_QUALIFICATION_TRACKS = ("event_catalyst", "quality_technical")
-PRODUCTION_RULE_INPUTS_CONTRACT_VERSION = "production-rule-inputs-v1"
+HISTORICAL_PRODUCTION_RULE_CONTRACTS = {
+    "smart-selector-2026-08-25.1-production-rule": (
+        "strict_rule_qualification_v1",
+        "ten-day-audited-rule-ensemble-v1",
+    ),
+    "smart-selector-2026-08-26.1-candidate-rule": (
+        "candidate_level_rule_qualification_v2",
+        "ten-day-audited-rule-ensemble-v2",
+    ),
+    "smart-selector-2026-08-26.2-dual-track-rule": (
+        "dual_track_candidate_qualification_v3",
+        "ten-day-audited-rule-ensemble-v3",
+    ),
+}
+PRODUCTION_RULE_ACTION_BASIS = "dual_track_candidate_qualification_v4"
+PRODUCTION_RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v4"
+PRODUCTION_RULE_INPUTS_CONTRACT_VERSION = "production-rule-inputs-v2"
+PRODUCTION_RULE_MODEL_VERSION = "smart-selector-2026-08-29.1-two-tier-rule"
+CURRENT_PRODUCTION_RULE_CONTRACT = (
+    PRODUCTION_RULE_ACTION_BASIS,
+    PRODUCTION_RULE_MODEL_ID,
+)
+DUAL_TRACK_RULE_CONTRACTS = {
+    HISTORICAL_PRODUCTION_RULE_CONTRACTS["smart-selector-2026-08-26.2-dual-track-rule"],
+    CURRENT_PRODUCTION_RULE_CONTRACT,
+}
 SUPPORTED_PRODUCTION_RULE_CONTRACTS = {
-    ("strict_rule_qualification_v1", "ten-day-audited-rule-ensemble-v1"),
-    ("candidate_level_rule_qualification_v2", "ten-day-audited-rule-ensemble-v2"),
-    (PRODUCTION_RULE_ACTION_BASIS, PRODUCTION_RULE_MODEL_ID),
+    *HISTORICAL_PRODUCTION_RULE_CONTRACTS.values(),
+    CURRENT_PRODUCTION_RULE_CONTRACT,
 }
 STATE_SEVERITY = {"READY": 0, "DEGRADED": 1, "BLOCKED": 2}
 SCHEDULE_ON_TIME_MAX_SECONDS = 4 * 60 * 60
@@ -107,12 +129,12 @@ EVIDENCE_LOOP_MODEL_VERSIONS = {
     "smart-selector-2026-08-25.1-production-rule",
     "smart-selector-2026-08-26.1-candidate-rule",
     "smart-selector-2026-08-26.2-dual-track-rule",
+    PRODUCTION_RULE_MODEL_VERSION,
 }
 DYNAMIC_MARKET_MODEL_VERSIONS = {
     "smart-selector-2026-08-23.2-dynamic-hk-us",
     *EVIDENCE_LOOP_MODEL_VERSIONS,
 }
-PRODUCTION_RULE_MODEL_VERSION = "smart-selector-2026-08-26.2-dual-track-rule"
 PRIMARY_SCHEDULE_SLOTS = {(8, 17), (10, 17), (12, 17), (15, 17), (16, 17), (20, 17), (22, 47)}
 FALLBACK_SCHEDULE_MAP = {
     (8, 47): (8, 17),
@@ -123,9 +145,20 @@ FALLBACK_SCHEDULE_MAP = {
     (20, 47): (20, 17),
     (23, 17): (22, 47),
 }
+US_POST_CLOSE_PRIMARY_SLOTS = {(4, 17), (5, 17)}
+US_POST_CLOSE_FALLBACK_MAP = {
+    (4, 47): (4, 17),
+    (5, 47): (5, 17),
+}
+ALL_PRIMARY_SCHEDULE_SLOTS = PRIMARY_SCHEDULE_SLOTS | US_POST_CLOSE_PRIMARY_SLOTS
+ALL_FALLBACK_SCHEDULE_MAP = {
+    **FALLBACK_SCHEDULE_MAP,
+    **US_POST_CLOSE_FALLBACK_MAP,
+}
 TEN_DAY_RANK_MODEL_ID = "ten-day-excess-rank-shadow-v2"
 TEN_DAY_RANK_LABEL_VERSION = "r10-net-excess-return-v2"
 TEN_DAY_RANK_BENCHMARKS = {"a_share": "510300", "hk": "2800.HK", "us": "SPY"}
+TEN_DAY_RANK_STATUSES = {"COLLECTING", "SHADOW_READY"}
 
 
 def finite_number(value) -> bool:
@@ -150,6 +183,25 @@ def _aware_automation_moment(value) -> dt.datetime | None:
     return parsed
 
 
+def _configured_schedule_invocation(moment: dt.datetime) -> bool:
+    """Validate one invocation against the market-local weekday it represents.
+
+    The US post-close run occurs at 04:17/04:47 China time during New York
+    daylight saving and 05:17/05:47 during standard time.  A Friday US close is
+    therefore a legal Saturday-morning invocation in China; validating it with
+    a China Monday-Friday rule would reject the real production schedule.
+    """
+
+    local = moment.astimezone(ZoneInfo("Asia/Shanghai"))
+    clock = (local.hour, local.minute)
+    if clock in US_POST_CLOSE_PRIMARY_SLOTS or clock in US_POST_CLOSE_FALLBACK_MAP:
+        new_york = moment.astimezone(ZoneInfo("America/New_York"))
+        return new_york.weekday() < 5 and new_york.hour == 16
+    return local.weekday() < 5 and (
+        clock in PRIMARY_SCHEDULE_SLOTS or clock in FALLBACK_SCHEDULE_MAP
+    )
+
+
 def _append_schedule_automation_errors(snapshot: dict, errors: list[str]) -> None:
     if snapshot.get("model_version") != PRODUCTION_RULE_MODEL_VERSION:
         return
@@ -169,8 +221,8 @@ def _append_schedule_automation_errors(snapshot: dict, errors: list[str]) -> Non
 
     local_invocation = invocation.astimezone(ZoneInfo("Asia/Shanghai"))
     invocation_clock = (local_invocation.hour, local_invocation.minute)
-    expected_clock = FALLBACK_SCHEDULE_MAP.get(invocation_clock, invocation_clock)
-    if invocation_clock not in PRIMARY_SCHEDULE_SLOTS and invocation_clock not in FALLBACK_SCHEDULE_MAP:
+    expected_clock = ALL_FALLBACK_SCHEDULE_MAP.get(invocation_clock, invocation_clock)
+    if not _configured_schedule_invocation(invocation):
         errors.append("automation.scheduled_invocation_slot is not a configured invocation")
         return
     expected_checkpoint = local_invocation.replace(
@@ -231,11 +283,7 @@ def _append_schedule_automation_errors(snapshot: dict, errors: list[str]) -> Non
     if source_invocation is not None:
         source_local = source_invocation.astimezone(ZoneInfo("Asia/Shanghai"))
         source_clock = (source_local.hour, source_local.minute)
-        if (
-            source_local.weekday() >= 5
-            or source_clock not in PRIMARY_SCHEDULE_SLOTS
-            and source_clock not in FALLBACK_SCHEDULE_MAP
-        ):
+        if not _configured_schedule_invocation(source_invocation):
             errors.append("automation.source_invocation_slot is not a configured invocation")
         if generated is not None and source_invocation > generated:
             errors.append("automation.source_invocation_slot cannot be in the future")
@@ -273,6 +321,84 @@ def _append_schedule_automation_errors(snapshot: dict, errors: list[str]) -> Non
             errors.append("late recovery effective invocation exceeds the twelve-hour window")
 
 
+def _append_ten_day_trade_plan_errors(plan, prefix: str, errors: list[str]) -> None:
+    field = f"{prefix}.ten_day_trade_plan"
+    if not isinstance(plan, dict):
+        errors.append(f"{field} is required for current V4 qualified rows")
+        return
+    if plan.get("contract_version") != "ten-day-trade-plan-v1":
+        errors.append(f"{field}.contract_version is invalid")
+    if plan.get("status") != "REVIEW_REQUIRED":
+        errors.append(f"{field}.status must be REVIEW_REQUIRED")
+    if plan.get("horizon_trade_days") != 10:
+        errors.append(f"{field}.horizon_trade_days must be 10")
+
+    quote = plan.get("reference_quote")
+    quote = quote if isinstance(quote, dict) else {}
+    price = quote.get("price")
+    if not finite_number(price) or price <= 0:
+        errors.append(f"{field}.reference_quote.price must be positive")
+    if quote.get("kind") != "published_snapshot_quote":
+        errors.append(f"{field}.reference_quote.kind is invalid")
+    if not isinstance(quote.get("source"), str) or not quote.get("source"):
+        errors.append(f"{field}.reference_quote.source is required")
+    if parse_aware_datetime(quote.get("source_as_of")) is None:
+        errors.append(f"{field}.reference_quote.source_as_of is invalid")
+    if not isinstance(quote.get("quote_status"), str) or not quote.get("quote_status"):
+        errors.append(f"{field}.reference_quote.quote_status is required")
+    currency = quote.get("currency")
+    if currency not in {"CNY", "HKD", "USD"}:
+        errors.append(f"{field}.reference_quote.currency is invalid")
+
+    zone = plan.get("entry_zone")
+    zone = zone if isinstance(zone, dict) else {}
+    low, high = zone.get("low"), zone.get("high")
+    if not finite_number(low) or not finite_number(high) or low <= 0 or high <= low:
+        errors.append(f"{field}.entry_zone is invalid")
+    elif finite_number(price) and not (low <= price <= high):
+        errors.append(f"{field}.entry_zone must contain the reference quote")
+    if zone.get("currency") != currency:
+        errors.append(f"{field}.entry_zone currency is inconsistent")
+
+    plan_sections: dict[str, dict] = {}
+    for section_name in ("invalidation", "target"):
+        section = plan.get(section_name)
+        section = section if isinstance(section, dict) else {}
+        plan_sections[section_name] = section
+        section_price = section.get("price")
+        if not finite_number(section_price) or section_price <= 0:
+            errors.append(f"{field}.{section_name}.price must be positive")
+        if section.get("currency") != currency:
+            errors.append(f"{field}.{section_name} currency is inconsistent")
+        if not isinstance(section.get("source"), str) or not section.get("source"):
+            errors.append(f"{field}.{section_name}.source is required")
+    if finite_number(price) and finite_number(plan_sections["invalidation"].get("price")):
+        if plan_sections["invalidation"]["price"] >= price:
+            errors.append(f"{field}.invalidation.price must be below the reference quote")
+    if finite_number(price) and finite_number(plan_sections["target"].get("price")):
+        if plan_sections["target"]["price"] <= price:
+            errors.append(f"{field}.target.price must be above the reference quote")
+
+    position = plan.get("position_limit")
+    if not isinstance(position, dict) or position.get("max_single_name_weight_pct") != 10.0:
+        errors.append(f"{field}.position_limit is invalid")
+    elif position.get("policy") != "strategy_safety_cap_not_personalized":
+        errors.append(f"{field}.position_limit.policy is invalid")
+    if plan.get("exit_rules") != [
+        "EXIT_IF_INVALIDATION_PRICE_BREACHED",
+        "REVIEW_AT_TENTH_SESSION_CLOSE",
+        "DO_NOT_CHASE_ABOVE_ENTRY_ZONE",
+    ]:
+        errors.append(f"{field}.exit_rules is invalid")
+    if plan.get("is_personalized_advice") is not False:
+        errors.append(f"{field}.is_personalized_advice must be false")
+    for date_field in ("entry_trade_date", "review_end_trade_date"):
+        try:
+            dt.date.fromisoformat(str(plan.get(date_field) or ""))
+        except ValueError:
+            errors.append(f"{field}.{date_field} is invalid")
+
+
 def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> None:
     decision = snapshot.get("production_decision")
     if not isinstance(decision, dict):
@@ -288,22 +414,27 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
     if decision.get("decision_scope") != "global_10d_bounded_recall":
         errors.append("production_decision.decision_scope is invalid")
     rule_contract = (decision.get("action_basis"), decision.get("rule_model_id"))
-    exact_current_v3 = bool(
+    exact_current_v4 = bool(
         snapshot.get("model_version") == PRODUCTION_RULE_MODEL_VERSION
-        and rule_contract == (PRODUCTION_RULE_ACTION_BASIS, PRODUCTION_RULE_MODEL_ID)
+        and rule_contract == CURRENT_PRODUCTION_RULE_CONTRACT
     )
     if rule_contract not in SUPPORTED_PRODUCTION_RULE_CONTRACTS:
         errors.append("production_decision rule contract is invalid")
-    current_rule_contract = (
-        PRODUCTION_RULE_ACTION_BASIS,
-        PRODUCTION_RULE_MODEL_ID,
+    contract_by_model = {
+        **HISTORICAL_PRODUCTION_RULE_CONTRACTS,
+        PRODUCTION_RULE_MODEL_VERSION: CURRENT_PRODUCTION_RULE_CONTRACT,
+    }
+    expected_contract = contract_by_model.get(snapshot.get("model_version"))
+    expected_model = next(
+        (model for model, contract in contract_by_model.items() if contract == rule_contract),
+        None,
     )
-    # The current model and the V3 rule contract are a versioned pair.  Keep
-    # V1/V2 snapshots readable, but fail closed if either half of the current
-    # pair is published without the other.
+    # Every rule payload is an immutable model/contract pair.  Historical
+    # V1-V3 snapshots remain readable, but can never masquerade as current V4.
     if (
-        snapshot.get("model_version") == PRODUCTION_RULE_MODEL_VERSION
-    ) != (rule_contract == current_rule_contract):
+        (expected_contract is not None and rule_contract != expected_contract)
+        or (expected_model is not None and snapshot.get("model_version") != expected_model)
+    ):
         errors.append("production_decision rule contract does not match model_version")
     if decision.get("score_kind") != PRODUCTION_SCORE_KIND:
         errors.append("production_decision.score_kind is invalid")
@@ -348,8 +479,8 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
         if not isinstance(row_blockers, list):
             errors.append(f"{prefix}.blocker_codes must be a list")
             row_blockers = []
-        v3_track_evaluations: dict[str, dict] | None = None
-        if rule_contract == (PRODUCTION_RULE_ACTION_BASIS, PRODUCTION_RULE_MODEL_ID):
+        dual_track_evaluations: dict[str, dict] | None = None
+        if rule_contract in DUAL_TRACK_RULE_CONTRACTS:
             raw_track_evaluations = row.get("track_evaluations")
             valid_track_evaluations = bool(
                 isinstance(raw_track_evaluations, list)
@@ -366,11 +497,11 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
             if not valid_track_evaluations:
                 errors.append(f"{prefix}.track_evaluations is invalid")
             else:
-                v3_track_evaluations = {
+                dual_track_evaluations = {
                     item["track"]: item for item in raw_track_evaluations
                 }
                 for track_name in PRODUCTION_QUALIFICATION_TRACKS:
-                    track_evaluation = v3_track_evaluations[track_name]
+                    track_evaluation = dual_track_evaluations[track_name]
                     track_blockers = track_evaluation["blocker_codes"]
                     if track_evaluation["status"] == "PASS" and track_blockers:
                         errors.append(f"{prefix}.track_evaluations {track_name} PASS cannot expose blocker codes")
@@ -383,18 +514,25 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
                 errors.append(f"{prefix} QUALIFIED row cannot expose blocker codes")
             if not isinstance(row.get("qualification_id"), str) or not re.fullmatch(r"qual_[0-9a-f]{24}", row["qualification_id"]):
                 errors.append(f"{prefix}.qualification_id is invalid")
-            if rule_contract == (PRODUCTION_RULE_ACTION_BASIS, PRODUCTION_RULE_MODEL_ID):
+            if rule_contract in DUAL_TRACK_RULE_CONTRACTS:
                 qualification_track = row.get("qualification_track")
                 if qualification_track not in PRODUCTION_QUALIFICATION_TRACKS:
                     errors.append(f"{prefix}.qualification_track is invalid")
                 matching_track = (
-                    v3_track_evaluations.get(qualification_track)
-                    if v3_track_evaluations is not None
+                    dual_track_evaluations.get(qualification_track)
+                    if dual_track_evaluations is not None
                     else None
                 )
                 if not isinstance(matching_track, dict) or matching_track.get("status") != "PASS":
                     errors.append(f"{prefix} selected qualification track must PASS")
-                if row.get("event_candidate_scanned") is not True:
+                requires_event_scan = (
+                    rule_contract
+                    == HISTORICAL_PRODUCTION_RULE_CONTRACTS[
+                        "smart-selector-2026-08-26.2-dual-track-rule"
+                    ]
+                    or qualification_track == "event_catalyst"
+                )
+                if requires_event_scan and row.get("event_candidate_scanned") is not True:
                     errors.append(f"{prefix} requires event candidate scan")
                 event_ids = row.get("verified_positive_event_ids")
                 if not isinstance(event_ids, list):
@@ -402,6 +540,8 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
                     event_ids = []
                 if qualification_track == "event_catalyst" and not event_ids:
                     errors.append(f"{prefix} event_catalyst requires verified positive event evidence")
+                if exact_current_v4:
+                    _append_ten_day_trade_plan_errors(row.get("ten_day_trade_plan"), prefix, errors)
             elif row.get("event_candidate_scanned") is not True or not row.get("verified_positive_event_ids"):
                 errors.append(f"{prefix} requires verified positive event evidence")
             candidate = row.get("candidate_snapshot")
@@ -415,11 +555,11 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
         elif status == "REJECTED":
             if not row_blockers:
                 errors.append(f"{prefix} REJECTED row requires blocker codes")
-            if rule_contract == (PRODUCTION_RULE_ACTION_BASIS, PRODUCTION_RULE_MODEL_ID):
+            if rule_contract in DUAL_TRACK_RULE_CONTRACTS:
                 if "qualification_track" not in row or row.get("qualification_track") is not None:
                     errors.append(f"{prefix} REJECTED row qualification_track must be null")
-                if v3_track_evaluations is not None and any(
-                    item.get("status") == "PASS" for item in v3_track_evaluations.values()
+                if dual_track_evaluations is not None and any(
+                    item.get("status") == "PASS" for item in dual_track_evaluations.values()
                 ):
                     errors.append(f"{prefix} REJECTED row cannot contain a PASS track")
         else:
@@ -435,7 +575,7 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
     published_qualified = decision.get("qualified_candidates")
     if not isinstance(published_qualified, list):
         errors.append("production_decision.qualified_candidates must be a list")
-    elif exact_current_v3 and published_qualified != qualified:
+    elif exact_current_v4 and published_qualified != qualified:
         errors.append("production_decision.qualified_candidates must exactly match evaluated qualified rows")
     elif [row.get("qualification_id") for row in published_qualified if isinstance(row, dict)] != [
         row.get("qualification_id") for row in qualified
@@ -447,7 +587,7 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
             errors.append("QUALIFIED_PICK cannot expose production blocker codes")
         if not isinstance(primary, dict):
             errors.append("QUALIFIED_PICK requires a production primary")
-        elif exact_current_v3 and (not qualified or primary != qualified[0]):
+        elif exact_current_v4 and (not qualified or primary != qualified[0]):
             errors.append("production primary must exactly match the first qualified evaluated row")
         elif not any(row.get("qualification_id") == primary.get("qualification_id") for row in qualified):
             errors.append("production primary must match one qualified evaluated row")
@@ -459,14 +599,14 @@ def _append_production_decision_errors(snapshot: dict, errors: list[str]) -> Non
         if not blocker_codes:
             errors.append("NO_QUALIFIED_PICK requires at least one blocker code")
 
-    if exact_current_v3:
-        _append_current_v3_rule_input_errors(snapshot, decision, errors)
+    if exact_current_v4:
+        _append_current_v4_rule_input_errors(snapshot, decision, errors)
 
 
-def _append_current_v3_rule_input_errors(snapshot: dict, decision: dict, errors: list[str]) -> None:
+def _append_current_v4_rule_input_errors(snapshot: dict, decision: dict, errors: list[str]) -> None:
     inputs = snapshot.get("production_rule_inputs")
     if not isinstance(inputs, dict):
-        errors.append("production_rule_inputs is required for current V3")
+        errors.append("production_rule_inputs is required for current V4")
         return
     if inputs.get("contract_version") != PRODUCTION_RULE_INPUTS_CONTRACT_VERSION:
         errors.append("production_rule_inputs.contract_version is invalid")
@@ -536,7 +676,7 @@ def _append_current_v3_rule_input_errors(snapshot: dict, decision: dict, errors:
     try:
         rebuilt = production_rule_model.build_production_decision(snapshot)
     except Exception as exc:  # pragma: no cover - defensive deployment boundary
-        errors.append(f"production_decision deterministic V3 rebuild failed: {type(exc).__name__}")
+        errors.append(f"production_decision deterministic V4 rebuild failed: {type(exc).__name__}")
         return
     rebuilt_rows = rebuilt.get("evaluated_candidates") if isinstance(rebuilt, dict) else []
     qualified_identities = {
@@ -554,7 +694,7 @@ def _append_current_v3_rule_input_errors(snapshot: dict, decision: dict, errors:
         if identity not in qualified_identities and "candidate_snapshot" in entry:
             errors.append(f"production_rule_inputs.rows[{index}] rejected row must not retain candidate_snapshot")
     if rebuilt != decision:
-        errors.append("production_decision does not match deterministic current V3 rebuild")
+        errors.append("production_decision does not match deterministic current V4 rebuild")
 
 
 def _append_evidence_loop_errors(snapshot: dict, errors: list[str]) -> None:
@@ -608,20 +748,163 @@ def _append_evidence_loop_errors(snapshot: dict, errors: list[str]) -> None:
         if universe.get("sha256") != expected_hash:
             errors.append("point_in_time_universe.sha256 is inconsistent")
 
+    feature_cutoff_raw = snapshot.get("feature_cutoff_at")
+    if snapshot.get("model_version") == PRODUCTION_RULE_MODEL_VERSION and feature_cutoff_raw is None:
+        errors.append("feature_cutoff_at is required for current V4")
+    if feature_cutoff_raw is not None:
+        feature_cutoff = parse_aware_datetime(feature_cutoff_raw)
+        generated_moment = parse_aware_datetime(snapshot.get("generated_at"))
+        try:
+            expected_windows = market_trade_windows(
+                snapshot.get("generated_at") or snapshot.get("target_date"),
+                horizon_sessions=10,
+            )
+        except (TypeError, ValueError):
+            expected_windows = {}
+        if feature_cutoff is None:
+            errors.append("feature_cutoff_at must be a timezone-aware timestamp")
+        elif generated_moment is None or feature_cutoff < generated_moment:
+            errors.append("feature_cutoff_at cannot precede generated_at")
+        else:
+            universe_markets = ((snapshot.get("point_in_time_universe") or {}).get("markets") or {})
+            for market in ("a_share", "hk", "us"):
+                members = (universe_markets.get(market) or {}).get("members") or []
+                for index, member in enumerate(members):
+                    if not isinstance(member, dict):
+                        continue
+                    observed_at = parse_aware_datetime(member.get("observed_at"))
+                    if observed_at is None:
+                        errors.append(
+                            f"point_in_time_universe.{market}.members[{index}].observed_at is invalid"
+                        )
+                    elif observed_at > feature_cutoff:
+                        errors.append(
+                            f"point_in_time_universe.{market}.members[{index}] was observed after feature_cutoff_at"
+                        )
+                entry_open = _exchange_calendar_datetime(
+                    (expected_windows.get(market) or {}).get("entry_session_open_at")
+                )
+                if entry_open is not None and feature_cutoff >= entry_open:
+                    errors.append(f"feature_cutoff_at must precede {market} entry-session open")
+
     rank_model = ((snapshot.get("analysis_models") or {}).get("ten_day_excess_rank") or {})
     if rank_model.get("model_id") != TEN_DAY_RANK_MODEL_ID:
         errors.append("analysis_models.ten_day_excess_rank.model_id is invalid")
     if rank_model.get("label_version") != TEN_DAY_RANK_LABEL_VERSION:
         errors.append("analysis_models.ten_day_excess_rank.label_version is invalid")
-    if rank_model.get("status") != "COLLECTING":
-        errors.append("analysis_models.ten_day_excess_rank must remain COLLECTING")
+    if rank_model.get("feature_schema_version") != "point-in-time-technical-d1-v2":
+        errors.append("analysis_models.ten_day_excess_rank feature schema is invalid")
+    if rank_model.get("training_provenance") != "point_in_time_universe_ledger":
+        errors.append("analysis_models.ten_day_excess_rank training provenance is invalid")
+    if rank_model.get("fixed_ridge_l2") != 1.0:
+        errors.append("analysis_models.ten_day_excess_rank fixed ridge policy is invalid")
+    rank_status = rank_model.get("status")
+    if rank_status not in TEN_DAY_RANK_STATUSES:
+        errors.append("analysis_models.ten_day_excess_rank status is invalid")
     if rank_model.get("benchmark_registry") != TEN_DAY_RANK_BENCHMARKS:
         errors.append("analysis_models.ten_day_excess_rank benchmark registry is invalid")
-    for field in ("calibrated", "costs_ready", "tail_risk_ready", "participates_in_decision", "production_eligible"):
+    if rank_model.get("target") != "ten_session_net_excess_return":
+        errors.append("analysis_models.ten_day_excess_rank target is invalid")
+    for field in ("calibrated", "participates_in_decision", "production_eligible"):
         if rank_model.get(field) is not False:
             errors.append(f"analysis_models.ten_day_excess_rank.{field} must remain false")
-    if rank_model.get("shadow_predictions") != []:
-        errors.append("analysis_models.ten_day_excess_rank cannot publish predictions while COLLECTING")
+    for field in ("sample_count", "signal_date_count", "fold_count"):
+        if not isinstance(rank_model.get(field), int) or rank_model.get(field) < 0:
+            errors.append(f"analysis_models.ten_day_excess_rank.{field} must be non-negative")
+    if rank_model.get("probability") is not None:
+        errors.append("analysis_models.ten_day_excess_rank probability must remain null")
+    artifact_sha256 = rank_model.get("artifact_sha256")
+    if not isinstance(artifact_sha256, str) or re.fullmatch(
+        r"[a-f0-9]{64}", str(artifact_sha256 or "")
+    ) is None:
+        errors.append("analysis_models.ten_day_excess_rank artifact hash is invalid")
+    else:
+        artifact_contract = rank_model.get("artifact_contract_version")
+        if artifact_contract not in (None, "ten-day-rank-artifact-v2"):
+            errors.append("analysis_models.ten_day_excess_rank artifact contract is invalid")
+        artifact_identity = {
+            field: rank_model.get(field)
+            for field in (
+                "model_id",
+                "label_version",
+                "feature_schema_version",
+                "training_provenance",
+                "benchmark_registry",
+                "fixed_ridge_l2",
+                "sample_count",
+                "signal_date_count",
+                "fold_count",
+                "validation",
+            )
+        }
+        if artifact_contract == "ten-day-rank-artifact-v2":
+            artifact_identity["artifact_contract_version"] = artifact_contract
+            if rank_status == "SHADOW_READY":
+                artifact_identity["out_of_fold_predictions"] = rank_model.get(
+                    "out_of_fold_predictions"
+                )
+            artifact_identity["reason_codes"] = rank_model.get("reason_codes")
+            if "collection_diagnostics" in rank_model:
+                artifact_identity["collection_diagnostics"] = rank_model.get(
+                    "collection_diagnostics"
+                )
+        elif rank_status != "COLLECTING" or "collection_diagnostics" in rank_model:
+            errors.append("legacy ten-day rank artifact shape is not supported")
+        try:
+            expected_artifact = hashlib.sha256(
+                json.dumps(
+                    artifact_identity,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+        except (TypeError, ValueError):
+            errors.append("analysis_models.ten_day_excess_rank artifact payload is invalid")
+        else:
+            if artifact_sha256 != expected_artifact:
+                errors.append("analysis_models.ten_day_excess_rank artifact hash is inconsistent")
+    if rank_status == "COLLECTING":
+        for field in ("costs_ready", "tail_risk_ready"):
+            if rank_model.get(field) is not False:
+                errors.append(f"analysis_models.ten_day_excess_rank.{field} must be false while collecting")
+        if rank_model.get("shadow_predictions") != []:
+            errors.append("analysis_models.ten_day_excess_rank cannot publish predictions while COLLECTING")
+    elif rank_status == "SHADOW_READY":
+        if rank_model.get("costs_ready") is not True or rank_model.get("tail_risk_ready") is not True:
+            errors.append("analysis_models.ten_day_excess_rank SHADOW_READY requires cost and tail evidence")
+        if not isinstance(rank_model.get("shadow_predictions"), list) or not rank_model.get("shadow_predictions"):
+            errors.append("analysis_models.ten_day_excess_rank SHADOW_READY requires out-of-fold predictions")
+        if rank_model.get("fold_count", 0) <= 0:
+            errors.append("analysis_models.ten_day_excess_rank SHADOW_READY requires walk-forward folds")
+        validation = rank_model.get("validation")
+        if not isinstance(validation, dict):
+            errors.append("analysis_models.ten_day_excess_rank SHADOW_READY validation is missing")
+        else:
+            if validation.get("actual_exit_purge") is not True:
+                errors.append("analysis_models.ten_day_excess_rank must purge by actual exit")
+            if validation.get("date_market_equal_weighting") is not True:
+                errors.append("analysis_models.ten_day_excess_rank must use date-market weighting")
+            if validation.get("final_untouched_holdout") is not True:
+                errors.append("analysis_models.ten_day_excess_rank final holdout is missing")
+            if not isinstance(validation.get("block_bootstrap_95pct"), dict):
+                errors.append("analysis_models.ten_day_excess_rank block bootstrap is missing")
+        if rank_model.get("promotion_authorized") is not False:
+            errors.append("analysis_models.ten_day_excess_rank cannot self-authorize promotion")
+        if rank_model.get("out_of_fold_predictions") != rank_model.get("shadow_predictions"):
+            errors.append("analysis_models.ten_day_excess_rank prediction mirrors are inconsistent")
+
+    rule_tracking = snapshot.get("rule_outcome_tracking")
+    if rule_tracking is not None:
+        if not isinstance(rule_tracking, dict):
+            errors.append("rule_outcome_tracking must be an object")
+        else:
+            if rule_tracking.get("track") != "RULE_QUALIFICATION":
+                errors.append("rule_outcome_tracking track is invalid")
+            if rule_tracking.get("authorizes_production") is not False:
+                errors.append("rule_outcome_tracking cannot authorize production")
+            if rule_tracking.get("included_in_calibrated_probability_statistics") is not False:
+                errors.append("rule_outcome_tracking cannot enter calibrated probability metrics")
 
     a_manifest = ((((snapshot.get("markets") or {}).get("a_share") or {}).get("stats") or {}).get("recall_manifest"))
     if not isinstance(a_manifest, list) or len(a_manifest) != MARKET_RECALL_TARGETS["a_share"]:

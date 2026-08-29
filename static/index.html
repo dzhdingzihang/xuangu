@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://unpkg.com" />
     <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css" />
     <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260827-lazy-stale-gate" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260829-decision-flow-3" />
   </head>
   <body>
     <a class="skip-link" href="#mainContent">跳到主内容</a>
@@ -21,22 +21,22 @@
         </a>
 
         <nav class="primary-nav" role="tablist" aria-label="智能选股功能">
-          <button id="tab-decision" class="nav-item is-active" type="button" role="tab" aria-label="今日答案" aria-selected="true" aria-controls="panel-decision" data-tab="decision">
+          <button id="tab-decision" class="nav-item is-active" type="button" role="tab" tabindex="0" aria-label="今日答案" aria-selected="true" aria-controls="panel-decision" data-tab="decision">
             <i class="ph ph-target" aria-hidden="true"></i><span>今日答案</span>
           </button>
-          <button id="tab-candidates" class="nav-item" type="button" role="tab" aria-label="候选池" aria-selected="false" aria-controls="panel-candidates" data-tab="candidates">
-            <i class="ph ph-star" aria-hidden="true"></i><span>候选池</span>
+          <button id="tab-candidates" class="nav-item" type="button" role="tab" tabindex="-1" aria-label="决策短名单" aria-selected="false" aria-controls="panel-candidates" data-tab="candidates">
+            <i class="ph ph-star" aria-hidden="true"></i><span>决策短名单</span>
           </button>
-          <button id="tab-events" class="nav-item" type="button" role="tab" aria-label="事件证据" aria-selected="false" aria-controls="panel-events" data-tab="events">
+          <button id="tab-events" class="nav-item" type="button" role="tab" tabindex="-1" aria-label="事件证据" aria-selected="false" aria-controls="panel-events" data-tab="events">
             <i class="ph ph-bell" aria-hidden="true"></i><span>事件证据</span>
           </button>
-          <button id="tab-history" class="nav-item" type="button" role="tab" aria-label="历史检验" aria-selected="false" aria-controls="panel-history" data-tab="history">
+          <button id="tab-history" class="nav-item" type="button" role="tab" tabindex="-1" aria-label="历史检验" aria-selected="false" aria-controls="panel-history" data-tab="history">
             <i class="ph ph-clock-counter-clockwise" aria-hidden="true"></i><span>历史检验</span>
           </button>
-          <button id="tab-model" class="nav-item" type="button" role="tab" aria-label="模型逻辑" aria-selected="false" aria-controls="panel-model" data-tab="model">
+          <button id="tab-model" class="nav-item" type="button" role="tab" tabindex="-1" aria-label="模型逻辑" aria-selected="false" aria-controls="panel-model" data-tab="model">
             <i class="ph ph-book-open" aria-hidden="true"></i><span>模型逻辑</span>
           </button>
-          <button id="tab-health" class="nav-item" type="button" role="tab" aria-label="数据健康" aria-selected="false" aria-controls="panel-health" data-tab="health">
+          <button id="tab-health" class="nav-item" type="button" role="tab" tabindex="-1" aria-label="数据健康" aria-selected="false" aria-controls="panel-health" data-tab="health">
             <i class="ph ph-database" aria-hidden="true"></i><span>数据健康</span>
           </button>
         </nav>
@@ -60,7 +60,7 @@
           <div class="freshness-bar" aria-label="数据状态">
             <span><i class="ph ph-clock" aria-hidden="true"></i><b>当前时间</b><time id="currentTime">--</time></span>
             <span><b>快照生成</b><time id="snapshotAsOf">--</time></span>
-            <span><b>下次计划检查点（含健康补跑）</b><time id="nextRefreshTime">--</time></span>
+            <span><b>下次实际自动刷新</b><time id="nextRefreshTime">--</time></span>
             <span id="healthBadge" class="health-badge is-loading"><i class="ph-fill ph-circle" aria-hidden="true"></i>读取中</span>
             <span id="qualityBadge" class="health-badge is-degraded" hidden><i class="ph ph-warning-octagon" aria-hidden="true"></i>数据受限</span>
             <button id="refreshBtn" class="icon-button" type="button" aria-label="刷新已发布快照" title="刷新已发布快照">
@@ -83,7 +83,7 @@
 
           <section id="panel-candidates" class="tab-panel" role="tabpanel" aria-labelledby="tab-candidates" data-tab="candidates" hidden>
             <div id="candidatesView" class="view-loading" aria-live="polite">
-              <i class="ph ph-spinner-gap" aria-hidden="true"></i><span>正在整理候选池…</span>
+              <i class="ph ph-spinner-gap" aria-hidden="true"></i><span>正在整理决策短名单…</span>
             </div>
           </section>
 
@@ -115,6 +115,6 @@
     </div>
 
     <div id="toastRegion" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
-    <script src="/static/app.js?v=20260827-lazy-stale-gate"></script>
+    <script src="/static/app.js?v=20260829-decision-flow-3"></script>
   </body>
 </html>

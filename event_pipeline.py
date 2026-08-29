@@ -594,6 +594,13 @@ def collect_for_snapshot(
         "markets": successful_markets,
         "markets_attempted": list(SOURCE_REGISTRY),
         "scanned_symbols": symbols,
+        # This official-source pass is a bounded positive-catalyst enrichment
+        # sample. Full-pool execution/data/material-risk checks are published
+        # separately by the decision builder and must not be conflated with
+        # this network-intensive filing scan.
+        "scan_purpose": "positive_event_enrichment",
+        "selection_policy": "rule_priority_and_published_decision_v1",
+        "candidate_limit_per_market": limit,
         "source_manifest": source_manifest,
         "lookback_days": LOOKBACK_DAYS,
     }

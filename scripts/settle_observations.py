@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 
 import model_observation_ledger  # noqa: E402
 import observation_outcome_ledger  # noqa: E402
+import ten_day_rank_model  # noqa: E402
 
 
 OBSERVATIONS = model_observation_ledger.DEFAULT_OBSERVATION_DIRECTORY
@@ -100,6 +101,7 @@ def run(
     price_loader: PriceLoader | None = None,
     max_workers: int = MAX_WORKERS,
     retries: int = DEFAULT_RETRIES,
+    include_rank_labels: bool | None = None,
 ) -> dict[str, int]:
     """Settle every cohort once while preserving immutable settled outcomes."""
 
@@ -112,6 +114,10 @@ def run(
             f"observation outcomes have no source cohort: {sorted(unknown_batches)[0]}"
         )
 
+    # Programmatic callers with a fixture loader retain the original stock-only
+    # behavior unless they opt in.  The production CLI uses the default loader
+    # and therefore always requires registered benchmark evidence.
+    rank_labels_enabled = price_loader is None if include_rank_labels is None else bool(include_rank_labels)
     symbols: set[tuple[str, str]] = set()
     for cohort_id, cohort in cohorts.items():
         existing_rows = {
@@ -125,6 +131,12 @@ def run(
             maturity = _aware_moment(prediction["forecast_end_session_close_at"])
             if moment > maturity:
                 symbols.add((str(prediction["market"]), str(prediction["code"])))
+                if rank_labels_enabled:
+                    benchmark = ten_day_rank_model.REGISTERED_BENCHMARKS.get(
+                        str(prediction["market"])
+                    )
+                    if benchmark:
+                        symbols.add((str(prediction["market"]), benchmark))
 
     loader = price_loader or _default_price_loader
     worker_limit = max(1, min(MAX_WORKERS, int(max_workers)))
@@ -153,6 +165,7 @@ def run(
             moment,
             cached_loader,
             existing=previous,
+            benchmark_price_loader=cached_loader if rank_labels_enabled else None,
         )
         prediction_count += int(batch["prediction_count"])
         status_counts.update(batch["status_counts"])
@@ -173,6 +186,7 @@ def run(
         "unchanged_cohort_count": unchanged,
         "worker_limit": worker_limit,
         "authorizes_production": 0,
+        "rank_labels_enabled": int(rank_labels_enabled),
     }
 
 

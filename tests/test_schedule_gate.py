@@ -174,7 +174,31 @@ class ScheduleGateTests(unittest.TestCase):
         self.assertIn("invocation_slot=2026-08-27T16:47+08:00", output)
         self.assertIn("source_invocation_slot=2026-08-27T08:17+08:00", output)
         self.assertIn("scheduler_delay_seconds=34500", output)
+        self.assertIn("scheduler_start_delay_seconds=34500", output)
+        self.assertIn("effective_checkpoint=2026-08-27T16:17+08:00", output)
+        self.assertIn("gate_evaluated_at=2026-08-27T17:52:00+08:00", output)
         self.assertIn("recovery_mode=late_cron_recovery", output)
+
+    def test_us_post_close_watchdog_selects_only_active_dst_variant(self) -> None:
+        active = self._run_main(
+            "2026-08-29T04:47:00+08:00",
+            published_source=None,
+            cron="47 20 * * 1-5",
+            scheduled_at="2026-08-28T20:47:00Z",
+        )
+        inactive = self._run_main(
+            "2026-08-29T05:47:00+08:00",
+            published_source=None,
+            cron="47 21 * * 1-5",
+            scheduled_at="2026-08-28T21:47:00Z",
+        )
+        self.assertIn("should_run=true", active)
+        self.assertIn("slot=2026-08-29T04:17+08:00", active)
+        self.assertIn("reason=inactive_us_post_close_dst_variant", inactive)
+
+    def test_sunday_event_cron_is_fail_closed_until_a_sidecar_exists(self) -> None:
+        self.assertNotIn("17 12 * * 0", self.module.CRON_INVOCATION_SLOTS)
+        self.assertNotIn("47 12 * * 0", self.module.CRON_INVOCATION_SLOTS)
 
     def test_late_recovery_skips_when_latest_checkpoint_is_already_healthy(self) -> None:
         output = self._run_main(

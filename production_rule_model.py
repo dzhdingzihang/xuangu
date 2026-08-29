@@ -3,9 +3,10 @@
 The calibrated ``global_decision`` remains the only probability-bearing
 contract. This module consumes its evaluated candidate ledger and applies two
 deterministic qualification tracks: the established event-catalyst rules and
-a stricter quality-technical path that may waive only missing positive-event
-evidence. A qualification score is a rule match score, never a probability or
-expected return.
+a stricter quality-technical path that does not depend on the bounded official
+filing enrichment sample. Shared execution, input-quality and material-risk
+gates remain mandatory for both tracks. A qualification score is a rule match
+score, never a probability or expected return.
 """
 
 from __future__ import annotations
@@ -19,15 +20,15 @@ from typing import Any, Mapping, Sequence
 
 CONTRACT_VERSION = "production-rule-10d-v1"
 DECISION_SCOPE = "global_10d_bounded_recall"
-ACTION_BASIS = "dual_track_candidate_qualification_v3"
-RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v3"
+ACTION_BASIS = "dual_track_candidate_qualification_v4"
+RULE_MODEL_ID = "ten-day-audited-rule-ensemble-v4"
 SCORE_KIND = "RULE_QUALIFICATION_SCORE"
 HORIZON_TRADE_DAYS = 10
 ACTION_PICK = "QUALIFIED_PICK"
 ACTION_NONE = "NO_QUALIFIED_PICK"
 TRACK_EVENT_CATALYST = "event_catalyst"
 TRACK_QUALITY_TECHNICAL = "quality_technical"
-RULE_INPUTS_CONTRACT_VERSION = "production-rule-inputs-v1"
+RULE_INPUTS_CONTRACT_VERSION = "production-rule-inputs-v2"
 
 MARKET_POLICY = {
     "a_share": {"minimum_legacy": 64.0, "maximum_downside": 8.0, "minimum_upside": 5.0},
@@ -38,18 +39,23 @@ MAX_V2_RANK_FRACTION = 0.20
 MIN_RISK_REWARD_RATIO = 1.20
 
 QUALITY_POLICY = {
-    "a_share": {"minimum_legacy": 66.0, "maximum_downside": 6.0, "minimum_upside": 6.0},
+    "a_share": {"minimum_legacy": 64.0, "maximum_downside": 6.0, "minimum_upside": 6.0},
     "hk": {"minimum_legacy": 67.0, "maximum_downside": 6.0, "minimum_upside": 6.0},
-    "us": {"minimum_legacy": 68.0, "maximum_downside": 7.5, "minimum_upside": 6.5},
+    "us": {"minimum_legacy": 67.0, "maximum_downside": 7.5, "minimum_upside": 6.5},
 }
 QUALITY_MAX_V2_RANK_FRACTION = 0.10
 QUALITY_MIN_DATA_QUALITY = 95.0
 QUALITY_MIN_RISK_REWARD_RATIO = 1.50
 QUALITY_MIN_QUALIFICATION_SCORE = 72.0
 
-# Model availability does not participate in either deterministic track.
-# All safety blockers remain shared; only the quality track separately waives
-# VERIFIED_POSITIVE_EVENT_MISSING before applying its stricter non-event gates.
+# Model availability does not participate in either deterministic track. The
+# quality track is intentionally independent from the bounded official filing
+# enrichment sample. It may waive only the two event-enrichment availability
+# blockers; every shared execution, data and material-risk blocker still
+# applies.
+QUALITY_EVENT_ENRICHMENT_BLOCKERS = frozenset(
+    {"EVENT_CANDIDATE_NOT_SCANNED", "VERIFIED_POSITIVE_EVENT_MISSING"}
+)
 MODEL_AVAILABILITY_BLOCKERS = frozenset(
     {"TEN_DAY_MODEL_NOT_READY", "TEN_DAY_PREDICTION_MISSING"}
 )
@@ -92,6 +98,14 @@ def _finite_number(value: Any) -> bool:
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 100.0) -> float:
     return max(lower, min(upper, value))
+
+
+def _round_rule_number(value: float, digits: int = 2) -> float:
+    """Match the Worker rebuild's IEEE-754 ``Math.round`` policy exactly."""
+
+    factor = 10 ** digits
+    rounded = math.floor((float(value) + 2.220446049250313e-16) * factor + 0.5) / factor
+    return 0.0 if rounded == 0 else rounded
 
 
 def _dedupe(values: Sequence[str]) -> list[str]:
@@ -178,8 +192,95 @@ def _source_data_quality(candidate: Mapping[str, Any] | None) -> float | None:
     return _clamp(float(value)) if _finite_number(value) else None
 
 
+def _ten_day_trade_plan(
+    row: Mapping[str, Any],
+    candidate: Mapping[str, Any] | None,
+    qualification_track: str | None,
+) -> dict[str, Any] | None:
+    """Build a deterministic review plan from already-frozen evidence.
+
+    The entry band and 10% single-name cap are execution guardrails, not a
+    personalized allocation or return forecast. No browser-side price or stop
+    inference is needed because the exact reference evidence travels with the
+    qualified row.
+    """
+
+    price = row.get("entry_price")
+    if not _finite_number(price) or float(price) <= 0:
+        return None
+    price_value = float(price)
+    candidate = candidate if isinstance(candidate, Mapping) else {}
+    realtime = candidate.get("realtime")
+    realtime = realtime if isinstance(realtime, Mapping) else {}
+    estimated_range = row.get("estimated_10d_range")
+    estimated_range = estimated_range if isinstance(estimated_range, Mapping) else {}
+    low_pct = estimated_range.get("low_pct")
+    high_pct = estimated_range.get("high_pct")
+    stop_loss = candidate.get("stop_loss")
+    stop_source = "candidate_stop_loss"
+    if not _finite_number(stop_loss) or float(stop_loss) <= 0:
+        stop_loss = (
+            price_value * (1.0 + float(low_pct) / 100.0)
+            if _finite_number(low_pct) and float(low_pct) < 0
+            else None
+        )
+        stop_source = "ten_day_scenario_lower_bound"
+    target = candidate.get("take_profit_reference")
+    target_source = "candidate_take_profit_reference"
+    if not _finite_number(target) or float(target) <= 0:
+        target = (
+            price_value * (1.0 + float(high_pct) / 100.0)
+            if _finite_number(high_pct) and float(high_pct) > 0
+            else None
+        )
+        target_source = "ten_day_scenario_upper_bound"
+    currency = {"a_share": "CNY", "hk": "HKD", "us": "USD"}.get(_text(row.get("market")))
+    review_end = _text(row.get("forecast_end_trade_date"))
+    return {
+        "contract_version": "ten-day-trade-plan-v1",
+        "status": "REVIEW_REQUIRED",
+        "horizon_trade_days": HORIZON_TRADE_DAYS,
+        "reference_quote": {
+            "price": _round_rule_number(price_value, 4),
+            "currency": currency,
+            "source": realtime.get("source"),
+            "source_as_of": realtime.get("source_as_of"),
+            "quote_status": realtime.get("quote_status") or realtime.get("session_label"),
+            "kind": "published_snapshot_quote",
+        },
+        "entry_zone": {
+            "low": _round_rule_number(price_value * 0.99, 4),
+            "high": _round_rule_number(price_value * 1.005, 4),
+            "currency": currency,
+        },
+        "entry_trade_date": _text(row.get("entry_trade_date")),
+        "invalidation": {
+            "price": _round_rule_number(float(stop_loss), 4) if _finite_number(stop_loss) else None,
+            "currency": currency,
+            "source": stop_source if _finite_number(stop_loss) else None,
+        },
+        "target": {
+            "price": _round_rule_number(float(target), 4) if _finite_number(target) else None,
+            "currency": currency,
+            "source": target_source if _finite_number(target) else None,
+        },
+        "position_limit": {
+            "max_single_name_weight_pct": 10.0,
+            "policy": "strategy_safety_cap_not_personalized",
+        },
+        "catalyst_expiry_date": review_end if qualification_track == TRACK_EVENT_CATALYST else None,
+        "review_end_trade_date": review_end,
+        "exit_rules": [
+            "EXIT_IF_INVALIDATION_PRICE_BREACHED",
+            "REVIEW_AT_TENTH_SESSION_CLOSE",
+            "DO_NOT_CHASE_ABOVE_ENTRY_ZONE",
+        ],
+        "is_personalized_advice": False,
+    }
+
+
 def freeze_production_rule_input_row(row: Mapping[str, Any], index: int) -> dict[str, Any]:
-    """Project one global row to exactly the fields consumed by V3."""
+    """Project one global row to exactly the fields consumed by current V4."""
 
     result = {
         "input_index": index,
@@ -220,7 +321,7 @@ def _evaluate_candidate(
     catalyst_blockers = list(shared_source_blockers)
     quality_blockers = [
         code for code in shared_source_blockers
-        if code != "VERIFIED_POSITIVE_EVENT_MISSING"
+        if code not in QUALITY_EVENT_ENRICHMENT_BLOCKERS
     ]
 
     def block_both(code: str) -> None:
@@ -301,7 +402,7 @@ def _evaluate_candidate(
     event_ids_raw = row.get("verified_positive_event_ids")
     event_ids = _dedupe([str(value) for value in event_ids_raw if _text(value)]) if isinstance(event_ids_raw, list) else []
     if not event_scanned:
-        block_both("EVENT_CANDIDATE_NOT_SCANNED")
+        catalyst_blockers.append("EVENT_CANDIDATE_NOT_SCANNED")
     if not event_ids:
         catalyst_blockers.append("VERIFIED_POSITIVE_EVENT_MISSING")
     event_strength = min(100.0, 80.0 + 5.0 * len(event_ids)) if event_scanned and event_ids else 0.0
@@ -334,13 +435,13 @@ def _evaluate_candidate(
         risk_reward_strength = _clamp(ratio / 2.0 * 100.0)
 
     components = {
-        "legacy_recommendation": round(recommendation_value * 0.30, 2),
-        "v2_rank_strength": round(v2_strength * 0.30, 2),
-        "data_quality": round(quality_score * 0.15, 2),
-        "verified_event_evidence": round(event_strength * 0.15, 2),
-        "risk_reward_scenario": round(risk_reward_strength * 0.10, 2),
+        "legacy_recommendation": _round_rule_number(recommendation_value * 0.30, 2),
+        "v2_rank_strength": _round_rule_number(v2_strength * 0.30, 2),
+        "data_quality": _round_rule_number(quality_score * 0.15, 2),
+        "verified_event_evidence": _round_rule_number(event_strength * 0.15, 2),
+        "risk_reward_scenario": _round_rule_number(risk_reward_strength * 0.10, 2),
     }
-    qualification_score = round(_clamp(sum(components.values())), 2)
+    qualification_score = _round_rule_number(_clamp(sum(components.values())), 2)
     if qualification_score < QUALITY_MIN_QUALIFICATION_SCORE:
         quality_blockers.append("QUALITY_QUALIFICATION_SCORE_BELOW_THRESHOLD")
 
@@ -380,11 +481,11 @@ def _evaluate_candidate(
         "calibrated": False,
         "expected_net_utility": None,
         "legacy_signal": legacy_signal,
-        "legacy_recommendation_degree": round(recommendation_value, 2) if _finite_number(recommendation) else None,
+        "legacy_recommendation_degree": _round_rule_number(recommendation_value, 2) if _finite_number(recommendation) else None,
         "v2_rank": int(rank_value) if rank_valid else None,
         "v2_rank_universe_size": int(universe_value) if rank_valid else None,
-        "v2_rank_fraction": round(rank_fraction, 4) if rank_fraction is not None else None,
-        "data_quality_score": round(quality_score, 2),
+        "v2_rank_fraction": _round_rule_number(rank_fraction, 4) if rank_fraction is not None else None,
+        "data_quality_score": _round_rule_number(quality_score, 2),
         "event_candidate_scanned": event_scanned,
         "verified_positive_event_ids": event_ids,
         "entry_price": float(row["entry_price"]) if _finite_number(row.get("entry_price")) and float(row["entry_price"]) > 0 else None,
@@ -393,14 +494,14 @@ def _evaluate_candidate(
         "entry_trade_date": _text(row.get("entry_trade_date")),
         "forecast_end_trade_date": _text(row.get("forecast_end_trade_date")),
         "estimated_10d_range": {
-            "low_pct": round(low_value, 2) if low_value is not None else None,
-            "high_pct": round(high_value, 2) if high_value is not None else None,
+            "low_pct": _round_rule_number(low_value, 2) if low_value is not None else None,
+            "high_pct": _round_rule_number(high_value, 2) if high_value is not None else None,
             "horizon_trade_days": HORIZON_TRADE_DAYS,
         },
         "risk_reward": {
-            "upside_pct": round(high_value, 2) if high_value is not None else None,
-            "downside_pct": round(downside, 2) if downside is not None else None,
-            "ratio": round(ratio, 2) if ratio is not None else None,
+            "upside_pct": _round_rule_number(high_value, 2) if high_value is not None else None,
+            "downside_pct": _round_rule_number(downside, 2) if downside is not None else None,
+            "ratio": _round_rule_number(ratio, 2) if ratio is not None else None,
         },
         "blocker_codes": blockers,
     }
@@ -412,6 +513,11 @@ def _evaluate_candidate(
             else copy.deepcopy(qualified_candidate_snapshot)
             if isinstance(qualified_candidate_snapshot, Mapping)
             else None
+        )
+        result["ten_day_trade_plan"] = _ten_day_trade_plan(
+            result,
+            result.get("candidate_snapshot") or source_candidate,
+            qualification_track,
         )
     return result
 
@@ -440,7 +546,7 @@ def production_rule_inputs_sha256(inputs: Mapping[str, Any]) -> str | None:
 
 
 def build_production_rule_inputs(snapshot: Mapping[str, Any]) -> dict[str, Any]:
-    """Freeze the smallest self-contained ledger needed to reproduce V3.
+    """Freeze the smallest self-contained ledger needed to reproduce V4.
 
     Each global evaluated row is reduced to fields the rules consume, plus
     source-candidate presence and raw data quality.  The substantially larger
@@ -589,7 +695,7 @@ def build_production_decision(snapshot: Mapping[str, Any]) -> dict[str, Any]:
                 TRACK_QUALITY_TECHNICAL: {
                     "market_thresholds": copy.deepcopy(QUALITY_POLICY),
                     "verified_positive_event_required": False,
-                    "event_scan_required": True,
+                    "event_scan_required": False,
                     "maximum_v2_rank_fraction": QUALITY_MAX_V2_RANK_FRACTION,
                     "minimum_data_quality": QUALITY_MIN_DATA_QUALITY,
                     "minimum_risk_reward_ratio": QUALITY_MIN_RISK_REWARD_RATIO,

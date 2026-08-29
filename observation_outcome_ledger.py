@@ -19,6 +19,8 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import model_observation_ledger
+import market_calendar
+import ten_day_rank_model
 
 
 TRACK = model_observation_ledger.TRACK
@@ -29,11 +31,14 @@ PENDING_DATA_REASONS = {
     "COMPLETE_ADJUSTED_BARS_MISSING",
     "PRICE_LOADER_CONTRACT_INVALID",
     "UNADJUSTED_PRICE_SOURCE",
+    "BENCHMARK_ADJUSTED_BARS_MISSING",
 }
 VALID_COHORT_ID = re.compile(r"^obscohort_[a-f0-9]{24}$")
 VALID_OBSERVATION_ID = re.compile(r"^obs_[a-f0-9]{24}$")
 PRICE_DECIMALS = 8
 RETURN_DECIMALS = 8
+RANK_LABEL_SCHEMA_VERSION = "ten-session-net-excess-label-v1"
+RANK_COST_VERSION = "market-round-trip-cost-v1"
 DEFAULT_OUTCOME_DIRECTORY = (
     pathlib.Path(__file__).resolve().parent
     / "data"
@@ -89,6 +94,39 @@ def _finite_positive(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+
+def _strict_adjusted_bar_index(
+    rows: list[dict[str, Any]],
+    market: str,
+    as_of: dt.datetime,
+) -> dict[str, Mapping[str, Any]] | None:
+    """Index canonical adjusted daily bars without hiding ambiguous evidence."""
+
+    latest_legal_date = market_calendar.market_local_date(market, as_of).isoformat()
+    indexed: dict[str, Mapping[str, Any]] = {}
+    previous_date: str | None = None
+    for item in rows:
+        if not isinstance(item, Mapping):
+            return None
+        raw_date = item.get("date")
+        if not isinstance(raw_date, str):
+            return None
+        try:
+            parsed_date = dt.date.fromisoformat(raw_date)
+        except ValueError:
+            return None
+        date_text = parsed_date.isoformat()
+        if (
+            raw_date != date_text
+            or date_text > latest_legal_date
+            or date_text in indexed
+            or (previous_date is not None and date_text <= previous_date)
+        ):
+            return None
+        indexed[date_text] = item
+        previous_date = date_text
+    return indexed
 
 
 def _canonical_revision(cohort: Mapping[str, Any]) -> dict[str, Any]:
@@ -201,6 +239,7 @@ def _settled_row(
     prediction: Mapping[str, Any],
     as_of: dt.datetime,
     price_loader: PriceLoader,
+    benchmark_price_loader: PriceLoader | None = None,
 ) -> dict[str, Any]:
     try:
         loaded = price_loader(str(prediction["market"]), str(prediction["code"]))
@@ -212,11 +251,13 @@ def _settled_row(
     if not isinstance(rows, list) or not isinstance(source, str) or not adjusted:
         reason = "UNADJUSTED_PRICE_SOURCE" if rows and not adjusted else "COMPLETE_ADJUSTED_BARS_MISSING"
         return _pending_row(base, "PENDING_DATA", reason)
-    by_date = {
-        str(row.get("date"))[:10]: row
-        for row in rows
-        if isinstance(row, Mapping) and row.get("date")
-    }
+    by_date = _strict_adjusted_bar_index(
+        rows,
+        str(prediction["market"]),
+        as_of,
+    )
+    if by_date is None:
+        return _pending_row(base, "PENDING_DATA", "COMPLETE_ADJUSTED_BARS_MISSING")
     entry = _finite_positive((by_date.get(str(prediction["entry_trade_date"])) or {}).get("open"))
     exit_ = _finite_positive((by_date.get(str(prediction["forecast_end_trade_date"])) or {}).get("close"))
     if entry is None or exit_ is None or not source:
@@ -250,6 +291,68 @@ def _settled_row(
         "fx_rate_source": "not_required_same_currency_return",
         "settled_at": as_of.isoformat(timespec="seconds"),
     }
+    if benchmark_price_loader is not None:
+        market = str(prediction["market"])
+        benchmark_code = ten_day_rank_model.REGISTERED_BENCHMARKS.get(market)
+        expected_cost = ten_day_rank_model.TRANSACTION_COSTS.get(market)
+        if benchmark_code is None or expected_cost != float(prediction["transaction_cost"]):
+            return _pending_row(base, "PENDING_DATA", "BENCHMARK_ADJUSTED_BARS_MISSING")
+        try:
+            benchmark_loaded = benchmark_price_loader(market, benchmark_code)
+        except Exception:
+            benchmark_loaded = ([], "", False)
+        if (
+            not isinstance(benchmark_loaded, tuple)
+            or len(benchmark_loaded) != 3
+            or not isinstance(benchmark_loaded[0], list)
+            or not isinstance(benchmark_loaded[1], str)
+            or not benchmark_loaded[1]
+            or benchmark_loaded[2] is not True
+        ):
+            return _pending_row(base, "PENDING_DATA", "BENCHMARK_ADJUSTED_BARS_MISSING")
+        benchmark_rows, benchmark_source, _adjusted = benchmark_loaded
+        benchmark_by_date = _strict_adjusted_bar_index(benchmark_rows, market, as_of)
+        if benchmark_by_date is None:
+            return _pending_row(base, "PENDING_DATA", "BENCHMARK_ADJUSTED_BARS_MISSING")
+        benchmark_entry = _finite_positive(
+            (benchmark_by_date.get(str(prediction["entry_trade_date"])) or {}).get("open")
+        )
+        benchmark_exit = _finite_positive(
+            (benchmark_by_date.get(str(prediction["forecast_end_trade_date"])) or {}).get("close")
+        )
+        if benchmark_entry is None or benchmark_exit is None:
+            return _pending_row(base, "PENDING_DATA", "BENCHMARK_ADJUSTED_BARS_MISSING")
+        benchmark_entry = round(benchmark_entry, PRICE_DECIMALS)
+        benchmark_exit = round(benchmark_exit, PRICE_DECIMALS)
+        benchmark_gross = round(
+            benchmark_exit / benchmark_entry - 1.0,
+            RETURN_DECIMALS,
+        )
+        benchmark_net = round(benchmark_gross - expected_cost, RETURN_DECIMALS)
+        rank_label = {
+            "schema_version": RANK_LABEL_SCHEMA_VERSION,
+            "market": market,
+            "benchmark_code": benchmark_code,
+            "entry_date": prediction["entry_trade_date"],
+            "exit_date": prediction["forecast_end_trade_date"],
+            "stock_entry_price": published_entry,
+            "stock_exit_price": published_exit,
+            "benchmark_entry_price": benchmark_entry,
+            "benchmark_exit_price": benchmark_exit,
+            "stock_transaction_cost": float(prediction["transaction_cost"]),
+            "benchmark_transaction_cost": expected_cost,
+            "stock_gross_return": gross,
+            "stock_net_return": net,
+            "benchmark_gross_return": benchmark_gross,
+            "benchmark_net_return": benchmark_net,
+            "net_excess_return": round(net - benchmark_net, RETURN_DECIMALS),
+            "transaction_cost_version": RANK_COST_VERSION,
+            "corporate_action_adjusted": True,
+            "stock_price_source": source,
+            "benchmark_price_source": benchmark_source,
+        }
+        row["rank_label"] = rank_label
+        row["rank_label_sha256"] = _digest(rank_label)
     row["outcome_sha256"] = _row_digest(row)
     return row
 
@@ -314,6 +417,8 @@ def validate_outcome_batch(
                 "settled_at",
                 "price_evidence",
                 "price_evidence_sha256",
+                "rank_label",
+                "rank_label_sha256",
             )
         ):
             raise ObservationOutcomeConflictError("pending observation contains settled fields")
@@ -332,6 +437,55 @@ def validate_outcome_batch(
                 raise ObservationOutcomeConflictError(
                     "settlement timestamp is outside the evaluated maturity window"
                 )
+            rank_label = row.get("rank_label")
+            if rank_label is not None:
+                if not isinstance(rank_label, Mapping):
+                    raise ObservationOutcomeConflictError("rank label must be an object")
+                market = str(row.get("market") or "")
+                expected_benchmark = ten_day_rank_model.REGISTERED_BENCHMARKS.get(market)
+                expected_cost = ten_day_rank_model.TRANSACTION_COSTS.get(market)
+                try:
+                    stock_gross = float(rank_label.get("stock_gross_return"))
+                    stock_net = float(rank_label.get("stock_net_return"))
+                    benchmark_gross = float(rank_label.get("benchmark_gross_return"))
+                    benchmark_net = float(rank_label.get("benchmark_net_return"))
+                    net_excess = float(rank_label.get("net_excess_return"))
+                    benchmark_entry = float(rank_label.get("benchmark_entry_price"))
+                    benchmark_exit = float(rank_label.get("benchmark_exit_price"))
+                except (TypeError, ValueError):
+                    stock_gross = stock_net = benchmark_gross = benchmark_net = net_excess = math.nan
+                    benchmark_entry = benchmark_exit = math.nan
+                if (
+                    rank_label.get("schema_version") != RANK_LABEL_SCHEMA_VERSION
+                    or rank_label.get("market") != market
+                    or rank_label.get("benchmark_code") != expected_benchmark
+                    or rank_label.get("entry_date") != row.get("entry_trade_date")
+                    or rank_label.get("exit_date") != row.get("forecast_end_trade_date")
+                    or rank_label.get("transaction_cost_version") != RANK_COST_VERSION
+                    or rank_label.get("corporate_action_adjusted") is not True
+                    or rank_label.get("stock_transaction_cost") != expected_cost
+                    or rank_label.get("benchmark_transaction_cost") != expected_cost
+                    or rank_label.get("stock_entry_price") != row.get("entry_price")
+                    or rank_label.get("stock_exit_price") != row.get("exit_price")
+                    or not all(
+                        math.isfinite(value)
+                        for value in (stock_gross, stock_net, benchmark_gross, benchmark_net, net_excess)
+                    )
+                    or abs(stock_gross - float(row.get("gross_total_return"))) > 1e-12
+                    or abs(stock_net - float(row.get("net_total_return"))) > 1e-12
+                    or abs(stock_net - round(stock_gross - expected_cost, RETURN_DECIMALS)) > 1e-12
+                    or benchmark_entry <= 0
+                    or benchmark_exit <= 0
+                    or abs(
+                        benchmark_gross
+                        - round(benchmark_exit / benchmark_entry - 1.0, RETURN_DECIMALS)
+                    )
+                    > 1e-12
+                    or abs(benchmark_net - round(benchmark_gross - expected_cost, RETURN_DECIMALS)) > 1e-12
+                    or abs(net_excess - round(stock_net - benchmark_net, RETURN_DECIMALS)) > 1e-12
+                    or row.get("rank_label_sha256") != _digest(rank_label)
+                ):
+                    raise ObservationOutcomeConflictError("rank label identity or arithmetic is invalid")
         if row.get("outcome_sha256") != _row_digest(row):
             raise ObservationOutcomeConflictError(f"observation outcome digest mismatch: {observation_id}")
         status_counts[str(status)] += 1
@@ -454,6 +608,7 @@ def settle_observation_cohort(
     price_loader: PriceLoader,
     *,
     existing: Mapping[str, Any] | None = None,
+    benchmark_price_loader: PriceLoader | None = None,
 ) -> dict[str, Any]:
     """Settle the canonical revision of one cohort, preserving settled rows."""
 
@@ -497,7 +652,13 @@ def settle_observation_cohort(
         if moment <= maturity:
             row = _pending_row(base, "PENDING_MATURITY", "FORECAST_WINDOW_OPEN")
         else:
-            row = _settled_row(base, prediction, moment, price_loader)
+            row = _settled_row(
+                base,
+                prediction,
+                moment,
+                price_loader,
+                benchmark_price_loader,
+            )
         settled_rows.append(row)
 
     settled_rows.sort(key=lambda row: str(row["observation_id"]))
@@ -606,6 +767,8 @@ __all__ = [
     "BATCH_SCHEMA_VERSION",
     "DEFAULT_OUTCOME_DIRECTORY",
     "OUTCOME_SCHEMA_VERSION",
+    "RANK_COST_VERSION",
+    "RANK_LABEL_SCHEMA_VERSION",
     "ObservationOutcomeConflictError",
     "ObservationOutcomeContractError",
     "TRACK",

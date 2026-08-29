@@ -32,10 +32,12 @@ import market_calendar
 TRACK = "MODEL_OBSERVATION"
 SHADOW_TRACK = "SHADOW_RESEARCH"
 EXECUTABLE_TRACK = "EXECUTABLE_MODEL"
-REVISION_SCHEMA_VERSION = "model-observation-revision-v1"
+LEGACY_REVISION_SCHEMA_VERSION = "model-observation-revision-v1"
+REVISION_SCHEMA_VERSION = "model-observation-revision-v2"
 COHORT_SCHEMA_VERSION = "model-observation-cohort-v1"
 SUMMARY_SCHEMA_VERSION = "model-observation-summary-v1"
 SAMPLING_POLICY = "daily_2247_all_shadow_predictions_v1"
+SOURCE_SNAPSHOT_HASH_CONTRACT = "canonical-json-sha256-v1"
 CN_TZ = ZoneInfo("Asia/Shanghai")
 DAILY_SLOT = (22, 47)
 MAX_REVISION_DELAY = dt.timedelta(hours=4)
@@ -112,7 +114,7 @@ PREDICTION_BASE_FIELDS = frozenset(
 PREDICTION_CURRENT_FIELDS = frozenset(
     (*PREDICTION_BASE_FIELDS, *PREDICTION_SETTLEMENT_DERIVED_FIELDS)
 )
-REVISION_FIELDS = frozenset(
+LEGACY_REVISION_FIELDS = frozenset(
     {
         "schema_version",
         "track",
@@ -132,6 +134,15 @@ REVISION_FIELDS = frozenset(
         "included_in_shadow_research",
         "included_in_executable_performance",
         "revision_sha256",
+    }
+)
+REVISION_FIELDS = frozenset(
+    {
+        *LEGACY_REVISION_FIELDS,
+        "source_snapshot_hash_contract",
+        "source_snapshot_sha256",
+        "source_snapshot_byte_size",
+        "feature_cutoff_at",
     }
 )
 COHORT_FIELDS = frozenset(
@@ -198,6 +209,33 @@ def _digest(value: Any) -> str:
         allow_nan=False,
     )
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def source_snapshot_identity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the deterministic content identity frozen by revision v2.
+
+    JSON is canonicalized before hashing so formatting-only rewrites do not
+    invalidate a historical feature sample, while every semantic value used by
+    the point-in-time join remains bound to the revision.
+    """
+
+    if not isinstance(snapshot, Mapping):
+        raise ObservationContractError("source snapshot must be an object")
+    try:
+        encoded = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ObservationContractError("source snapshot is not canonical JSON") from exc
+    return {
+        "source_snapshot_hash_contract": SOURCE_SNAPSHOT_HASH_CONTRACT,
+        "source_snapshot_sha256": hashlib.sha256(encoded).hexdigest(),
+        "source_snapshot_byte_size": len(encoded),
+    }
 
 
 def _stable_id(prefix: str, *parts: Any) -> str:
@@ -307,6 +345,41 @@ def _scheduled_slot(snapshot: Mapping[str, Any]) -> tuple[dt.datetime, dt.dateti
     if delay < dt.timedelta(0) or delay > MAX_REVISION_DELAY:
         raise ObservationContractError("generated_at is outside the allowed same-slot revision window")
     return scheduled, generated
+
+
+def _feature_cutoff(snapshot: Mapping[str, Any], generated: dt.datetime) -> str:
+    raw = snapshot.get("feature_cutoff_at") or snapshot.get("generated_at")
+    cutoff = _aware_moment(raw, "feature_cutoff_at")
+    if cutoff.astimezone(dt.timezone.utc) < generated.astimezone(dt.timezone.utc):
+        raise ObservationContractError("feature_cutoff_at cannot precede generated_at")
+    return cutoff.isoformat(timespec="microseconds" if cutoff.microsecond else "seconds")
+
+
+def validate_source_snapshot_binding(
+    snapshot: Mapping[str, Any],
+    revision: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Verify one parsed immutable snapshot against its frozen revision-v2 identity."""
+
+    if not isinstance(revision, Mapping) or revision.get("schema_version") != REVISION_SCHEMA_VERSION:
+        raise ObservationContractError("source snapshot binding requires revision v2")
+    scheduled, generated = _scheduled_slot(snapshot)
+    source_snapshot = _canonical_snapshot_name(snapshot, None)
+    scheduled_iso = scheduled.astimezone(CN_TZ).isoformat(timespec="minutes")
+    generated_iso = generated.isoformat(timespec="seconds")
+    cutoff_iso = _feature_cutoff(snapshot, generated)
+    if (
+        source_snapshot != revision.get("source_snapshot")
+        or scheduled_iso != revision.get("scheduled_slot")
+        or generated_iso != revision.get("generated_at")
+        or cutoff_iso != revision.get("feature_cutoff_at")
+    ):
+        raise ObservationConflictError("source snapshot critical identity mismatch")
+    expected = source_snapshot_identity(snapshot)
+    for field, value in expected.items():
+        if revision.get(field) != value:
+            raise ObservationConflictError(f"source snapshot content identity mismatch: {field}")
+    return expected
 
 
 def _global_contract(snapshot: Mapping[str, Any]) -> None:
@@ -440,6 +513,8 @@ def build_observation_revision(
     scheduled, generated = _scheduled_slot(snapshot)
     _global_contract(snapshot)
     source_snapshot = _canonical_snapshot_name(snapshot, source_name)
+    snapshot_identity = source_snapshot_identity(snapshot)
+    feature_cutoff_at = _feature_cutoff(snapshot, generated)
     model = ((snapshot.get("analysis_models") or {}).get("ten_day_return") or {})
     if not isinstance(model, Mapping):
         raise ObservationContractError("analysis_models.ten_day_return must be an object")
@@ -485,6 +560,8 @@ def build_observation_revision(
         "scheduled_slot": slot_iso,
         "generated_at": generated.isoformat(timespec="seconds"),
         "source_snapshot": source_snapshot,
+        **snapshot_identity,
+        "feature_cutoff_at": feature_cutoff_at,
         "model_id": model.get("model_id"),
         "label_version": model.get("label_version"),
         "model_status": model.get("status"),
@@ -536,7 +613,11 @@ def _normalize_persisted_prediction(
             f"missing={missing} unexpected={unexpected}"
         )
     if (
-        record.get("schema_version") != REVISION_SCHEMA_VERSION
+        record.get("schema_version") != revision.get("schema_version")
+        or record.get("schema_version") not in {
+            LEGACY_REVISION_SCHEMA_VERSION,
+            REVISION_SCHEMA_VERSION,
+        }
         or record.get("track") != TRACK
         or record.get("participates_in_decision") is not False
         or record.get("production_eligible") is not False
@@ -655,14 +736,22 @@ def _normalize_persisted_revision(
     )
     if revision.get("revision_sha256") != raw_digest:
         raise ObservationConflictError(f"revision digest mismatch: {revision_id}")
+    schema_version = revision.get("schema_version")
+    expected_revision_fields = (
+        REVISION_FIELDS
+        if schema_version == REVISION_SCHEMA_VERSION
+        else LEGACY_REVISION_FIELDS
+        if schema_version == LEGACY_REVISION_SCHEMA_VERSION
+        else frozenset()
+    )
     fields = frozenset(revision)
-    if fields != REVISION_FIELDS:
+    if fields != expected_revision_fields:
         raise ObservationContractError(
             "observation revision field set is invalid: "
-            f"missing={sorted(REVISION_FIELDS - fields)} "
-            f"unexpected={sorted(fields - REVISION_FIELDS)}"
+            f"missing={sorted(expected_revision_fields - fields)} "
+            f"unexpected={sorted(fields - expected_revision_fields)}"
         )
-    if revision.get("schema_version") != REVISION_SCHEMA_VERSION or revision.get("track") != TRACK:
+    if not expected_revision_fields or revision.get("track") != TRACK:
         raise ObservationContractError("observation revision belongs to another schema or track")
     cohort_id = revision.get("cohort_id")
     if not isinstance(cohort_id, str) or VALID_COHORT_ID.fullmatch(cohort_id) is None:
@@ -700,6 +789,33 @@ def _normalize_persisted_revision(
         or pathlib.PurePosixPath(source_snapshot).name != source_snapshot
     ):
         raise ObservationContractError("observation revision source_snapshot is unsafe")
+    feature_cutoff: dt.datetime | None = None
+    if schema_version == REVISION_SCHEMA_VERSION:
+        if revision.get("source_snapshot_hash_contract") != SOURCE_SNAPSHOT_HASH_CONTRACT:
+            raise ObservationContractError("observation revision source snapshot hash contract is invalid")
+        source_digest = revision.get("source_snapshot_sha256")
+        source_size = revision.get("source_snapshot_byte_size")
+        if (
+            not isinstance(source_digest, str)
+            or source_digest != source_digest.lower()
+            or VALID_ARTIFACT.fullmatch(source_digest) is None
+            or not isinstance(source_size, int)
+            or isinstance(source_size, bool)
+            or source_size <= 0
+        ):
+            raise ObservationContractError("observation revision source snapshot identity is invalid")
+        feature_cutoff = _aware_moment(
+            revision.get("feature_cutoff_at"),
+            "revision.feature_cutoff_at",
+        )
+        cutoff_iso = feature_cutoff.isoformat(
+            timespec="microseconds" if feature_cutoff.microsecond else "seconds"
+        )
+        if (
+            revision.get("feature_cutoff_at") != cutoff_iso
+            or feature_cutoff.astimezone(dt.timezone.utc) < generated.astimezone(dt.timezone.utc)
+        ):
+            raise ObservationContractError("observation revision feature cutoff is invalid")
     if cohort_id != _stable_id("obscohort", slot_iso):
         raise ObservationConflictError("observation revision cohort identity mismatch")
     if revision_id != _stable_id("obsrev", slot_iso, generated_iso, source_snapshot):
@@ -742,6 +858,17 @@ def _normalize_persisted_revision(
     if normalized_predictions and model_artifact is None:
         raise ObservationContractError(
             "non-empty observation revision requires a model artifact"
+        )
+    if feature_cutoff is not None and any(
+        feature_cutoff.astimezone(dt.timezone.utc)
+        >= _aware_moment(
+            prediction.get("entry_session_open_at"),
+            "prediction.entry_session_open_at",
+        ).astimezone(dt.timezone.utc)
+        for prediction in normalized_predictions
+    ):
+        raise ObservationContractError(
+            "observation revision feature cutoff must precede every entry-session open"
         )
     expected_order = sorted(
         normalized_predictions,
@@ -874,7 +1001,28 @@ def record_observation_revision(
         existing = validate_observation_cohort(loaded)
         if existing.get("cohort_id") != cohort_id:
             raise ObservationConflictError(f"existing observation cohort identity conflict: {target.name}")
-    cohort = _cohort_from_revisions([*((existing or {}).get("revisions") or []), revision])
+    existing_revisions = list((existing or {}).get("revisions") or [])
+    same_revision = next(
+        (
+            item
+            for item in existing_revisions
+            if item.get("revision_id") == revision.get("revision_id")
+        ),
+        None,
+    )
+    if (
+        isinstance(same_revision, Mapping)
+        and same_revision.get("schema_version") == LEGACY_REVISION_SCHEMA_VERSION
+        and revision.get("schema_version") == REVISION_SCHEMA_VERSION
+    ):
+        # A persisted v1 revision may already have a PENDING/SETTLED outcome
+        # whose cohort digest is immutable. Do not rewrite that historical
+        # identity in place. It remains readable for settlement but is excluded
+        # from rank training because it lacks a source-content binding.
+        revisions = existing_revisions
+    else:
+        revisions = [*existing_revisions, revision]
+    cohort = _cohort_from_revisions(revisions)
     changed = stored_existing != cohort
     if changed:
         _atomic_write_json(target, cohort)
@@ -1045,11 +1193,13 @@ __all__ = [
     "COHORT_SCHEMA_VERSION",
     "DEFAULT_OBSERVATION_DIRECTORY",
     "EXECUTABLE_TRACK",
+    "LEGACY_REVISION_SCHEMA_VERSION",
     "ObservationConflictError",
     "ObservationContractError",
     "REVISION_SCHEMA_VERSION",
     "SAMPLING_POLICY",
     "SHADOW_TRACK",
+    "SOURCE_SNAPSHOT_HASH_CONTRACT",
     "SUMMARY_SCHEMA_VERSION",
     "SETTLEMENT_CONTRACT_FIELDS",
     "PREDICTION_SETTLEMENT_DERIVED_FIELDS",
@@ -1060,6 +1210,8 @@ __all__ = [
     "record_observation_revision",
     "prediction_sha256",
     "settlement_contract_sha256",
+    "source_snapshot_identity",
     "summarize_observation_cohorts",
     "validate_observation_cohort",
+    "validate_source_snapshot_binding",
 ]

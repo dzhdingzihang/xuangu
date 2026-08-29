@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
+NY_TZ = ZoneInfo("America/New_York")
 SLOTS = [
     (8, 17),
     (10, 17),
@@ -41,6 +42,22 @@ CRON_INVOCATION_SLOTS = {
     "47 8 * * 1-5": [(16, 47)],
     "47 12 * * 1-5": [(20, 47)],
     "17 15 * * 1-5": [(23, 17)],
+    # US post-close checkpoints. Cloudflare dispatches only the expression
+    # whose UTC hour currently maps to 16:17 America/New_York, so both DST and
+    # standard time are correct without a twice-yearly configuration edit.
+    "17 20 * * 1-5": [(4, 17)],
+    "17 21 * * 1-5": [(5, 17)],
+    "47 20 * * 1-5": [(4, 47)],
+    "47 21 * * 1-5": [(5, 47)],
+}
+CRON_LOCAL_WEEKDAYS = {
+    "17 20 * * 1-5": {1, 2, 3, 4, 5},
+    "17 21 * * 1-5": {1, 2, 3, 4, 5},
+    "47 20 * * 1-5": {1, 2, 3, 4, 5},
+    "47 21 * * 1-5": {1, 2, 3, 4, 5},
+}
+US_POST_CLOSE_CRONS = {
+    "17 20 * * 1-5", "17 21 * * 1-5", "47 20 * * 1-5", "47 21 * * 1-5",
 }
 EARLY_GRACE_SECONDS = 5 * 60
 # GitHub scheduled workflows are not precise timers. They can be delayed by
@@ -125,32 +142,41 @@ def select_cron_invocation(now: dt.datetime, cron: str | None) -> dt.datetime | 
     if not slots:
         return None
     now = as_cn_time(now)
+    weekdays = CRON_LOCAL_WEEKDAYS.get(str(cron or "").strip(), set(range(5)))
     candidates = [
         dt.datetime.combine(day, dt.time(hour, minute), tzinfo=CN_TZ)
         for day in (now.date(), (now - dt.timedelta(days=1)).date())
-        if day.weekday() < 5
+        if day.weekday() in weekdays
         for hour, minute in slots
     ]
     eligible = [slot for slot in candidates if slot <= now]
     return max(eligible) if eligible else None
 
 
-def select_latest_configured_invocation(now: dt.datetime) -> dt.datetime | None:
+def select_latest_configured_invocation(
+    now: dt.datetime,
+    source_cron: str | None = None,
+) -> dt.datetime | None:
     """Return the latest legal primary or fallback invocation at or before now."""
     now = as_cn_time(now)
-    clocks = sorted(
-        {
-            clock
-            for configured in CRON_INVOCATION_SLOTS.values()
-            for clock in configured
-        }
-    )
-    candidates = [
-        dt.datetime.combine(day, dt.time(hour, minute), tzinfo=CN_TZ)
-        for day in (now.date(), (now - dt.timedelta(days=1)).date())
-        if day.weekday() < 5
-        for hour, minute in clocks
-    ]
+    candidates: list[dt.datetime] = []
+    for day in (now.date(), (now - dt.timedelta(days=1)).date()):
+        for cron, configured in CRON_INVOCATION_SLOTS.items():
+            if source_cron in US_POST_CLOSE_CRONS and cron not in US_POST_CLOSE_CRONS:
+                continue
+            if source_cron not in US_POST_CLOSE_CRONS and cron in US_POST_CLOSE_CRONS:
+                continue
+            if str(source_cron or "").endswith("* * 0") and not cron.endswith("* * 0"):
+                continue
+            if not str(source_cron or "").endswith("* * 0") and cron.endswith("* * 0"):
+                continue
+            if day.weekday() not in CRON_LOCAL_WEEKDAYS.get(cron, set(range(5))):
+                continue
+            for hour, minute in configured:
+                candidate = dt.datetime.combine(day, dt.time(hour, minute), tzinfo=CN_TZ)
+                if cron in US_POST_CLOSE_CRONS and candidate.astimezone(NY_TZ).hour != 16:
+                    continue
+                candidates.append(candidate)
     eligible = [slot for slot in candidates if slot <= now]
     return max(eligible) if eligible else None
 
@@ -165,9 +191,10 @@ def parse_scheduled_invocation(value: str, cron: str | None) -> dt.datetime:
         raise ValueError("scheduled_at must be an aware ISO datetime")
     local = as_cn_time(parsed)
     configured = CRON_INVOCATION_SLOTS.get(str(cron or "").strip())
+    allowed_weekdays = CRON_LOCAL_WEEKDAYS.get(str(cron or "").strip(), set(range(5)))
     if (
         not configured
-        or local.weekday() >= 5
+        or local.weekday() not in allowed_weekdays
         or (local.hour, local.minute) not in configured
         or local.second != 0
         or local.microsecond != 0
@@ -194,11 +221,23 @@ def resolve_schedule_intent(
     if source_invocation is None and not cron:
         source_invocation = select_checkpoint(now)
 
+    if (
+        source_invocation is not None
+        and str(cron or "").strip() in US_POST_CLOSE_CRONS
+        and source_invocation.astimezone(NY_TZ).hour != 16
+    ):
+        return {
+            "mode": "inactive_us_post_close_dst_variant",
+            "source_invocation": source_invocation,
+            "effective_invocation": None,
+            "checkpoint": None,
+        }
+
     if source_invocation and checkpoint_is_within_window(now, source_invocation):
         effective_invocation = source_invocation
         mode = "on_time"
     elif cron:
-        effective_invocation = select_latest_configured_invocation(now)
+        effective_invocation = select_latest_configured_invocation(now, cron)
         mode = "late_cron_recovery"
     else:
         effective_invocation = source_invocation
@@ -637,7 +676,18 @@ def main() -> int:
     if nearest is None:
         write_output(
             should_run="false",
-            reason=f"no_eligible_checkpoint:now={now:%Y-%m-%d_%H:%M:%S}",
+            reason=(
+                recovery_mode
+                if recovery_mode == "inactive_us_post_close_dst_variant"
+                else f"no_eligible_checkpoint:now={now:%Y-%m-%d_%H:%M:%S}"
+            ),
+            source_invocation_slot=(
+                source_invocation.isoformat(timespec="minutes")
+                if isinstance(source_invocation, dt.datetime)
+                else ""
+            ),
+            gate_evaluated_at=now.isoformat(timespec="seconds"),
+            recovery_mode=recovery_mode,
         )
         return 0
 
@@ -649,6 +699,7 @@ def main() -> int:
     )
     output_metadata = {
         "slot": nearest.isoformat(timespec="minutes"),
+        "effective_checkpoint": nearest.isoformat(timespec="minutes"),
         "invocation_slot": invocation.isoformat(timespec="minutes"),
         "source_invocation_slot": (
             source_invocation.isoformat(timespec="minutes")
@@ -658,6 +709,10 @@ def main() -> int:
         "scheduler_delay_seconds": (
             str(max(0, int(source_delta))) if math.isfinite(source_delta) else ""
         ),
+        "scheduler_start_delay_seconds": (
+            str(max(0, int(source_delta))) if math.isfinite(source_delta) else ""
+        ),
+        "gate_evaluated_at": now.isoformat(timespec="seconds"),
         "recovery_mode": recovery_mode,
     }
     within_window = (

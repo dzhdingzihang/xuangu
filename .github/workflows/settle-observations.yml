@@ -25,24 +25,44 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+          cache: npm
 
       - name: Install settlement dependencies
         run: pip install -r requirements.txt
 
       - name: Settle, validate, and publish observation outcomes
+        env:
+          ENABLE_R2_DATA_PUBLISH: ${{ vars.ENABLE_R2_DATA_PUBLISH }}
         run: |
           set -uo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          push_with_scoped_token() {
+            settlement_tree="$1"
+            auth_header="$(printf 'x-access-token:%s' '${{ github.token }}' | base64 | tr -d '\n')"
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}" \
+              git -C "${settlement_tree}" push origin HEAD:main
+            push_status="$?"
+            unset auth_header
+            return "${push_status}"
+          }
 
           validate_only() {
             settlement_tree="$1"
@@ -54,6 +74,7 @@ jobs:
 
           import model_observation_ledger
           import observation_outcome_ledger
+          import rule_outcome_ledger
 
           cohorts = model_observation_ledger.load_observation_cohorts()
           batches = observation_outcome_ledger.load_outcome_batches()
@@ -75,6 +96,10 @@ jobs:
               "Validated observation settlements: "
               f"cohorts={len(cohorts)} statuses={dict(sorted(statuses.items()))}"
           )
+          rule_batches = rule_outcome_ledger.load_rule_outcome_batches()
+          for batch in rule_batches.values():
+              rule_outcome_ledger.validate_rule_outcome_batch(batch)
+          print(f"Validated rule settlements: snapshots={len(rule_batches)}")
           PY
             )
           }
@@ -85,8 +110,125 @@ jobs:
               set -e
               cd "${settlement_tree}"
               python scripts/settle_observations.py --max-workers 12 --retries 0
+              python scripts/settle_rule_outcomes.py --max-workers 12 --retries 0
+              validate_only "${settlement_tree}"
             )
-            validate_only "${settlement_tree}"
+          }
+
+          publish_history_only() {
+            settlement_tree="$1"
+            (
+              set -eEuo pipefail
+              cd "${settlement_tree}"
+              npm ci
+              python scripts/verify_deployment.py data/picks/latest.json \
+                --base-url https://xuangu.alixjd.com \
+                --adopt-newer-live
+              python scripts/build_worker_assets.py
+              rollback_target="${RUNNER_TEMP}/history-rollback-${GITHUB_RUN_ID}.json"
+              CLOUDFLARE_API_TOKEN='${{ secrets.CLOUDFLARE_API_TOKEN }}' \
+                npx --no-install wrangler deployments status --name xuangu --json > "${rollback_target}"
+              rollback_version="$(python - "${rollback_target}" <<'PY'
+          import json
+          import pathlib
+          import sys
+          import uuid
+
+          payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          versions = payload.get("versions")
+          if (
+              not isinstance(versions, list)
+              or len(versions) != 1
+              or not isinstance(versions[0], dict)
+              or float(versions[0].get("percentage", -1)) != 100.0
+          ):
+              raise SystemExit("history deploy requires one exact 100% rollback version")
+          version_id = str(versions[0].get("version_id") or "")
+          uuid.UUID(version_id)
+          print(version_id)
+          PY
+              )"
+              history_deploy_attempted=0
+              rollback_history_deploy() {
+                exit_code="$?"
+                trap - ERR
+                if [ "${history_deploy_attempted}" = "1" ]; then
+                  echo "History publication failed; restoring Worker ${rollback_version}" >&2
+                  CLOUDFLARE_API_TOKEN='${{ secrets.CLOUDFLARE_API_TOKEN }}' \
+                    npx --no-install wrangler rollback "${rollback_version}" \
+                    --name xuangu --yes \
+                    --message "rollback failed history settlement github:${GITHUB_SHA} run:${GITHUB_RUN_ID}"
+                  restored="${RUNNER_TEMP}/history-rollback-result-${GITHUB_RUN_ID}.json"
+                  CLOUDFLARE_API_TOKEN='${{ secrets.CLOUDFLARE_API_TOKEN }}' \
+                    npx --no-install wrangler deployments status --name xuangu --json > "${restored}"
+                  EXPECTED_ROLLBACK_VERSION="${rollback_version}" python - "${restored}" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          versions = payload.get("versions")
+          expected = os.environ["EXPECTED_ROLLBACK_VERSION"]
+          if (
+              not isinstance(versions, list)
+              or len(versions) != 1
+              or versions[0].get("version_id") != expected
+              or float(versions[0].get("percentage", -1)) != 100.0
+          ):
+              raise SystemExit("history deployment rollback did not restore the exact prior version")
+          PY
+                fi
+                exit "${exit_code}"
+              }
+              trap rollback_history_deploy ERR
+              if [ "${ENABLE_R2_DATA_PUBLISH:-0}" = "1" ]; then
+                echo "R2 publication is fail-closed until the alias and Worker can roll back atomically." >&2
+                exit 1
+              fi
+              history_deploy_attempted=1
+              CLOUDFLARE_API_TOKEN='${{ secrets.CLOUDFLARE_API_TOKEN }}' \
+                npx --no-install wrangler deploy \
+                --message "history settlement github:${GITHUB_SHA} run:${GITHUB_RUN_ID}"
+              python scripts/verify_deployment.py public/data/picks/latest.json \
+                --base-url https://xuangu.alixjd.com \
+                --attempts 8 --delay-seconds 8 --timeout-seconds 15
+              python - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          expected = json.load(open("public/data/picks/manifest.json", encoding="utf-8"))
+          expected_untracked = int(
+              ((expected.get("history_evaluation") or {}).get("observation_performance") or {}).get("untracked_count")
+              or 0
+          )
+          last_error = "history endpoint did not converge"
+          for attempt in range(1, 13):
+              try:
+                  request = urllib.request.Request(
+                      "https://xuangu.alixjd.com/api/history?page=1&limit=1",
+                      headers={"Accept": "application/json", "Cache-Control": "no-cache"},
+                  )
+                  with urllib.request.urlopen(request, timeout=15) as response:
+                      live = json.loads(response.read().decode("utf-8"))
+                  actual = int(
+                      ((live.get("history_evaluation") or {}).get("observation_performance") or {}).get("untracked_count")
+                      or 0
+                  )
+                  if live.get("ok") is True and actual == expected_untracked == 0:
+                      print("History settlement publication reached untracked_count=0.")
+                      break
+                  last_error = f"untracked_count expected={expected_untracked} actual={actual}"
+              except (OSError, ValueError, TypeError) as exc:
+                  last_error = str(exc)
+              if attempt < 12:
+                  time.sleep(10)
+          else:
+              raise SystemExit(f"history settlement publication verification failed: {last_error}")
+          PY
+              trap - ERR
+            )
           }
 
           for attempt in 1 2 3; do
@@ -105,7 +247,9 @@ jobs:
               continue
             fi
 
-            if ! settle_and_validate "${settlement_tree}"; then
+            settle_and_validate "${settlement_tree}"
+            settlement_status="$?"
+            if ((settlement_status != 0)); then
               echo "Observation settlement or validation failed on attempt ${attempt}" >&2
               git worktree remove --force "${settlement_tree}"
               sleep "$((attempt * 5))"
@@ -118,6 +262,8 @@ jobs:
             done < <(
               find "${settlement_tree}/data/outcomes/observation-settlements" \
                 -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null
+              find "${settlement_tree}/data/outcomes/rule-settlements" \
+                -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null
             )
             if ((${#settlement_files[@]})); then
               git -C "${settlement_tree}" add -- "${settlement_files[@]}"
@@ -126,6 +272,7 @@ jobs:
             while IFS= read -r staged_path; do
               case "${staged_path}" in
                 data/outcomes/observation-settlements/*.json) ;;
+                data/outcomes/rule-settlements/*.json) ;;
                 *)
                   echo "Refusing to commit non-observation JSON: ${staged_path}" >&2
                   git worktree remove --force "${settlement_tree}"
@@ -136,6 +283,13 @@ jobs:
 
             if git -C "${settlement_tree}" diff --cached --quiet; then
               echo "Observation settlements are already current."
+              publish_history_only "${settlement_tree}"
+              history_publish_status="$?"
+              if ((history_publish_status != 0)); then
+                echo "History-only publication failed after current settlement validation" >&2
+                git worktree remove --force "${settlement_tree}"
+                exit 1
+              fi
               git worktree remove "${settlement_tree}"
               exit 0
             fi
@@ -162,13 +316,22 @@ jobs:
             # A clean Git rebase is not sufficient: cohort and settlement live
             # in different files and can merge without a textual conflict. Join
             # them again against the rebased main before allowing the push.
-            if ! validate_only "${settlement_tree}"; then
+            validate_only "${settlement_tree}"
+            post_rebase_validation_status="$?"
+            if ((post_rebase_validation_status != 0)); then
               echo "Observation settlement join changed after rebase on attempt ${attempt}" >&2
               git worktree remove --force "${settlement_tree}"
               sleep "$((attempt * 5))"
               continue
             fi
-            if git -C "${settlement_tree}" push origin HEAD:main; then
+            if push_with_scoped_token "${settlement_tree}"; then
+              publish_history_only "${settlement_tree}"
+              history_publish_status="$?"
+              if ((history_publish_status != 0)); then
+                echo "Settlement commit succeeded but history-only publication failed" >&2
+                git worktree remove --force "${settlement_tree}"
+                exit 1
+              fi
               git worktree remove "${settlement_tree}"
               echo "Observation settlements published successfully."
               exit 0

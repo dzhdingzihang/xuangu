@@ -39,6 +39,43 @@ def complete_price_loader(market: str, code: str):
 
 
 class ObservationOutcomeLedgerTests(unittest.TestCase):
+    def assert_invalid_stock_bars_are_pending(self, loader) -> None:
+        batch = outcomes.settle_observation_cohort(
+            observation_cohort(),
+            "2026-09-05T00:00:00Z",
+            loader,
+        )
+
+        self.assertEqual(batch["status_counts"], {"PENDING_DATA": 3})
+        for row in batch["outcomes"]:
+            self.assertEqual(row["status"], "PENDING_DATA")
+            self.assertEqual(row["reason_code"], "COMPLETE_ADJUSTED_BARS_MISSING")
+
+    def test_duplicate_stock_bar_date_fails_closed(self) -> None:
+        def duplicate_loader(market: str, code: str):
+            rows, source, adjusted = complete_price_loader(market, code)
+            return ([*rows, dict(rows[-1])], source, adjusted)
+
+        self.assert_invalid_stock_bars_are_pending(duplicate_loader)
+
+    def test_reverse_ordered_stock_bars_fail_closed(self) -> None:
+        def reverse_loader(market: str, code: str):
+            rows, source, adjusted = complete_price_loader(market, code)
+            return (list(reversed(rows)), source, adjusted)
+
+        self.assert_invalid_stock_bars_are_pending(reverse_loader)
+
+    def test_future_dated_stock_bar_fails_closed(self) -> None:
+        def future_loader(market: str, code: str):
+            rows, source, adjusted = complete_price_loader(market, code)
+            return (
+                [*rows, {"date": "2026-09-06", "open": 111.0, "close": 112.0}],
+                source,
+                adjusted,
+            )
+
+        self.assert_invalid_stock_bars_are_pending(future_loader)
+
     def test_immature_rows_are_pending_without_loading_prices(self) -> None:
         calls = []
         batch = outcomes.settle_observation_cohort(

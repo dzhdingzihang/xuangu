@@ -92,14 +92,14 @@ def runtime_snapshot_fixture() -> dict:
             "evaluated_candidates": [{"candidate_snapshot": pfe}] * 798,
             "blocker_codes": ["TEN_DAY_PROBABILITY_UNCALIBRATED"],
         },
-        "production_rule_inputs": {"contract_version": "production-rule-inputs-v1", "rows": [{}] * 798},
+        "production_rule_inputs": {"contract_version": "production-rule-inputs-v2", "rows": [{}] * 798},
         "production_decision": {
             "contract_version": "production-rule-10d-v1",
             "decision_scope": "global_10d_bounded_recall",
             "horizon_trade_days": 10,
             "action": "QUALIFIED_PICK",
-            "action_basis": "dual_track_candidate_qualification_v3",
-            "rule_model_id": "ten-day-audited-rule-ensemble-v3",
+            "action_basis": "dual_track_candidate_qualification_v4",
+            "rule_model_id": "ten-day-audited-rule-ensemble-v4",
             "score_kind": "RULE_QUALIFICATION_SCORE",
             "probability": None,
             "calibrated": False,
@@ -252,7 +252,7 @@ class BuildWorkerAssetsTests(unittest.TestCase):
                 "score_kind": "RULE_QUALIFICATION_SCORE",
                 "probability": None,
                 "calibrated": False,
-                "rule_model_id": "ten-day-audited-rule-ensemble-v3",
+                "rule_model_id": "ten-day-audited-rule-ensemble-v4",
                 "event_candidate_scanned": True,
                 "verified_positive_event_ids": ["event-1"],
                 "qualification_track": "event_catalyst",
@@ -267,9 +267,9 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         decision = {
             "contract_version": "production-rule-10d-v1",
             "decision_scope": "global_10d_bounded_recall",
-            "action_basis": "dual_track_candidate_qualification_v3",
+            "action_basis": "dual_track_candidate_qualification_v4",
             "action": "QUALIFIED_PICK",
-            "rule_model_id": "ten-day-audited-rule-ensemble-v3",
+            "rule_model_id": "ten-day-audited-rule-ensemble-v4",
             "score_kind": "RULE_QUALIFICATION_SCORE",
             "probability": None,
             "calibrated": False,
@@ -339,33 +339,43 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         self.assertIsNotNone(archived_summary)
         self.assertEqual(archived_summary["rule_model_id"], "ten-day-audited-rule-ensemble-v2")
 
-        v3_decision = {
+        v4_decision = {
             **decision,
-            "action_basis": "dual_track_candidate_qualification_v3",
-            "rule_model_id": "ten-day-audited-rule-ensemble-v3",
+            "action_basis": "dual_track_candidate_qualification_v4",
+            "rule_model_id": "ten-day-audited-rule-ensemble-v4",
             "action": "NO_QUALIFIED_PICK",
             "qualified_candidate_count": 0,
             "primary": None,
             "qualified_candidates": [],
         }
-        current_v3 = {
+        current_v4 = {
             **mismatched,
-            "production_decision": v3_decision,
+            "production_decision": v4_decision,
         }
-        self.assertIsNotNone(build_worker_assets.summarize_production_decision(current_v3))
+        self.assertIsNotNone(build_worker_assets.summarize_production_decision(current_v4))
 
-        archived_with_v3 = {
-            **current_v3,
+        archived_with_v4 = {
+            **current_v4,
             "model_version": "smart-selector-2026-08-26.1-candidate-rule",
         }
-        self.assertIsNone(build_worker_assets.summarize_production_decision(archived_with_v3))
+        self.assertIsNone(build_worker_assets.summarize_production_decision(archived_with_v4))
         with tempfile.TemporaryDirectory() as directory:
-            path = pathlib.Path(directory) / "archived-v3.json"
-            path.write_text(json.dumps(archived_with_v3), encoding="utf-8")
+            path = pathlib.Path(directory) / "archived-v4.json"
+            path.write_text(json.dumps(archived_with_v4), encoding="utf-8")
             summary = build_worker_assets.summarize_pick(path)
         self.assertIsNone(summary["production_decision"])
         self.assertEqual(summary["production_action"], "NO_QUALIFIED_PICK")
         self.assertIsNone(summary["qualification_history_kind"])
+
+        historical_v3 = {
+            **archived_with_v4,
+            "production_decision": {
+                **v4_decision,
+                "action_basis": "dual_track_candidate_qualification_v3",
+                "rule_model_id": "ten-day-audited-rule-ensemble-v3",
+            },
+        }
+        self.assertIsNotNone(build_worker_assets.summarize_production_decision(historical_v3))
 
     def test_full_worker_snapshots_are_bounded_to_representative_decision_days(self) -> None:
         summaries = []
@@ -1287,6 +1297,129 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         self.assertEqual(ui_events["source_snapshot"], runtime["source_snapshot"])
         self.assertLess(len(json.dumps(runtime)), len(source_bytes) // 10)
         self.assertLess(len(json.dumps(live_index)), len(source_bytes) // 2)
+
+    def test_data_manifest_splits_small_list_and_identity_bound_details(self) -> None:
+        snapshot = runtime_snapshot_fixture()
+        snapshot["feature_cutoff_at"] = "2026-08-26T10:00:00+08:00"
+        snapshot["global_decision"]["event_coverage"] = {
+            "candidate_total": 800,
+            "negative_risk_scanned": 800,
+            "positive_event_deep_scanned": 48,
+            "by_market": {
+                "a_share": {"candidate_total": 300, "negative_risk_scanned": 300},
+                "hk": {"candidate_total": 200, "negative_risk_scanned": 200},
+                "us": {"candidate_total": 300, "negative_risk_scanned": 300},
+            },
+        }
+        snapshot["automation"].update(
+            {
+                "scheduled_slot": "2026-08-26T08:17:00+08:00",
+                "scheduled_invocation_slot": "2026-08-26T10:17:00+08:00",
+                "source_invocation_slot": "2026-08-26T08:17:00+08:00",
+                "scheduler_delay_seconds": 7200,
+                "recovery_mode": "late_cron_recovery",
+                "scheduler_health": {
+                    "contract_version": "scheduler-health-v1",
+                    "source_invocation_slot": "2026-08-26T08:17:00+08:00",
+                    "effective_checkpoint": "2026-08-26T08:17:00+08:00",
+                    "effective_invocation_slot": "2026-08-26T10:17:00+08:00",
+                    "scheduler_start_delay_seconds": 7200,
+                    "recovery_mode": "late_cron_recovery",
+                    "generation_started_at": "2026-08-26T10:17:02+08:00",
+                },
+            }
+        )
+        trade_plan = {
+            "contract_version": "ten-day-trade-plan-v1",
+            "status": "REVIEW_REQUIRED",
+            "horizon_trade_days": 10,
+            "reference_quote": {
+                "price": 28.0,
+                "currency": "USD",
+                "source": "scheduled_snapshot",
+                "source_as_of": "2026-08-26T10:00:00+08:00",
+                "quote_status": "closed",
+                "kind": "published_snapshot_quote",
+            },
+            "entry_zone": {"low": 27.72, "high": 28.14, "currency": "USD"},
+            "entry_trade_date": "2026-08-26",
+            "invalidation": {"price": 26.6, "currency": "USD", "source": "candidate_stop_loss"},
+            "target": {"price": 30.8, "currency": "USD", "source": "candidate_take_profit_reference"},
+            "position_limit": {
+                "max_single_name_weight_pct": 10.0,
+                "policy": "strategy_safety_cap_not_personalized",
+            },
+            "catalyst_expiry_date": None,
+            "review_end_trade_date": "2026-09-09",
+            "exit_rules": ["EXIT_IF_INVALIDATION_PRICE_BREACHED"],
+            "is_personalized_advice": False,
+        }
+        snapshot["production_decision"]["primary"]["ten_day_trade_plan"] = copy.deepcopy(trade_plan)
+        snapshot["production_decision"]["qualified_candidates"][0]["ten_day_trade_plan"] = copy.deepcopy(trade_plan)
+        source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+        latest_summary = {
+            "snapshot_key": snapshot["snapshot_key"],
+            "generated_at": snapshot["generated_at"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            data_root = pathlib.Path(directory) / "data"
+            picks = data_root / "picks"
+            build_worker_assets.write_worker_runtime_assets(
+                snapshot, latest_summary, source_bytes, picks
+            )
+            ui_assets = {
+                name: json.loads((picks / name).read_text(encoding="utf-8"))
+                for name in ("ui-bootstrap.json", "ui-candidates.json", "ui-events.json")
+            }
+            manifest = build_worker_assets.build_data_manifest_assets(
+                snapshot,
+                source_bytes,
+                ui_assets,
+                {"summaries": [], "history_evaluation": {}},
+                data_root,
+            )
+
+            self.assertEqual(manifest["contract_version"], "data-manifest-v1")
+            self.assertEqual(
+                manifest["scheduler_health"]["source_invocation_slot"],
+                "2026-08-26T08:17:00+08:00",
+            )
+            self.assertEqual(manifest["scheduler_health"]["scheduler_start_delay_seconds"], 7200)
+            self.assertNotEqual(manifest["scheduler_health"]["scheduler_start_delay_seconds"], 0)
+            self.assertEqual(manifest["scheduler_health"]["recovery_mode"], "late_cron_recovery")
+            self.assertIsNone(manifest["scheduler_health"]["missed_checkpoints_24h"])
+            self.assertEqual(
+                manifest["scheduler_health"]["checkpoint_coverage_status"],
+                "UNAVAILABLE_NO_COMPLETE_LEDGER",
+            )
+            self.assertLess(
+                manifest["assets"]["summary"]["byte_size"],
+                build_worker_assets.MAX_DATA_SUMMARY_BYTES,
+            )
+            self.assertLess(
+                manifest["assets"]["candidates"]["byte_size"],
+                build_worker_assets.MAX_DATA_CANDIDATE_LIST_BYTES,
+            )
+            candidate_list = json.loads((data_root / manifest["candidates_key"]).read_text())
+            self.assertTrue(candidate_list["candidates"])
+            self.assertEqual(
+                json.loads((data_root / manifest["summary_key"]).read_text())["feature_cutoff_at"],
+                snapshot["feature_cutoff_at"],
+            )
+            runtime_payload = json.loads((data_root / manifest["runtime_key"]).read_text())
+            self.assertEqual(
+                runtime_payload["global_decision"]["event_coverage"],
+                snapshot["global_decision"]["event_coverage"],
+            )
+            pfe_row = next(row for row in candidate_list["candidates"] if row["code"] == "PFE")
+            self.assertEqual(pfe_row["ten_day_trade_plan"], trade_plan)
+            candidate_id = candidate_list["candidates"][0]["id"]
+            detail = json.loads(
+                (data_root / manifest["candidate_detail_keys"][candidate_id]).read_text()
+            )
+            self.assertEqual(detail["id"], candidate_id)
+            self.assertEqual(detail["snapshot_key"], manifest["snapshot_key"])
+            self.assertEqual(detail["source_snapshot"]["sha256"], manifest["snapshot_sha256"])
 
 
 if __name__ == "__main__":

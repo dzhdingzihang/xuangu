@@ -13,6 +13,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
@@ -22,6 +23,7 @@ MODEL_ID = "ten-day-excess-rank-shadow-v2"
 LABEL_VERSION = "r10-net-excess-return-v2"
 FEATURE_SCHEMA_VERSION = "point-in-time-technical-d1-v2"
 TRAINING_PROVENANCE = "point_in_time_universe_ledger"
+ARTIFACT_CONTRACT_VERSION = "ten-day-rank-artifact-v2"
 HORIZON_SESSIONS = 10
 MIN_TRAIN_DAYS = 100
 TEST_BLOCK_DAYS = 20
@@ -224,6 +226,14 @@ class RankSample:
     exit_date: str
     features: tuple[float, ...]
     label: ExcessReturnLabel
+    # Optional audit metadata added by the immutable ledger join.  Defaults
+    # preserve the original public constructor used by research tests/tools.
+    feature_records: tuple[dict[str, Any], ...] = ()
+    provenance_sha256: str = ""
+    market_regime: str = "unknown"
+    source_observation_id: str = ""
+    currency: str = ""
+    transaction_cost_version: str = ""
 
     def __post_init__(self) -> None:
         if self.market not in REGISTERED_BENCHMARKS or self.label.market != self.market:
@@ -239,6 +249,13 @@ class RankSample:
             raise ValueError("sample code is required")
         if not self.features or not all(_finite(value) for value in self.features):
             raise ValueError("sample features must be finite and non-empty")
+        if self.feature_records and len(self.features) != len(self.feature_records) * 2:
+            raise ValueError("audited sample features must contain value/missingness pairs")
+        if self.provenance_sha256 and (
+            len(self.provenance_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.provenance_sha256)
+        ):
+            raise ValueError("sample provenance hash is invalid")
 
 
 def _sample_date(sample: Any) -> str:
@@ -246,14 +263,18 @@ def _sample_date(sample: Any) -> str:
 
 
 def date_equal_weights(samples: Sequence[Any]) -> tuple[float, ...]:
-    """Give every signal date equal total weight without dropping any row."""
+    """Give every signal-date/market cell equal mass without dropping rows."""
 
-    counts = Counter(_sample_date(sample) for sample in samples)
+    def cell(sample: Any) -> tuple[str, str]:
+        market = str(sample.market if hasattr(sample, "market") else sample.get("market"))
+        return _sample_date(sample), market
+
+    counts = Counter(cell(sample) for sample in samples)
     if not samples or not counts:
         return ()
     sample_count = len(samples)
-    date_count = len(counts)
-    return tuple(sample_count / (date_count * counts[_sample_date(sample)]) for sample in samples)
+    cell_count = len(counts)
+    return tuple(sample_count / (cell_count * counts[cell(sample)]) for sample in samples)
 
 
 @dataclass(frozen=True)
@@ -562,7 +583,7 @@ def _expected_shortfall(values: Sequence[float], fraction: float = 0.10) -> floa
 
 
 def daily_ranking_metrics(records: Sequence[dict]) -> dict:
-    """Evaluate ranking within each signal date, then weight dates equally."""
+    """Rank inside each date-market cell, then weight cells equally."""
 
     if not records:
         return {}
@@ -571,12 +592,15 @@ def daily_ranking_metrics(records: Sequence[dict]) -> dict:
         "net_excess_return",
         "stock_net_return",
     )
-    groups: dict[str, list[dict]] = defaultdict(list)
+    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for record in records:
         if not isinstance(record, dict) or not all(_finite(record.get(field)) for field in required):
             raise ValueError("ranking record is incomplete or non-finite")
         date_text = _iso_date(record.get("signal_date"), "ranking.signal_date")
-        groups[date_text].append(record)
+        market = str(record.get("market") or "")
+        if market not in REGISTERED_BENCHMARKS:
+            raise ValueError("ranking record market is invalid")
+        groups[(date_text, market)].append(record)
 
     daily_ic: list[float] = []
     daily_top_excess: list[float] = []
@@ -584,8 +608,8 @@ def daily_ranking_metrics(records: Sequence[dict]) -> dict:
     daily_top1_excess: list[float] = []
     daily_top1_stock: list[float] = []
     daily_spreads: list[float] = []
-    for date_text in sorted(groups):
-        rows = groups[date_text]
+    for cell in sorted(groups):
+        rows = groups[cell]
         predicted = [float(row["predicted_net_excess_return"]) for row in rows]
         realized = [float(row["net_excess_return"]) for row in rows]
         ic = _pearson(_average_ranks(predicted), _average_ranks(realized))
@@ -615,10 +639,12 @@ def daily_ranking_metrics(records: Sequence[dict]) -> dict:
     result = {
         "test_row_count": len(records),
         "independent_test_date_count": len(groups),
+        "independent_test_date_market_cell_count": len(groups),
+        "distinct_test_date_count": len({date_text for date_text, _market in groups}),
         "ic_date_count": len(daily_ic),
-        "validation_weighting": "signal_date_equal_weight_v2",
-        "ranking_policy": "per_signal_date_expected_net_excess_desc_v2",
-        "top_decile_policy": "per_signal_date_top_ceil_10pct_then_date_mean_v2",
+        "validation_weighting": "signal_date_market_equal_weight_v3",
+        "ranking_policy": "per_signal_date_market_expected_net_excess_desc_v3",
+        "top_decile_policy": "per_signal_date_market_top_ceil_10pct_then_cell_mean_v3",
         "mean_daily_spearman_ic": round(_mean(daily_ic), 8) if daily_ic else None,
         "mean_top_decile_net_excess_return": round(_mean(daily_top_excess), 8),
         "mean_top_decile_stock_net_return": round(_mean(daily_top_stock), 8),
@@ -648,13 +674,27 @@ def build_collecting_contract(
     *,
     validation: dict | None = None,
     fold_count: int = 0,
+    collection_diagnostics: dict | None = None,
+    additional_reason_codes: Sequence[str] = (),
 ) -> dict:
     """Publish v2 collection progress without any path to self-authorization."""
 
     dates = sorted({sample.signal_date for sample in samples})
     validation = dict(validation or {})
     json.dumps(validation, sort_keys=True, allow_nan=False)
+    additional = [str(code) for code in additional_reason_codes if str(code)]
+    collection_reason = (
+        None
+        if "POINT_IN_TIME_LEDGER_INVALID" in additional
+        else "POINT_IN_TIME_LEDGER_EMPTY" if not samples else "POINT_IN_TIME_HISTORY_ACCUMULATING"
+    )
+    reason_codes = list(dict.fromkeys([
+        *([collection_reason] if collection_reason else []),
+        "PRODUCTION_PROMOTION_REQUIRES_SEPARATE_AUTHORITY",
+        *additional,
+    ]))
     identity = {
+        "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
         "model_id": MODEL_ID,
         "label_version": LABEL_VERSION,
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -665,11 +705,12 @@ def build_collecting_contract(
         "signal_date_count": len(dates),
         "fold_count": int(fold_count),
         "validation": validation,
+        "reason_codes": reason_codes,
     }
-    reason_codes = [
-        "POINT_IN_TIME_LEDGER_EMPTY" if not samples else "POINT_IN_TIME_HISTORY_ACCUMULATING",
-        "PRODUCTION_PROMOTION_REQUIRES_SEPARATE_AUTHORITY",
-    ]
+    if collection_diagnostics is not None:
+        diagnostics = dict(collection_diagnostics)
+        json.dumps(diagnostics, sort_keys=True, allow_nan=False)
+        identity["collection_diagnostics"] = diagnostics
     result = {
         **identity,
         "status": "COLLECTING",
@@ -697,7 +738,322 @@ def build_collecting_contract(
     return result
 
 
+def _percentile(values: Sequence[float], probability: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    position = (len(ordered) - 1) * probability
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def block_bootstrap_confidence_intervals(
+    records: Sequence[dict],
+    *,
+    repetitions: int = 400,
+    block_size: int = 5,
+) -> dict[str, Any]:
+    """Deterministic moving-block intervals over chronological date-market cells."""
+
+    if not records:
+        return {}
+    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for record in records:
+        groups[(str(record["signal_date"]), str(record["market"]))].append(record)
+    cells = sorted(groups)
+    if not cells:
+        return {}
+    block_size = max(1, min(int(block_size), len(cells)))
+    # Reduce each complete cross-section to the quantities that are averaged
+    # across cells by ``daily_ranking_metrics``.  Resampling raw rows would
+    # overweight large cross-sections and, after a length-based slice, could
+    # include only part of the last sampled cell.  It would also merge a cell
+    # selected more than once back into one date/market group.
+    cell_metrics = {
+        cell: daily_ranking_metrics(groups[cell])
+        for cell in cells
+    }
+    rng = random.Random(20260829)
+    metrics: dict[str, list[float]] = defaultdict(list)
+    for _ in range(max(1, int(repetitions))):
+        sampled_cells: list[tuple[str, str]] = []
+        while len(sampled_cells) < len(cells):
+            start = rng.randrange(len(cells))
+            for offset in range(block_size):
+                sampled_cells.append(cells[(start + offset) % len(cells)])
+                if len(sampled_cells) >= len(cells):
+                    break
+        sampled = [cell_metrics[cell] for cell in sampled_cells]
+        ic_values = [
+            float(value["mean_daily_spearman_ic"])
+            for value in sampled
+            if _finite(value.get("mean_daily_spearman_ic"))
+        ]
+        if ic_values:
+            metrics["mean_daily_spearman_ic"].append(_mean(ic_values))
+        for name in (
+            "mean_top1_net_excess_return",
+            "mean_top_decile_net_excess_return",
+        ):
+            metrics[name].append(_mean([float(value[name]) for value in sampled]))
+        metrics["top_decile_stock_expected_shortfall_10pct"].append(
+            _expected_shortfall(
+                [float(value["mean_top_decile_stock_net_return"]) for value in sampled]
+            )
+        )
+    return {
+        name: {
+            "lower": round(float(_percentile(values, 0.025)), 8),
+            "upper": round(float(_percentile(values, 0.975)), 8),
+            "confidence": 0.95,
+            "method": "deterministic_moving_block_bootstrap_date_market_v1",
+            "resampling_unit": "complete_date_market_cell",
+            "block_size": block_size,
+            "repetitions": max(1, int(repetitions)),
+        }
+        for name, values in sorted(metrics.items())
+        if values
+    }
+
+
+def fit_walk_forward(
+    samples: Sequence[RankSample],
+    *,
+    min_train_days: int = MIN_TRAIN_DAYS,
+    test_block_days: int = TEST_BLOCK_DAYS,
+    collection_diagnostics: dict | None = None,
+) -> dict[str, Any]:
+    """Publish real collection progress or an isolated Shadow validation artifact.
+
+    Each market is fitted independently.  Walk-forward folds purge by the
+    actual label exit, and the last complete date block is kept out of all
+    model selection as a final holdout.  The artifact remains incapable of
+    authorizing production regardless of metric values.
+    """
+
+    ordered = sorted(samples, key=lambda row: (row.signal_date, row.market, row.code))
+    seen: set[tuple[str, str, str]] = set()
+    for sample in ordered:
+        identity = (sample.signal_date, sample.market, sample.code)
+        if identity in seen:
+            raise ValueError("duplicate date-market-symbol rank sample")
+        seen.add(identity)
+    dates = sorted({sample.signal_date for sample in ordered})
+    market_date_counts = {
+        market: len({sample.signal_date for sample in ordered if sample.market == market})
+        for market in REGISTERED_BENCHMARKS
+    }
+    collection_validation = {
+        "schema_version": "ten-day-rank-validation-v1",
+        "metric_version": "rank-metrics-date-market-v3",
+        "sample_count": len(ordered),
+        "signal_date_count": len(dates),
+        "market_signal_date_counts": market_date_counts,
+        "actual_exit_purge": True,
+        "date_market_equal_weighting": True,
+        "final_untouched_holdout": True,
+    }
+    if not ordered or max(market_date_counts.values(), default=0) < min_train_days + test_block_days:
+        return build_collecting_contract(
+            ordered,
+            validation=collection_validation,
+            fold_count=0,
+            collection_diagnostics=collection_diagnostics,
+        )
+
+    oof_records: list[dict[str, Any]] = []
+    holdout_records: list[dict[str, Any]] = []
+    fold_count = 0
+    holdout_dates_by_market: dict[str, list[str]] = {}
+    per_market: dict[str, Any] = {}
+    for market in REGISTERED_BENCHMARKS:
+        market_rows = [sample for sample in ordered if sample.market == market]
+        market_dates = sorted({sample.signal_date for sample in market_rows})
+        if len(market_dates) < min_train_days + test_block_days:
+            per_market[market] = {
+                "status": "COLLECTING",
+                "sample_count": len(market_rows),
+                "signal_date_count": len(market_dates),
+            }
+            continue
+        holdout_dates = market_dates[-test_block_days:]
+        holdout_start = holdout_dates[0]
+        development = [sample for sample in market_rows if sample.signal_date < holdout_start]
+        predictions, folds = walk_forward_predictions(
+            development,
+            min_train_days=min_train_days,
+            test_block_days=test_block_days,
+        )
+        if not predictions or not folds:
+            per_market[market] = {
+                "status": "COLLECTING",
+                "sample_count": len(market_rows),
+                "signal_date_count": len(market_dates),
+                "reason": "OUT_OF_FOLD_BLOCK_NOT_YET_AVAILABLE_AFTER_PURGE",
+            }
+            continue
+        safe_train = [
+            sample
+            for sample in development
+            if sample.exit_date < holdout_start
+        ]
+        if len({sample.signal_date for sample in safe_train}) < min_train_days:
+            per_market[market] = {
+                "status": "COLLECTING",
+                "sample_count": len(market_rows),
+                "signal_date_count": len(market_dates),
+                "reason": "FINAL_HOLDOUT_PURGE_LEAVES_TOO_FEW_TRAIN_DAYS",
+            }
+            continue
+        final_model = fit_date_equal_ridge(safe_train)
+        market_holdout = [sample for sample in market_rows if sample.signal_date in set(holdout_dates)]
+        market_holdout_records = [
+            {
+                "fold_id": "final_holdout",
+                "market": sample.market,
+                "code": sample.code,
+                "signal_date": sample.signal_date,
+                "predicted_net_excess_return": final_model.predict(sample.features),
+                "net_excess_return": sample.label.net_excess_return,
+                "stock_net_return": sample.label.stock_net_return,
+                "benchmark_net_return": sample.label.benchmark_net_return,
+            }
+            for sample in market_holdout
+        ]
+        oof_records.extend(predictions)
+        holdout_records.extend(market_holdout_records)
+        fold_count += len(folds)
+        holdout_dates_by_market[market] = holdout_dates
+        per_market[market] = {
+            "status": "SHADOW_READY",
+            "sample_count": len(market_rows),
+            "signal_date_count": len(market_dates),
+            "fold_count": len(folds),
+            "out_of_fold": daily_ranking_metrics(predictions),
+            "final_holdout": daily_ranking_metrics(market_holdout_records),
+        }
+    if not holdout_records:
+        return build_collecting_contract(
+            ordered,
+            validation={**collection_validation, "per_market": per_market},
+            fold_count=fold_count,
+            collection_diagnostics=collection_diagnostics,
+        )
+
+    validation_records = [*oof_records, *holdout_records]
+    sample_lookup = {
+        (sample.signal_date, sample.market, sample.code): sample for sample in ordered
+    }
+    regime_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in validation_records:
+        sample = sample_lookup[(record["signal_date"], record["market"], record["code"])]
+        regime_groups[sample.market_regime or "unknown"].append(record)
+    validation = {
+        **collection_validation,
+        "walk_forward": daily_ranking_metrics(oof_records),
+        "final_holdout": daily_ranking_metrics(holdout_records),
+        "combined_shadow": daily_ranking_metrics(validation_records),
+        "block_bootstrap_95pct": block_bootstrap_confidence_intervals(validation_records),
+        "per_market": per_market,
+        "per_regime": {
+            regime: daily_ranking_metrics(records)
+            for regime, records in sorted(regime_groups.items())
+        },
+        "holdout_dates_by_market": holdout_dates_by_market,
+        "coverage": round(len(validation_records) / len(ordered), 8),
+        "thresholds": {
+            "minimum_independent_training_days": min_train_days,
+            "minimum_final_holdout_days": test_block_days,
+            "minimum_mean_top1_net_excess_return": 0.0,
+            "minimum_mean_daily_spearman_ic": 0.0,
+            "minimum_coverage": 0.70,
+            "maximum_top_decile_stock_expected_shortfall_10pct": -0.15,
+            "promotion_authority": "separate_manual_governance_only",
+        },
+    }
+    final_metrics = validation["final_holdout"]
+    diagnostics = dict(collection_diagnostics or {})
+    data_completeness_gate_passed = bool(
+        collection_diagnostics is not None
+        and not diagnostics.get("error_type")
+        and int(diagnostics.get("excluded_missing_outcome_batch_count", 0)) == 0
+        and int(diagnostics.get("excluded_invalid_revision_count", 0)) == 0
+        and int(diagnostics.get("excluded_unbound_snapshot_count", 0)) == 0
+        and int(diagnostics.get("excluded_missing_rank_label_count", 0)) == 0
+        and int(diagnostics.get("excluded_missing_snapshot_count", 0)) == 0
+        and int(diagnostics.get("excluded_invalid_feature_count", 0)) == 0
+        and int(diagnostics.get("excluded_pending_data_outcome_count", 0)) == 0
+        and int(diagnostics.get("excluded_other_unsettled_outcome_count", 0)) == 0
+        and int(diagnostics.get("excluded_data_incomplete_market_cell_count", 0)) == 0
+    )
+    promotion_gate_passed = bool(
+        _finite(final_metrics.get("mean_top1_net_excess_return"))
+        and float(final_metrics["mean_top1_net_excess_return"]) > 0
+        and _finite(final_metrics.get("mean_daily_spearman_ic"))
+        and float(final_metrics["mean_daily_spearman_ic"]) > 0
+        and _finite(final_metrics.get("top_decile_stock_expected_shortfall_10pct"))
+        and float(final_metrics["top_decile_stock_expected_shortfall_10pct"]) >= -0.15
+        and validation["coverage"] >= 0.70
+        and data_completeness_gate_passed
+    )
+    validation["data_completeness_gate_passed"] = data_completeness_gate_passed
+    identity = {
+        "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
+        "model_id": MODEL_ID,
+        "label_version": LABEL_VERSION,
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "training_provenance": TRAINING_PROVENANCE,
+        "benchmark_registry": REGISTERED_BENCHMARKS,
+        "fixed_ridge_l2": FIXED_RIDGE_L2,
+        "sample_count": len(ordered),
+        "signal_date_count": len(dates),
+        "fold_count": fold_count,
+        "validation": validation,
+        "out_of_fold_predictions": validation_records,
+        "reason_codes": [
+            "SHADOW_VALIDATION_ONLY",
+            "PRODUCTION_PROMOTION_REQUIRES_SEPARATE_AUTHORITY",
+        ],
+    }
+    if collection_diagnostics is not None:
+        diagnostics = dict(collection_diagnostics)
+        json.dumps(diagnostics, sort_keys=True, allow_nan=False)
+        identity["collection_diagnostics"] = diagnostics
+    result = {
+        **identity,
+        "status": "SHADOW_READY",
+        "target": "ten_session_net_excess_return",
+        "horizon_sessions": HORIZON_SESSIONS,
+        "sampling_policy": "all_valid_point_in_time_rows_date_market_equal_weight_v3",
+        "validation_method": "expanding_walk_forward_actual_exit_purge_final_holdout_v3",
+        "minimum_train_days": min_train_days,
+        "test_block_days": test_block_days,
+        "first_signal_date": dates[0],
+        "last_signal_date": dates[-1],
+        "calibrated": False,
+        "costs_ready": True,
+        "tail_risk_ready": True,
+        "participates_in_decision": False,
+        "production_eligible": False,
+        "promotion_gate_passed": promotion_gate_passed,
+        "promotion_authorized": False,
+        "probability": None,
+        "expected_net_return": None,
+        "expected_net_excess_return": None,
+        "shadow_predictions": validation_records,
+        "reason_codes": identity["reason_codes"],
+        "artifact_sha256": _artifact_hash(identity),
+    }
+    json.dumps(result, sort_keys=True, allow_nan=False)
+    return result
+
+
 __all__ = [
+    "ARTIFACT_CONTRACT_VERSION",
     "ExcessReturnLabel",
     "FIXED_RIDGE_L2",
     "HORIZON_SESSIONS",
@@ -711,11 +1067,13 @@ __all__ = [
     "TRAINING_PROVENANCE",
     "WalkForwardFold",
     "build_collecting_contract",
+    "block_bootstrap_confidence_intervals",
     "daily_ranking_metrics",
     "date_equal_weights",
     "expanding_walk_forward_splits",
     "fit_date_equal_ridge",
     "fit_weighted_ridge",
+    "fit_walk_forward",
     "ten_session_excess_label",
     "walk_forward_predictions",
 ]

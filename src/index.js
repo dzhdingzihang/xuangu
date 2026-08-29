@@ -33,6 +33,16 @@ const FALLBACK_CHECKPOINTS = [
 const SCHEDULED_REFRESH_CHECKPOINTS = [...WEEKDAY_CHECKPOINTS, ...FALLBACK_CHECKPOINTS]
   .sort(([leftHour, leftMinute], [rightHour, rightMinute]) =>
     leftHour * 60 + leftMinute - (rightHour * 60 + rightMinute));
+const CLOUDFLARE_PRIMARY_UTC_SCHEDULES = [
+  { minute: 17, hours: [0, 2, 4, 7, 8, 12] },
+  { minute: 47, hours: [14] },
+  { minute: 17, hours: [20, 21], newYorkHour: 16 },
+];
+const GITHUB_WATCHDOG_UTC_SCHEDULES = [
+  { minute: 47, hours: [0, 2, 4, 7, 8, 12] },
+  { minute: 17, hours: [15] },
+  { minute: 47, hours: [20, 21], newYorkHour: 16 },
+];
 const LIVE_MARKETS = new Set(["a_share", "hk", "us"]);
 const LIVE_CACHE_TTL_MS = 10_000;
 const WORKER_RUNTIME_CONTRACT_VERSION = "worker-runtime-v1";
@@ -40,6 +50,10 @@ const WORKER_LIVE_INDEX_CONTRACT_VERSION = "worker-live-index-v1";
 const WORKER_UI_BOOTSTRAP_CONTRACT_VERSION = "ui-bootstrap-v1";
 const WORKER_UI_CANDIDATES_CONTRACT_VERSION = "ui-candidates-v1";
 const WORKER_UI_EVENTS_CONTRACT_VERSION = "ui-events-v1";
+const DATA_MANIFEST_CONTRACT_VERSION = "data-manifest-v1";
+const DATA_MANIFEST_KEY = "latest-manifest.json";
+const EMBEDDED_DATA_MANIFEST_PATH = "/data/latest-manifest.json";
+const DATA_ASSET_NAMES = new Set(["runtime", "live_index", "summary", "candidates", "events", "history"]);
 const WORKER_RUNTIME_PATH = "/data/picks/runtime.json";
 const WORKER_LIVE_INDEX_PATH = "/data/picks/live-index.json";
 const WORKER_UI_BOOTSTRAP_PATH = "/data/picks/ui-bootstrap.json";
@@ -50,12 +64,16 @@ const WORKER_LIVE_INDEX_BYTE_SIZE_LIMIT = 524_288;
 const MAX_QUALIFIED_SUMMARY_CANDIDATES = 20;
 const GITHUB_WORKFLOW_DISPATCH_URL = "https://api.github.com/repos/dzhdingzihang/xuangu/actions/workflows/deploy-worker.yml/dispatches";
 const CLOUDFLARE_SCHEDULED_CRONS = new Map([
-  ["17 0,2,4,7,8,12,15 * * MON-FRI", { minute: 17, hours: new Set([0, 2, 4, 7, 8, 12, 15]) }],
-  ["47 0,2,4,7,8,12,14 * * MON-FRI", { minute: 47, hours: new Set([0, 2, 4, 7, 8, 12, 14]) }],
+  ["17 0,2,4,7,8,12 * * MON-FRI", { minute: 17, hours: new Set([0, 2, 4, 7, 8, 12]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5" }],
+  ["47 14 * * MON-FRI", { minute: 47, hours: new Set([14]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5" }],
+  ["17 20 * * MON-FRI", { minute: 17, hours: new Set([20]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5", newYorkHour: 16 }],
+  ["17 21 * * MON-FRI", { minute: 17, hours: new Set([21]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5", newYorkHour: 16 }],
 ]);
-const CURRENT_PRODUCTION_MODEL_VERSION = "smart-selector-2026-08-26.2-dual-track-rule";
+const CURRENT_PRODUCTION_MODEL_VERSION = "smart-selector-2026-08-29.1-two-tier-rule";
 const PRODUCTION_RULE_V3_ACTION_BASIS = "dual_track_candidate_qualification_v3";
 const PRODUCTION_RULE_V3_MODEL_ID = "ten-day-audited-rule-ensemble-v3";
+const PRODUCTION_RULE_V4_ACTION_BASIS = "dual_track_candidate_qualification_v4";
+const PRODUCTION_RULE_V4_MODEL_ID = "ten-day-audited-rule-ensemble-v4";
 const PRODUCTION_MODEL_AVAILABILITY_BLOCKERS = new Set([
   "TEN_DAY_MODEL_NOT_READY",
   "TEN_DAY_PREDICTION_MISSING",
@@ -66,9 +84,9 @@ const PRODUCTION_EVENT_MARKET_POLICY = {
   us: { minimumLegacy: 64, maximumDownside: 10, minimumUpside: 6 },
 };
 const PRODUCTION_QUALITY_MARKET_POLICY = {
-  a_share: { minimumLegacy: 66, maximumDownside: 6, minimumUpside: 6 },
+  a_share: { minimumLegacy: 64, maximumDownside: 6, minimumUpside: 6 },
   hk: { minimumLegacy: 67, maximumDownside: 6, minimumUpside: 6 },
-  us: { minimumLegacy: 68, maximumDownside: 7.5, minimumUpside: 6.5 },
+  us: { minimumLegacy: 67, maximumDownside: 7.5, minimumUpside: 6.5 },
 };
 const PRODUCTION_EVENT_MAX_RANK_FRACTION = 0.20;
 const PRODUCTION_EVENT_MIN_RISK_REWARD = 1.20;
@@ -110,6 +128,31 @@ function json(payload, status = 200, extraHeaders = {}) {
     status,
     headers: { ...JSON_HEADERS, ...extraHeaders },
   });
+}
+
+function quotedEtag(digest) {
+  return `"${String(digest || "")}"`;
+}
+
+function requestMatchesEtag(request, digest) {
+  const value = String(request.headers.get("if-none-match") || "");
+  if (!value || !digest) return false;
+  const wanted = quotedEtag(digest);
+  return value.split(",").map((item) => item.trim()).some((item) => item === wanted || item === "*");
+}
+
+function jsonWithEtag(request, payload, digest, cacheControl = "no-store") {
+  const headers = { etag: quotedEtag(digest), "cache-control": cacheControl };
+  if (requestMatchesEtag(request, digest)) return new Response(null, { status: 304, headers });
+  return json(payload, 200, headers);
+}
+
+async function derivedRepresentationDigest(assetDigest, variants) {
+  const normalized = Object.entries(variants || {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value ?? ""))}`)
+    .join("&");
+  return sha256Hex(new TextEncoder().encode(`${String(assetDigest || "")}|${normalized}`));
 }
 
 function nowCN() {
@@ -179,58 +222,85 @@ function checkpointIso(parts, checkpoint) {
 }
 
 export function nextScheduledRefresh(current = new Date()) {
-  const now = current instanceof Date ? current : new Date(current);
-  if (Number.isNaN(now.getTime())) return null;
-  const local = shanghaiDateParts(now);
-  const startDate = { year: local.year, month: local.month, day: local.day };
-  for (let dayOffset = 0; dayOffset <= 8; dayOffset += 1) {
-    const checkpointDate = shiftCalendarDate(startDate, dayOffset);
-    if (!isBusinessDay(checkpointDate)) continue;
-    for (const checkpoint of SCHEDULED_REFRESH_CHECKPOINTS) {
-      const [hour, minute] = checkpoint;
-      const epoch = Date.UTC(
-        checkpointDate.year,
-        checkpointDate.month - 1,
-        checkpointDate.day,
-        hour - 8,
-        minute,
-      );
-      if (epoch > now.getTime()) return checkpointIso(checkpointDate, checkpoint);
-    }
-  }
-  return null;
+  // Compatibility export: without an explicit environment the only active
+  // production path is the GitHub watchdog schedule.
+  return nextActiveRefresh(current, false);
 }
 
-function expectedCheckpoint(current) {
-  const local = shanghaiDateParts(current);
-  let checkpointDate = { year: local.year, month: local.month, day: local.day };
-  let checkpoint = null;
-  if (isBusinessDay(checkpointDate)) {
-    const currentMinute = local.hour * 60 + local.minute;
-    checkpoint = [...WEEKDAY_CHECKPOINTS]
-      .reverse()
-      .find(([hour, minute]) => hour * 60 + minute <= currentMinute) || null;
-    if (!checkpoint) checkpointDate = previousBusinessDay(checkpointDate);
-  } else {
-    while (!isBusinessDay(checkpointDate)) checkpointDate = shiftCalendarDate(checkpointDate, -1);
+function shanghaiIsoForInstant(value) {
+  const parts = shanghaiDateParts(value);
+  const pad = (item) => String(item).padStart(2, "0");
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:00+08:00`;
+}
+
+export function nextActiveRefresh(current = new Date(), primaryEnabled = false) {
+  const now = current instanceof Date ? current : new Date(current);
+  if (Number.isNaN(now.getTime())) return null;
+  const schedules = primaryEnabled
+    ? CLOUDFLARE_PRIMARY_UTC_SCHEDULES
+    : GITHUB_WATCHDOG_UTC_SCHEDULES;
+  const candidates = [];
+  const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  for (let dayOffset = 0; dayOffset <= 8; dayOffset += 1) {
+    const dayStart = new Date(start + dayOffset * 86_400_000);
+    const weekday = dayStart.getUTCDay();
+    if (weekday < 1 || weekday > 5) continue;
+    for (const schedule of schedules) {
+      for (const hour of schedule.hours) {
+        const candidate = new Date(Date.UTC(
+          dayStart.getUTCFullYear(),
+          dayStart.getUTCMonth(),
+          dayStart.getUTCDate(),
+          hour,
+          schedule.minute,
+        ));
+        if (candidate <= now) continue;
+        if (Number.isInteger(schedule.newYorkHour) && newYorkHour(candidate) !== schedule.newYorkHour) continue;
+        candidates.push(candidate);
+      }
+    }
   }
-  checkpoint ||= WEEKDAY_CHECKPOINTS.at(-1);
-  const [hour, minute] = checkpoint;
-  const epoch = Date.UTC(
-    checkpointDate.year,
-    checkpointDate.month - 1,
-    checkpointDate.day,
-    hour - 8,
-    minute,
-  );
-  const pad = (value) => String(value).padStart(2, "0");
+  if (!candidates.length) return null;
+  candidates.sort((left, right) => left.getTime() - right.getTime());
+  return shanghaiIsoForInstant(candidates[0]);
+}
+
+export function latestActiveCheckpoint(current = new Date(), primaryEnabled = false) {
+  const now = current instanceof Date ? current : new Date(current);
+  if (Number.isNaN(now.getTime())) return null;
+  const schedules = primaryEnabled
+    ? CLOUDFLARE_PRIMARY_UTC_SCHEDULES
+    : GITHUB_WATCHDOG_UTC_SCHEDULES;
+  const candidates = [];
+  const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  for (let dayOffset = 0; dayOffset >= -8; dayOffset -= 1) {
+    const dayStart = new Date(start + dayOffset * 86_400_000);
+    const weekday = dayStart.getUTCDay();
+    if (weekday < 1 || weekday > 5) continue;
+    for (const schedule of schedules) {
+      for (const hour of schedule.hours) {
+        const candidate = new Date(Date.UTC(
+          dayStart.getUTCFullYear(),
+          dayStart.getUTCMonth(),
+          dayStart.getUTCDate(),
+          hour,
+          schedule.minute,
+        ));
+        if (candidate > now) continue;
+        if (Number.isInteger(schedule.newYorkHour) && newYorkHour(candidate) !== schedule.newYorkHour) continue;
+        candidates.push(candidate);
+      }
+    }
+  }
+  if (!candidates.length) return null;
+  candidates.sort((left, right) => right.getTime() - left.getTime());
   return {
-    epoch,
-    iso: `${checkpointDate.year}-${pad(checkpointDate.month)}-${pad(checkpointDate.day)}T${pad(hour)}:${pad(minute)}:00+08:00`,
+    epoch: candidates[0].getTime(),
+    iso: shanghaiIsoForInstant(candidates[0]),
   };
 }
 
-export function snapshotFreshness(generatedAt, current = new Date()) {
+export function snapshotFreshness(generatedAt, current = new Date(), primaryEnabled = false) {
   const now = current instanceof Date ? current : new Date(current);
   if (Number.isNaN(now.getTime())) {
     return {
@@ -240,7 +310,15 @@ export function snapshotFreshness(generatedAt, current = new Date()) {
       checkpoint_lag_minutes: null,
     };
   }
-  const expected = expectedCheckpoint(now);
+  const expected = latestActiveCheckpoint(now, primaryEnabled);
+  if (!expected) {
+    return {
+      freshness_state: "unknown",
+      expected_checkpoint: null,
+      snapshot_age_minutes: null,
+      checkpoint_lag_minutes: null,
+    };
+  }
   const generated = generatedAt ? new Date(generatedAt) : null;
   if (!generated || Number.isNaN(generated.getTime())) {
     return {
@@ -324,7 +402,7 @@ function clampRuleNumber(value, lower = 0, upper = 100) {
   return Math.max(lower, Math.min(upper, value));
 }
 
-function roundRuleNumber(value, digits = 2) {
+export function roundRuleNumber(value, digits = 2) {
   const factor = 10 ** digits;
   return Math.round((value + Number.EPSILON) * factor) / factor;
 }
@@ -429,7 +507,7 @@ function sha256RuleText(value) {
   return state.map((word) => word.toString(16).padStart(8, "0")).join("");
 }
 
-function stableV3QualificationId(snapshot, market, code) {
+function stableV3QualificationId(snapshot, market, code, contractVersion = 4) {
   const automation = snapshot?.automation;
   const scheduledSlot = automation && typeof automation === "object" && !Array.isArray(automation)
     ? automation.scheduled_slot
@@ -437,7 +515,7 @@ function stableV3QualificationId(snapshot, market, code) {
   const target = snapshot?.target_date || snapshot?.signal_date || "";
   const identity = [
     "production-rule-10d-v1",
-    PRODUCTION_RULE_V3_MODEL_ID,
+    contractVersion === 4 ? PRODUCTION_RULE_V4_MODEL_ID : PRODUCTION_RULE_V3_MODEL_ID,
     scheduledSlot || target,
     target,
     market,
@@ -475,12 +553,16 @@ function v3RuleInputContext(snapshot) {
   const inputs = snapshot?.production_rule_inputs;
   const inputRows = inputs?.rows;
   const sources = snapshot?.global_decision?.evaluated_candidates;
+  const isV3 = inputs?.contract_version === "production-rule-inputs-v1"
+    && inputs?.action_basis === PRODUCTION_RULE_V3_ACTION_BASIS
+    && inputs?.rule_model_id === PRODUCTION_RULE_V3_MODEL_ID;
+  const isV4 = inputs?.contract_version === "production-rule-inputs-v2"
+    && inputs?.action_basis === PRODUCTION_RULE_V4_ACTION_BASIS
+    && inputs?.rule_model_id === PRODUCTION_RULE_V4_MODEL_ID;
   if (
     !Array.isArray(sources)
     || !inputs || typeof inputs !== "object" || Array.isArray(inputs)
-    || inputs.contract_version !== "production-rule-inputs-v1"
-    || inputs.action_basis !== PRODUCTION_RULE_V3_ACTION_BASIS
-    || inputs.rule_model_id !== PRODUCTION_RULE_V3_MODEL_ID
+    || (!isV3 && !isV4)
     || !Array.isArray(inputRows)
     || !Number.isInteger(inputs.evaluated_candidate_count)
     || inputs.evaluated_candidate_count !== sources.length
@@ -515,15 +597,85 @@ function v3RuleInputContext(snapshot) {
     if (byIdentity.has(key)) return null;
     byIdentity.set(key, { source, input });
   }
-  return { sources, inputRows, byIdentity };
+  return { sources, inputRows, byIdentity, contractVersion: isV4 ? 4 : 3 };
 }
 
-function expectedV3RuleEvaluation(snapshot, input) {
+function tenDayTradePlan(row, candidate, qualificationTrack) {
+  const price = row?.entry_price;
+  if (!finiteRuleNumber(price) || price <= 0) return null;
+  const source = candidate && typeof candidate === "object" && !Array.isArray(candidate) ? candidate : {};
+  const realtime = source.realtime && typeof source.realtime === "object" && !Array.isArray(source.realtime)
+    ? source.realtime : {};
+  const low = row?.estimated_10d_range?.low_pct;
+  const high = row?.estimated_10d_range?.high_pct;
+  let stopLoss = source.stop_loss;
+  let stopSource = "candidate_stop_loss";
+  if (!finiteRuleNumber(stopLoss) || stopLoss <= 0) {
+    stopLoss = finiteRuleNumber(low) && low < 0 ? price * (1 + low / 100) : null;
+    stopSource = "ten_day_scenario_lower_bound";
+  }
+  let target = source.take_profit_reference;
+  let targetSource = "candidate_take_profit_reference";
+  if (!finiteRuleNumber(target) || target <= 0) {
+    target = finiteRuleNumber(high) && high > 0 ? price * (1 + high / 100) : null;
+    targetSource = "ten_day_scenario_upper_bound";
+  }
+  const currency = { a_share: "CNY", hk: "HKD", us: "USD" }[row.market] || null;
+  const reviewEnd = ruleText(row.forecast_end_trade_date);
+  return {
+    contract_version: "ten-day-trade-plan-v1",
+    status: "REVIEW_REQUIRED",
+    horizon_trade_days: 10,
+    reference_quote: {
+      price: roundRuleNumber(price, 4),
+      currency,
+      source: realtime.source ?? null,
+      source_as_of: realtime.source_as_of ?? null,
+      quote_status: realtime.quote_status || realtime.session_label || null,
+      kind: "published_snapshot_quote",
+    },
+    entry_zone: {
+      low: roundRuleNumber(price * 0.99, 4),
+      high: roundRuleNumber(price * 1.005, 4),
+      currency,
+    },
+    entry_trade_date: ruleText(row.entry_trade_date),
+    invalidation: {
+      price: finiteRuleNumber(stopLoss) ? roundRuleNumber(stopLoss, 4) : null,
+      currency,
+      source: finiteRuleNumber(stopLoss) ? stopSource : null,
+    },
+    target: {
+      price: finiteRuleNumber(target) ? roundRuleNumber(target, 4) : null,
+      currency,
+      source: finiteRuleNumber(target) ? targetSource : null,
+    },
+    position_limit: {
+      max_single_name_weight_pct: 10,
+      policy: "strategy_safety_cap_not_personalized",
+    },
+    catalyst_expiry_date: qualificationTrack === "event_catalyst" ? reviewEnd : null,
+    review_end_trade_date: reviewEnd,
+    exit_rules: [
+      "EXIT_IF_INVALIDATION_PRICE_BREACHED",
+      "REVIEW_AT_TENTH_SESSION_CLOSE",
+      "DO_NOT_CHASE_ABOVE_ENTRY_ZONE",
+    ],
+    is_personalized_advice: false,
+  };
+}
+
+function expectedV3RuleEvaluation(snapshot, input, contractVersion = 4) {
   const source = input;
   const market = ruleText(source?.market);
   const code = ruleText(source?.code || source?.symbol);
   const eventPolicy = PRODUCTION_EVENT_MARKET_POLICY[market];
-  const qualityPolicy = PRODUCTION_QUALITY_MARKET_POLICY[market];
+  const v3QualityPolicy = {
+    a_share: { minimumLegacy: 66, maximumDownside: 6, minimumUpside: 6 },
+    hk: { minimumLegacy: 67, maximumDownside: 6, minimumUpside: 6 },
+    us: { minimumLegacy: 68, maximumDownside: 7.5, minimumUpside: 6.5 },
+  };
+  const qualityPolicy = (contractVersion === 4 ? PRODUCTION_QUALITY_MARKET_POLICY : v3QualityPolicy)[market];
   if (!market || !code || !eventPolicy || !qualityPolicy) return null;
 
   const sourceBlockers = dedupeRuleStrings(source.blocker_codes);
@@ -531,7 +683,10 @@ function expectedV3RuleEvaluation(snapshot, input) {
     ? sourceBlockers.filter((codeValue) => !PRODUCTION_MODEL_AVAILABILITY_BLOCKERS.has(codeValue))
     : ["SOURCE_BLOCKER_CODES_INVALID"];
   const eventBlockers = [...sharedBlockers];
-  const qualityBlockers = sharedBlockers.filter((codeValue) => codeValue !== "VERIFIED_POSITIVE_EVENT_MISSING");
+  const qualityEventWaivers = contractVersion === 4
+    ? new Set(["EVENT_CANDIDATE_NOT_SCANNED", "VERIFIED_POSITIVE_EVENT_MISSING"])
+    : new Set(["VERIFIED_POSITIVE_EVENT_MISSING"]);
+  const qualityBlockers = sharedBlockers.filter((codeValue) => !qualityEventWaivers.has(codeValue));
   const blockBoth = (codeValue) => {
     eventBlockers.push(codeValue);
     qualityBlockers.push(codeValue);
@@ -586,7 +741,10 @@ function expectedV3RuleEvaluation(snapshot, input) {
   const eventIds = Array.isArray(source.verified_positive_event_ids)
     ? dedupeRuleStrings(source.verified_positive_event_ids.filter((value) => ruleText(value)))
     : [];
-  if (!eventScanned) blockBoth("EVENT_CANDIDATE_NOT_SCANNED");
+  if (!eventScanned) {
+    eventBlockers.push("EVENT_CANDIDATE_NOT_SCANNED");
+    if (contractVersion === 3) qualityBlockers.push("EVENT_CANDIDATE_NOT_SCANNED");
+  }
   if (!eventIds.length) eventBlockers.push("VERIFIED_POSITIVE_EVENT_MISSING");
   const eventStrength = eventScanned && eventIds.length
     ? Math.min(100, 80 + 5 * eventIds.length)
@@ -645,7 +803,7 @@ function expectedV3RuleEvaluation(snapshot, input) {
     status: qualified ? "QUALIFIED" : "REJECTED",
     qualification_track: qualificationTrack,
     track_evaluations: trackEvaluations,
-    rule_model_id: PRODUCTION_RULE_V3_MODEL_ID,
+    rule_model_id: contractVersion === 4 ? PRODUCTION_RULE_V4_MODEL_ID : PRODUCTION_RULE_V3_MODEL_ID,
     score_kind: "RULE_QUALIFICATION_SCORE",
     qualification_score: score,
     score_components: components,
@@ -685,17 +843,25 @@ function expectedV3RuleEvaluation(snapshot, input) {
       : dedupeRuleStrings([...normalizedEventBlockers, ...normalizedQualityBlockers]),
   };
   if (qualified) {
-    row.qualification_id = stableV3QualificationId(snapshot, market, code);
+    row.qualification_id = stableV3QualificationId(snapshot, market, code, contractVersion);
     row.candidate_snapshot = input.candidate_snapshot && typeof input.candidate_snapshot === "object"
       && !Array.isArray(input.candidate_snapshot)
       ? input.candidate_snapshot
       : null;
+    if (contractVersion === 4) {
+      row.ten_day_trade_plan = tenDayTradePlan(
+        row,
+        row.candidate_snapshot || input.candidate_snapshot,
+        qualificationTrack,
+      );
+    }
   }
   return row;
 }
 
 function validV3QualifiedRow(row, decision, snapshot, context = null) {
-  if (productionRuleContractVersion(decision) !== 3) return true;
+  const contractVersion = productionRuleContractVersion(decision);
+  if (![3, 4].includes(contractVersion)) return true;
   if (!row || typeof row !== "object" || Array.isArray(row) || row.status !== "QUALIFIED") return false;
   const ruleContext = context || v3RuleInputContext(snapshot);
   if (!ruleContext) return false;
@@ -703,7 +869,7 @@ function validV3QualifiedRow(row, decision, snapshot, context = null) {
   const code = ruleText(row.code || row.symbol);
   const sourceContext = ruleContext.byIdentity.get(`${market}:${code}`);
   if (!sourceContext) return false;
-  const expected = expectedV3RuleEvaluation(snapshot, sourceContext.input);
+  const expected = expectedV3RuleEvaluation(snapshot, sourceContext.input, contractVersion);
   if (!expected || expected.status !== "QUALIFIED" || !contractDeepEqual(row, expected)) return false;
   if (
     !row.candidate_snapshot || typeof row.candidate_snapshot !== "object" || Array.isArray(row.candidate_snapshot)
@@ -731,7 +897,8 @@ function compareV3EvaluationRows(left, right) {
 }
 
 function validatedV3DecisionRows(snapshot, decision) {
-  if (productionRuleContractVersion(decision) !== 3) return null;
+  const contractVersion = productionRuleContractVersion(decision);
+  if (![3, 4].includes(contractVersion)) return null;
   const evaluated = decision.evaluated_candidates;
   const published = decision.qualified_candidates;
   const context = v3RuleInputContext(snapshot);
@@ -754,7 +921,7 @@ function validatedV3DecisionRows(snapshot, decision) {
 
   const rebuiltEvaluated = [];
   for (const input of context.inputRows) {
-    const rebuilt = expectedV3RuleEvaluation(snapshot, input);
+    const rebuilt = expectedV3RuleEvaluation(snapshot, input, contractVersion);
     if (!rebuilt) return null;
     rebuiltEvaluated.push(rebuilt);
   }
@@ -779,7 +946,7 @@ function validatedV3DecisionRows(snapshot, decision) {
 }
 
 function validatedV3QualifiedRows(snapshot, decision) {
-  if (productionRuleContractVersion(decision) !== 3 || decision.action !== "QUALIFIED_PICK") return null;
+  if (![3, 4].includes(productionRuleContractVersion(decision)) || decision.action !== "QUALIFIED_PICK") return null;
   const validated = validatedV3DecisionRows(snapshot, decision);
   return validated ? validated.qualified : null;
 }
@@ -787,7 +954,7 @@ function validatedV3QualifiedRows(snapshot, decision) {
 function productionQualifiedCandidateRows(snapshot, market = null) {
   const decision = snapshot?.production_decision;
   if (!isProductionRuleDecision(decision, snapshot?.model_version) || decision.action !== "QUALIFIED_PICK") return [];
-  if (productionRuleContractVersion(decision) === 3) {
+  if ([3, 4].includes(productionRuleContractVersion(decision))) {
     const qualifiedRows = validatedV3QualifiedRows(snapshot, decision);
     if (!qualifiedRows) return [];
     return qualifiedRows
@@ -940,6 +1107,168 @@ async function readOptionalAssetJson(env, path) {
   return payload;
 }
 
+async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function safeDataObjectKey(value) {
+  const key = String(value || "");
+  if (!key || key.startsWith("/") || key.includes("\\") || key.split("/").includes("..") || !key.endsWith(".json")) {
+    return null;
+  }
+  return key;
+}
+
+function validDataManifest(manifest) {
+  if (
+    !manifest || typeof manifest !== "object" || Array.isArray(manifest)
+    || manifest.contract_version !== DATA_MANIFEST_CONTRACT_VERSION
+    || typeof manifest.snapshot_key !== "string"
+    || manifest.snapshot_key.includes("/") || !manifest.snapshot_key.endsWith(".json")
+    || typeof manifest.generated_at !== "string" || !awareIsoTimestamp(manifest.generated_at)
+    || !/^[a-f0-9]{64}$/.test(String(manifest.snapshot_sha256 || ""))
+    || !Number.isInteger(manifest.snapshot_byte_size) || manifest.snapshot_byte_size <= 0
+    || !manifest.assets || typeof manifest.assets !== "object" || Array.isArray(manifest.assets)
+  ) return false;
+  for (const name of DATA_ASSET_NAMES) {
+    const descriptor = manifest.assets[name];
+    const key = manifest[`${name}_key`];
+    if (
+      !descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)
+      || descriptor.key !== key || !safeDataObjectKey(key)
+      || !/^[a-f0-9]{64}$/.test(String(descriptor.sha256 || ""))
+      || !Number.isInteger(descriptor.byte_size) || descriptor.byte_size <= 0
+      || key.split("/").at(-1) !== `${descriptor.sha256}.json`
+    ) return false;
+  }
+  const detailKeys = manifest.candidate_detail_keys || {};
+  const detailMeta = manifest.assets.candidate_details || {};
+  if (
+    typeof detailKeys !== "object" || Array.isArray(detailKeys)
+    || typeof detailMeta !== "object" || Array.isArray(detailMeta)
+    || Object.keys(detailKeys).length !== Object.keys(detailMeta).length
+  ) return false;
+  return Object.entries(detailKeys).every(([candidateId, key]) => {
+    const descriptor = detailMeta[candidateId];
+    return candidateId.startsWith("cand_")
+      && safeDataObjectKey(key)
+      && key.startsWith("candidate-details/")
+      && descriptor && typeof descriptor === "object" && !Array.isArray(descriptor)
+      && /^[a-f0-9]{64}$/.test(String(descriptor.sha256 || ""))
+      && Number.isInteger(descriptor.byte_size) && descriptor.byte_size > 0
+      && key.split("/").at(-1) === `${descriptor.sha256}.json`;
+  });
+}
+
+async function readDataObjectBytes(env, backend, key) {
+  const safeKey = safeDataObjectKey(key);
+  if (!safeKey) return null;
+  if (backend === "r2") {
+    if (!env?.DATA_ASSETS || typeof env.DATA_ASSETS.get !== "function") return null;
+    const object = await env.DATA_ASSETS.get(safeKey);
+    if (!object) return null;
+    if (typeof object.arrayBuffer === "function") return new Uint8Array(await object.arrayBuffer());
+    if (object.body && typeof object.body.arrayBuffer === "function") {
+      return new Uint8Array(await object.body.arrayBuffer());
+    }
+    return null;
+  }
+  const response = await env.ASSETS.fetch(`https://assets.local/data/${safeKey}`);
+  if (!response.ok) return null;
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+async function readDataManifest(env, backend) {
+  let bytes;
+  if (backend === "r2") {
+    bytes = await readDataObjectBytes(env, backend, DATA_MANIFEST_KEY);
+  } else {
+    const response = await env.ASSETS.fetch(`https://assets.local${EMBEDDED_DATA_MANIFEST_PATH}`);
+    bytes = response.ok ? new Uint8Array(await response.arrayBuffer()) : null;
+  }
+  if (!bytes) return null;
+  try {
+    const manifest = JSON.parse(new TextDecoder().decode(bytes));
+    return validDataManifest(manifest) ? manifest : null;
+  } catch {
+    return null;
+  }
+}
+
+function dataDescriptor(manifest, nameOrCandidateId) {
+  if (DATA_ASSET_NAMES.has(nameOrCandidateId)) return manifest.assets[nameOrCandidateId] || null;
+  const key = (manifest.candidate_detail_keys || {})[nameOrCandidateId];
+  const meta = (manifest.assets.candidate_details || {})[nameOrCandidateId];
+  return key && meta ? { key, ...meta } : null;
+}
+
+function payloadMatchesDataManifest(payload, manifest) {
+  const source = payload?.source_snapshot;
+  const digest = payload?.snapshot_sha256 || source?.sha256;
+  const byteSize = payload?.snapshot_byte_size || source?.byte_size;
+  return Boolean(
+    payload && typeof payload === "object" && !Array.isArray(payload)
+    && payload.snapshot_key === manifest.snapshot_key
+    && payload.generated_at === manifest.generated_at
+    && digest === manifest.snapshot_sha256
+    && byteSize === manifest.snapshot_byte_size
+  );
+}
+
+async function loadDataGenerationFrom(env, backend, names, frozenManifest = null) {
+  const manifest = frozenManifest || await readDataManifest(env, backend);
+  if (!manifest) return null;
+  const assets = {};
+  const raw = {};
+  for (const name of names) {
+    const descriptor = dataDescriptor(manifest, name);
+    if (!descriptor) return null;
+    const bytes = await readDataObjectBytes(env, backend, descriptor.key);
+    if (!bytes || bytes.byteLength !== descriptor.byte_size || await sha256Hex(bytes) !== descriptor.sha256) return null;
+    let payload;
+    try {
+      payload = JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      return null;
+    }
+    if (!payloadMatchesDataManifest(payload, manifest)) return null;
+    assets[name] = payload;
+    raw[name] = bytes;
+  }
+  return { backend, manifest, assets, raw };
+}
+
+async function loadDataGeneration(env, names) {
+  let r2Manifest = null;
+  try {
+    r2Manifest = await readDataManifest(env, "r2");
+    const r2 = r2Manifest
+      ? await loadDataGenerationFrom(env, "r2", names, r2Manifest)
+      : null;
+    if (r2) return r2;
+  } catch {
+    // Continue to the identity check below.  An R2 transport failure must not
+    // authorize a different embedded generation.
+  }
+  const embeddedManifest = await readDataManifest(env, "embedded");
+  if (!embeddedManifest) return null;
+  if (r2Manifest) {
+    if (!sameDataGeneration(r2Manifest, embeddedManifest)) return null;
+    for (const name of names) {
+      const requested = dataDescriptor(r2Manifest, name);
+      const fallback = dataDescriptor(embeddedManifest, name);
+      if (
+        !requested || !fallback
+        || requested.key !== fallback.key
+        || requested.sha256 !== fallback.sha256
+        || requested.byte_size !== fallback.byte_size
+      ) return null;
+    }
+  }
+  return loadDataGenerationFrom(env, "embedded", names, embeddedManifest);
+}
+
 async function readApiAsset(env, path) {
   const response = await env.ASSETS.fetch(`https://assets.local${path}`);
   if (!response.ok) return null;
@@ -1010,6 +1339,18 @@ function validLiveIndexContract(index) {
 }
 
 async function latestRuntime(env) {
+  const generation = await loadDataGeneration(env, ["runtime"]);
+  const publishedRuntime = generation?.assets?.runtime || null;
+  if (publishedRuntime) {
+    if (
+      !validRuntimeIdentity(publishedRuntime, WORKER_RUNTIME_CONTRACT_VERSION)
+      || !validSourceSnapshotBinding(publishedRuntime)
+    ) throw new Error("manifest-bound worker runtime identity is invalid");
+    return publishedRuntime;
+  }
+  if (await currentDataManifest(env)) {
+    throw new Error("manifest-bound worker runtime asset is unavailable");
+  }
   const runtime = await readOptionalAssetJson(env, WORKER_RUNTIME_PATH);
   if (runtime) {
     if (
@@ -1029,6 +1370,19 @@ async function latestRuntime(env) {
 }
 
 async function latestLiveIndex(env) {
+  const generation = await loadDataGeneration(env, ["live_index"]);
+  const publishedIndex = generation?.assets?.live_index || null;
+  if (publishedIndex) {
+    if (
+      !validRuntimeIdentity(publishedIndex, WORKER_LIVE_INDEX_CONTRACT_VERSION)
+      || !validSourceSnapshotBinding(publishedIndex)
+      || !validLiveIndexContract(publishedIndex)
+    ) throw new Error("manifest-bound worker live index identity is invalid");
+    return publishedIndex;
+  }
+  if (await currentDataManifest(env)) {
+    throw new Error("manifest-bound worker live index asset is unavailable");
+  }
   const index = await readOptionalAssetJson(env, WORKER_LIVE_INDEX_PATH);
   if (index) {
     if (
@@ -1068,6 +1422,11 @@ function sameSnapshotIdentity(runtime, asset) {
 }
 
 async function latestUiAsset(env, path, contractVersion, runtime) {
+  if (await currentDataManifest(env)) {
+    const error = new Error("manifest-bound worker UI asset is unavailable");
+    error.code = "UI_ASSET_UNAVAILABLE";
+    throw error;
+  }
   const asset = await readOptionalAssetJson(env, path);
   if (!asset) {
     const error = new Error("worker UI asset is unavailable");
@@ -1087,9 +1446,11 @@ async function latestUiAsset(env, path, contractVersion, runtime) {
   return asset;
 }
 
-export function snapshotUseContract(runtime, current = new Date()) {
-  const freshnessInput = runtime?.automation?.scheduled_slot || runtime?.generated_at || null;
-  const freshness = snapshotFreshness(freshnessInput, current);
+export function snapshotUseContract(runtime, current = new Date(), primaryEnabled = false) {
+  // Freshness is about when the published data was actually generated.  A
+  // watchdog run retains the logical primary checkpoint in scheduled_slot,
+  // which must not be mistaken for its real publication time.
+  const freshness = snapshotFreshness(runtime?.generated_at || null, current, primaryEnabled);
   const allowed = freshness.freshness_state === "fresh";
   const evaluated = current instanceof Date ? current : new Date(current);
   return {
@@ -1184,6 +1545,8 @@ function productionRuleContractVersion(decision) {
     && decision.rule_model_id === "ten-day-audited-rule-ensemble-v2") return 2;
   if (decision.action_basis === PRODUCTION_RULE_V3_ACTION_BASIS
     && decision.rule_model_id === PRODUCTION_RULE_V3_MODEL_ID) return 3;
+  if (decision.action_basis === PRODUCTION_RULE_V4_ACTION_BASIS
+    && decision.rule_model_id === PRODUCTION_RULE_V4_MODEL_ID) return 4;
   return null;
 }
 
@@ -1195,7 +1558,7 @@ function isProductionRuleDecision(decision, modelVersion = null) {
     && decision.contract_version === "production-rule-10d-v1"
     && decision.decision_scope === "global_10d_bounded_recall"
     && contractVersion !== null
-    && ((modelVersion === CURRENT_PRODUCTION_MODEL_VERSION) === (contractVersion === 3))
+    && ((modelVersion === CURRENT_PRODUCTION_MODEL_VERSION) === (contractVersion === 4))
     && ["QUALIFIED_PICK", "NO_QUALIFIED_PICK"].includes(decision.action)
     && decision.score_kind === "RULE_QUALIFICATION_SCORE"
     && decision.probability === null
@@ -1213,7 +1576,7 @@ function summarizeProductionCandidate(candidate) {
     "data_quality_score", "event_candidate_scanned", "verified_positive_event_ids",
     "qualification_track", "track_evaluations",
     "entry_price", "entry_trade_date", "forecast_end_trade_date", "calendar_id",
-    "calendar_version", "estimated_10d_range", "risk_reward", "blocker_codes",
+    "calendar_version", "estimated_10d_range", "risk_reward", "ten_day_trade_plan", "blocker_codes",
   ];
   return Object.fromEntries(fields.filter((field) => Object.hasOwn(candidate, field)).map((field) => [field, candidate[field]]));
 }
@@ -1221,9 +1584,10 @@ function summarizeProductionCandidate(candidate) {
 function summarizeProductionQualifiedCandidates(decision, snapshot = null) {
   if (!isProductionRuleDecision(decision, snapshot?.model_version) || decision.action !== "QUALIFIED_PICK") return [];
   const contractVersion = productionRuleContractVersion(decision);
-  const validatedRows = contractVersion === 3 ? validatedV3QualifiedRows(snapshot, decision) : null;
-  if (contractVersion === 3 && !validatedRows) return [];
-  const rawRows = contractVersion === 3
+  const auditedContract = [3, 4].includes(contractVersion);
+  const validatedRows = auditedContract ? validatedV3QualifiedRows(snapshot, decision) : null;
+  if (auditedContract && !validatedRows) return [];
+  const rawRows = auditedContract
     ? validatedRows
     : [decision.primary, ...(Array.isArray(decision.qualified_candidates) ? decision.qualified_candidates : [])];
   const result = [];
@@ -1243,7 +1607,7 @@ function summarizeProductionQualifiedCandidates(decision, snapshot = null) {
 function productionDecisionForSnapshot(snapshot) {
   const decision = snapshot?.production_decision;
   if (!isProductionRuleDecision(decision, snapshot?.model_version)) return null;
-  if (productionRuleContractVersion(decision) !== 3) return decision;
+  if (![3, 4].includes(productionRuleContractVersion(decision))) return decision;
   return validatedV3DecisionRows(snapshot, decision) ? decision : null;
 }
 
@@ -1615,7 +1979,7 @@ function strictSnapshotQuote(candidate, market) {
   return quote;
 }
 
-function snapshotLiveContract(snapshot, market, code, current = new Date()) {
+function snapshotLiveContract(snapshot, market, code, current = new Date(), primaryEnabled = false) {
   const candidate = snapshotCandidate(snapshot, market, code);
   if (!candidate) throw new Error("candidate is not present in the published snapshot");
   const quote = strictSnapshotQuote(candidate, market);
@@ -1640,8 +2004,8 @@ function snapshotLiveContract(snapshot, market, code, current = new Date()) {
   const volume = typeof quote.volume === "number" && Number.isFinite(quote.volume) && quote.volume >= 0
     ? quote.volume
     : null;
-  const snapshotState = snapshotFreshness(snapshot.generated_at, current).freshness_state;
-  const snapshotUse = snapshotUseContract(snapshot, current);
+  const snapshotState = snapshotFreshness(snapshot.generated_at, current, primaryEnabled).freshness_state;
+  const snapshotUse = snapshotUseContract(snapshot, current, primaryEnabled);
 
   return {
     contract_version: "live-quote-v1",
@@ -1691,19 +2055,26 @@ function snapshotLiveContract(snapshot, market, code, current = new Date()) {
     snapshot_use: snapshotUse,
     execution_review_allowed: snapshotUse.execution_review_allowed,
     execution_blocker_codes: snapshotUse.blocker_codes,
-    next_refresh: nextScheduledRefresh(current),
+    next_refresh: nextActiveRefresh(current, primaryEnabled),
     cache_ttl_seconds: LIVE_CACHE_TTL_MS / 1000,
     kline: Array.isArray(candidate.kline) ? candidate.kline : [],
   };
 }
 
-function buildStatusPayload(latest, current = new Date()) {
+function schedulerPrimaryEnabled(env = {}) {
+  return String(env?.CLOUDFLARE_SCHEDULER_ENABLED || "") === "1"
+    && Boolean(String(env?.GITHUB_WORKFLOW_DISPATCH_TOKEN || ""));
+}
+
+function buildStatusPayload(latest, current = new Date(), env = {}) {
   const productionDecision = latest ? productionDecisionForRuntime(latest) : null;
   const currentTime = nowCN();
-  const snapshotUse = snapshotUseContract(latest, current);
+  const primaryEnabled = schedulerPrimaryEnabled(env);
+  const snapshotUse = snapshotUseContract(latest, current, primaryEnabled);
   const freshness = snapshotFreshness(
-    latest?.automation?.scheduled_slot || latest?.generated_at || null,
+    latest?.generated_at || null,
     current,
+    primaryEnabled,
   );
   const sourceStateByMarket = Object.fromEntries(["a_share", "hk", "us"].map((market) => {
     const section = latest?.markets?.[market] || {};
@@ -1728,6 +2099,20 @@ function buildStatusPayload(latest, current = new Date()) {
     schedule_time_zone: SHANGHAI_TIME_ZONE,
     schedule_primary_checkpoints: WEEKDAY_CHECKPOINTS.map(([hour, minute]) => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`),
     schedule_fallback_checkpoints: FALLBACK_CHECKPOINTS.map(([hour, minute]) => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`),
+    scheduler_primary_enabled: primaryEnabled,
+    active_refresh_mode: primaryEnabled
+      ? "cloudflare_primary_with_github_watchdog"
+      : "github_watchdog_only",
+    next_active_refresh: nextActiveRefresh(current, primaryEnabled),
+    schedule_us_post_close: {
+      contract_version: "us-post-close-schedule-v1",
+      market_time_zone: "America/New_York",
+      market_checkpoint: "16:17",
+      primary_beijing_variants: ["04:17 夏令时", "05:17 冬令时"],
+      watchdog_beijing_variants: ["04:47 夏令时", "05:47 冬令时"],
+      china_days: "周二至周六",
+      dst_variant_selected_at_runtime: true,
+    },
     recompute_supported: false,
     has_latest: Boolean(latest),
     latest_path: latest ? "/data/picks/latest.json" : null,
@@ -1738,7 +2123,7 @@ function buildStatusPayload(latest, current = new Date()) {
     universe_version: latest?.universe_version || null,
     generated_at: latest?.generated_at || null,
     snapshot_as_of: latest?.generated_at || null,
-    next_refresh: nextScheduledRefresh(current),
+    next_refresh: nextActiveRefresh(current, primaryEnabled),
     snapshot_key: latest?.snapshot_key || null,
     runtime_contract_version: latest?.contract_version === WORKER_RUNTIME_CONTRACT_VERSION
       ? latest.contract_version
@@ -1757,11 +2142,188 @@ function buildStatusPayload(latest, current = new Date()) {
   };
 }
 
+async function currentDataManifest(env) {
+  try {
+    const r2 = await readDataManifest(env, "r2");
+    if (r2) return { backend: "r2", manifest: r2 };
+  } catch {
+    // Fall through to the embedded generation.
+  }
+  const embedded = await readDataManifest(env, "embedded");
+  return embedded ? { backend: "embedded", manifest: embedded } : null;
+}
+
+function pageRequest(url, defaultLimit = 25, maximumLimit = 100) {
+  const pageValue = Number(url.searchParams.get("page") || 1);
+  const limitValue = Number(url.searchParams.get("limit") || defaultLimit);
+  const page = Number.isInteger(pageValue) && pageValue > 0 ? pageValue : 1;
+  const limit = Number.isInteger(limitValue)
+    ? Math.max(1, Math.min(limitValue, maximumLimit))
+    : defaultLimit;
+  return { page, limit, offset: (page - 1) * limit };
+}
+
+function pageRows(rows, page) {
+  const selected = rows.slice(page.offset, page.offset + page.limit);
+  return {
+    page: page.page,
+    limit: page.limit,
+    total: rows.length,
+    has_more: page.offset + selected.length < rows.length,
+    returned_count: selected.length,
+    rows: selected,
+  };
+}
+
+function schedulerGatePayload(manifestRecord, env) {
+  const tokenPresent = Boolean(String(env?.GITHUB_WORKFLOW_DISPATCH_TOKEN || ""));
+  const enabled = String(env?.CLOUDFLARE_SCHEDULER_ENABLED || "") === "1" && tokenPresent;
+  if (!manifestRecord) {
+    return {
+      ok: false,
+      contract_version: "scheduler-health-v1",
+      error: "DATA_MANIFEST_UNAVAILABLE",
+      snapshot_key: null,
+      generated_at: null,
+      generation_started_at: null,
+      published_at: null,
+      publication_backend: null,
+      source_invocation_slot: null,
+      source_invocation: null,
+      effective_checkpoint: null,
+      effective_invocation_slot: null,
+      effective_invocation: null,
+      scheduler_start_delay_seconds: null,
+      generation_delay_seconds: null,
+      publication_delay_seconds: null,
+      missed_checkpoints_24h: null,
+      checkpoint_coverage_status: "UNAVAILABLE_NO_COMPLETE_LEDGER",
+      checkpoint_evidence_contract_version: null,
+      recovery_mode: null,
+      scheduler_enabled: enabled,
+      scheduler_gap: tokenPresent ? "R2_OR_EMBEDDED_MANIFEST_MISSING" : "GITHUB_WORKFLOW_DISPATCH_TOKEN_NOT_PROVISIONED",
+    };
+  }
+  const { backend, manifest } = manifestRecord;
+  const health = manifest.scheduler_health || {};
+  const checkpointCoverageStatus = health.checkpoint_coverage_status || "UNAVAILABLE_NO_COMPLETE_LEDGER";
+  const checkpointEvidenceContract = health.checkpoint_evidence_contract_version || null;
+  return {
+    ok: true,
+    contract_version: "scheduler-health-v1",
+    snapshot_key: manifest.snapshot_key,
+    generated_at: manifest.generated_at,
+    generation_started_at: health.generation_started_at || null,
+    published_at: manifest.published_at || health.published_at || null,
+    publication_backend: backend,
+    source_invocation_slot: health.source_invocation_slot || null,
+    source_invocation: health.source_invocation_slot || null,
+    effective_checkpoint: health.effective_checkpoint || null,
+    effective_invocation_slot: health.effective_invocation_slot || null,
+    effective_invocation: health.effective_invocation_slot || null,
+    scheduler_start_delay_seconds: Number.isInteger(health.scheduler_start_delay_seconds)
+      ? health.scheduler_start_delay_seconds : null,
+    generation_delay_seconds: Number.isInteger(health.generation_delay_seconds)
+      ? health.generation_delay_seconds : null,
+    publication_delay_seconds: Number.isInteger(health.publication_delay_seconds)
+      ? health.publication_delay_seconds : null,
+    missed_checkpoints_24h: checkpointCoverageStatus === "COMPLETE_24H_LEDGER"
+      && checkpointEvidenceContract === "scheduler-checkpoint-ledger-v1"
+      && Number.isInteger(health.missed_checkpoints_24h)
+      ? health.missed_checkpoints_24h : null,
+    checkpoint_coverage_status: checkpointCoverageStatus,
+    checkpoint_evidence_contract_version: checkpointEvidenceContract,
+    recovery_mode: health.recovery_mode || "none",
+    scheduler_enabled: enabled,
+    scheduler_gap: enabled ? null : tokenPresent
+      ? "CLOUDFLARE_SCHEDULER_DISABLED"
+      : "GITHUB_WORKFLOW_DISPATCH_TOKEN_NOT_PROVISIONED",
+  };
+}
+
+function dataNameForKey(manifest, key) {
+  for (const name of DATA_ASSET_NAMES) {
+    if (manifest?.assets?.[name]?.key === key) return name;
+  }
+  for (const [candidateId, candidateKey] of Object.entries(manifest?.candidate_detail_keys || {})) {
+    if (candidateKey === key) return candidateId;
+  }
+  return null;
+}
+
+function sameDataGeneration(left, right) {
+  return Boolean(
+    left && right
+    && left.snapshot_key === right.snapshot_key
+    && left.generated_at === right.generated_at
+    && left.snapshot_sha256 === right.snapshot_sha256
+    && left.snapshot_byte_size === right.snapshot_byte_size
+  );
+}
+
+async function immutableDataGeneration(env, record, name) {
+  let generation = await loadDataGenerationFrom(env, record.backend, [name], record.manifest);
+  if (generation || record.backend !== "r2") return generation;
+  const embeddedManifest = await readDataManifest(env, "embedded");
+  if (!sameDataGeneration(record.manifest, embeddedManifest)) return null;
+  const requested = dataDescriptor(record.manifest, name);
+  const fallback = dataDescriptor(embeddedManifest, name);
+  if (
+    !requested || !fallback
+    || requested.key !== fallback.key
+    || requested.sha256 !== fallback.sha256
+    || requested.byte_size !== fallback.byte_size
+  ) return null;
+  generation = await loadDataGenerationFrom(env, "embedded", [name], embeddedManifest);
+  return generation;
+}
+
 async function handleApi(request, env) {
   const url = new URL(request.url);
+  if (url.pathname === "/api/gate-status") {
+    const record = await currentDataManifest(env);
+    const payload = schedulerGatePayload(record, env);
+    const digest = await derivedRepresentationDigest(
+      record?.manifest?.manifest_sha256 || record?.manifest?.snapshot_sha256 || "unavailable",
+      {
+        scheduler_configured: String(env?.CLOUDFLARE_SCHEDULER_ENABLED || "") === "1",
+        dispatch_token_present: Boolean(String(env?.GITHUB_WORKFLOW_DISPATCH_TOKEN || "")),
+        publication_backend: record?.backend || "unavailable",
+      },
+    );
+    return jsonWithEtag(request, payload, digest);
+  }
+
+  if (url.pathname.startsWith("/api/data/")) {
+    const key = decodeURIComponent(url.pathname.slice("/api/data/".length));
+    const record = await currentDataManifest(env);
+    const name = record ? dataNameForKey(record.manifest, key) : null;
+    if (!record || !name) return json({ ok: false, error: "IMMUTABLE_ASSET_NOT_FOUND" }, 404);
+    const generation = await immutableDataGeneration(env, record, name);
+    if (!generation) return json({ ok: false, error: "IMMUTABLE_ASSET_UNAVAILABLE" }, 503);
+    const descriptor = dataDescriptor(generation.manifest, name);
+    if (requestMatchesEtag(request, descriptor.sha256)) {
+      return new Response(null, {
+        status: 304,
+        headers: {
+          etag: quotedEtag(descriptor.sha256),
+          "cache-control": "public, max-age=31536000, immutable",
+        },
+      });
+    }
+    return new Response(generation.raw[name], {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "public, max-age=31536000, immutable",
+        etag: quotedEtag(descriptor.sha256),
+      },
+    });
+  }
+
   if (url.pathname === "/api/status") {
     const latest = await latestRuntime(env);
-    return json(buildStatusPayload(latest, new Date()));
+    return json(buildStatusPayload(latest, new Date(), env));
   }
 
   if (url.pathname === "/api/latest") {
@@ -1773,6 +2335,24 @@ async function handleApi(request, env) {
   if (url.pathname === "/api/latest-summary") {
     let runtime;
     try {
+      const generation = await loadDataGeneration(env, ["runtime", "summary"]);
+      if (generation) {
+        runtime = generation.assets.runtime;
+        const latest = generation.assets.summary;
+        const current = new Date();
+        const status = buildStatusPayload(runtime, current, env);
+        const snapshotUse = status.snapshot_use;
+        const effective = status.effective_decisions;
+        return json({
+          contract_version: WORKER_UI_BOOTSTRAP_CONTRACT_VERSION,
+          ok: true,
+          time: status.time,
+          status,
+          snapshot_use: snapshotUse,
+          effective_decisions: effective,
+          latest: { ...latest, snapshot_use: snapshotUse, effective_decisions: effective },
+        });
+      }
       runtime = await latestRuntime(env);
       const latest = await latestUiAsset(
         env,
@@ -1781,7 +2361,7 @@ async function handleApi(request, env) {
         runtime,
       );
       const current = new Date();
-      const status = buildStatusPayload(runtime, current);
+      const status = buildStatusPayload(runtime, current, env);
       const snapshotUse = status.snapshot_use;
       const effective = status.effective_decisions;
       return json({
@@ -1802,17 +2382,119 @@ async function handleApi(request, env) {
     }
   }
 
-  if (url.pathname === "/api/candidates" || url.pathname === "/api/events") {
+  const candidateDetailMatch = url.pathname.match(/^\/api\/candidates\/(cand_[a-f0-9]{20})$/);
+  if (candidateDetailMatch) {
+    const candidateId = candidateDetailMatch[1];
+    const generation = await loadDataGeneration(env, ["runtime", candidateId]);
+    if (!generation) return json({ ok: false, error: "CANDIDATE_DETAIL_NOT_FOUND" }, 404);
+    const runtime = generation.assets.runtime;
+    const payload = generation.assets[candidateId];
+    const snapshotUse = snapshotUseContract(runtime, new Date(), schedulerPrimaryEnabled(env));
+    return json({
+      ...payload,
+      snapshot_use: snapshotUse,
+      effective_decisions: effectiveDecisions(runtime, snapshotUse),
+    });
+  }
+
+  if (url.pathname === "/api/candidates") {
     try {
+      const generation = await loadDataGeneration(env, ["runtime", "candidates"]);
+      if (generation) {
+        const runtime = generation.assets.runtime;
+        const asset = generation.assets.candidates;
+        const market = String(url.searchParams.get("market") || "").trim();
+        const query = String(url.searchParams.get("q") || "").trim().slice(0, 64).toLowerCase();
+        const allRows = Array.isArray(asset.candidates) ? asset.candidates : [];
+        let filtered = market ? allRows.filter((row) => row?.market === market) : allRows;
+        if (query) {
+          filtered = filtered.filter((row) => [row?.code, row?.name]
+            .some((value) => String(value || "").toLowerCase().includes(query)));
+        }
+        const page = pageRows(filtered, pageRequest(url));
+        const snapshotUse = snapshotUseContract(runtime, new Date(), schedulerPrimaryEnabled(env));
+        return json({
+          contract_version: asset.contract_version,
+          ok: true,
+          snapshot_key: asset.snapshot_key,
+          generated_at: asset.generated_at,
+          snapshot_sha256: asset.snapshot_sha256,
+          source_snapshot: asset.source_snapshot,
+          scanned_count: asset.scanned_count || 0,
+          candidate_count: filtered.length,
+          page: page.page,
+          limit: page.limit,
+          total: page.total,
+          has_more: page.has_more,
+          returned_count: page.returned_count,
+          candidates: page.rows,
+          dual_low_model: asset.dual_low_model || {},
+          snapshot_use: snapshotUse,
+          effective_decisions: effectiveDecisions(runtime, snapshotUse),
+        });
+      }
       const runtime = await latestRuntime(env);
-      const candidates = url.pathname === "/api/candidates";
       const asset = await latestUiAsset(
         env,
-        candidates ? WORKER_UI_CANDIDATES_PATH : WORKER_UI_EVENTS_PATH,
-        candidates ? WORKER_UI_CANDIDATES_CONTRACT_VERSION : WORKER_UI_EVENTS_CONTRACT_VERSION,
+        WORKER_UI_CANDIDATES_PATH,
+        WORKER_UI_CANDIDATES_CONTRACT_VERSION,
         runtime,
       );
-      const snapshotUse = snapshotUseContract(runtime, new Date());
+      const snapshotUse = snapshotUseContract(runtime, new Date(), schedulerPrimaryEnabled(env));
+      return json({
+        ...asset,
+        snapshot_use: snapshotUse,
+        effective_decisions: effectiveDecisions(runtime, snapshotUse),
+      });
+    } catch (error) {
+      if (String(error?.code || "").startsWith("UI_ASSET_")) return uiAssetFailure(error);
+      throw error;
+    }
+  }
+
+  if (url.pathname === "/api/events") {
+    try {
+      const generation = await loadDataGeneration(env, ["runtime", "events"]);
+      if (generation) {
+        const runtime = generation.assets.runtime;
+        const asset = generation.assets.events;
+        const market = String(url.searchParams.get("market") || "").trim();
+        const issuer = String(url.searchParams.get("issuer") || "").trim().toLowerCase();
+        let rows = Array.isArray(asset.events) ? asset.events : [];
+        if (market) rows = rows.filter((row) => row?.market === market);
+        if (issuer) {
+          rows = rows.filter((row) => [row?.issuer, row?.company, row?.name, row?.code, row?.symbol]
+            .some((value) => String(value || "").toLowerCase().includes(issuer)));
+        }
+        const page = pageRows(rows, pageRequest(url, 25, 50));
+        const snapshotUse = snapshotUseContract(runtime, new Date(), schedulerPrimaryEnabled(env));
+        return json({
+          contract_version: asset.contract_version,
+          ok: true,
+          snapshot_key: asset.snapshot_key,
+          generated_at: asset.generated_at,
+          snapshot_sha256: asset.snapshot_sha256,
+          source_snapshot: asset.source_snapshot,
+          event_count: rows.length,
+          page: page.page,
+          limit: page.limit,
+          total: page.total,
+          has_more: page.has_more,
+          returned_count: page.returned_count,
+          events: page.rows,
+          event_publication: asset.event_publication || {},
+          snapshot_use: snapshotUse,
+          effective_decisions: effectiveDecisions(runtime, snapshotUse),
+        });
+      }
+      const runtime = await latestRuntime(env);
+      const asset = await latestUiAsset(
+        env,
+        WORKER_UI_EVENTS_PATH,
+        WORKER_UI_EVENTS_CONTRACT_VERSION,
+        runtime,
+      );
+      const snapshotUse = snapshotUseContract(runtime, new Date(), schedulerPrimaryEnabled(env));
       return json({
         ...asset,
         snapshot_use: snapshotUse,
@@ -1825,6 +2507,42 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === "/api/history") {
+    const generation = await loadDataGeneration(env, ["runtime", "history"]);
+    if (generation) {
+      const asset = generation.assets.history;
+      const view = url.searchParams.get("view") === "raw" ? "raw" : "daily";
+      const rows = Array.isArray(asset.history) ? [...asset.history] : [];
+      rows.sort((a, b) => `${b.target_date || ""}${b.generated_at || ""}`.localeCompare(`${a.target_date || ""}${a.generated_at || ""}`));
+      const days = latestDecisionDays(rows);
+      const selected = view === "raw" ? rows : days;
+      const page = pageRows(selected, pageRequest(url, 5, 5));
+      return json({
+        contract_version: asset.contract_version,
+        ok: true,
+        time: nowCN(),
+        snapshot_key: asset.snapshot_key,
+        generated_at: asset.generated_at,
+        source_snapshot: asset.source_snapshot,
+        latest: generation.assets.runtime.latest_summary || null,
+        page: page.page,
+        limit: page.limit,
+        total: page.total,
+        has_more: page.has_more,
+        returned_count: page.returned_count,
+        meta: {
+          ...historyMetadata(rows, days, view, page.returned_count, asset.history_evaluation),
+          page: page.page,
+          limit: page.limit,
+          total: page.total,
+          has_more: page.has_more,
+        },
+        history_evaluation: asset.history_evaluation || null,
+        observation_ledger: asset.observation_ledger || null,
+        observation_performance: asset.observation_performance || null,
+        rule_outcome_tracking: asset.rule_outcome_tracking || null,
+        history: page.rows,
+      });
+    }
     const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 120), 1000));
     const view = url.searchParams.get("view") === "raw" ? "raw" : "daily";
     const manifest = await loadManifest(env);
@@ -1950,7 +2668,7 @@ async function handleApi(request, env) {
     }
     try {
       const payload = {
-        ...snapshotLiveContract(latest, market, code),
+        ...snapshotLiveContract(latest, market, code, new Date(), schedulerPrimaryEnabled(env)),
         rate_limit_status: rateLimitStatus,
       };
       return json(payload);
@@ -1971,7 +2689,7 @@ async function handleApi(request, env) {
   return json({ error: "Not found" }, 404);
 }
 
-export function canonicalGithubCronForScheduled(controller) {
+function scheduledCronContext(controller) {
   const cron = String(controller?.cron || "");
   const schedule = CLOUDFLARE_SCHEDULED_CRONS.get(cron);
   if (!schedule) {
@@ -1986,7 +2704,7 @@ export function canonicalGithubCronForScheduled(controller) {
   const hour = scheduledAt.getUTCHours();
   const minute = scheduledAt.getUTCMinutes();
   if (
-    weekday < 1 || weekday > 5
+    !schedule.weekdays.has(weekday)
     || minute !== schedule.minute
     || !schedule.hours.has(hour)
     || scheduledAt.getUTCSeconds() !== 0
@@ -1994,17 +2712,38 @@ export function canonicalGithubCronForScheduled(controller) {
   ) {
     throw new Error(`scheduledTime does not match whitelisted cron: ${scheduledAt.toISOString()}`);
   }
-  return `${minute} ${hour} * * 1-5`;
+  return { cron, schedule, scheduledAt, minute, hour };
+}
+
+function newYorkHour(date) {
+  const value = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date).find((part) => part.type === "hour")?.value;
+  return Number(value);
+}
+
+export function canonicalGithubCronForScheduled(controller) {
+  const { schedule, minute, hour } = scheduledCronContext(controller);
+  return `${minute} ${hour} * * ${schedule.githubWeekdays}`;
 }
 
 async function dispatchScheduledWorkflow(controller, env) {
   if (String(env?.CLOUDFLARE_SCHEDULER_ENABLED || "") !== "1") {
     return { dispatched: false, reason: "SCHEDULER_DISABLED" };
   }
-  const cron = canonicalGithubCronForScheduled(controller);
   const token = String(env?.GITHUB_WORKFLOW_DISPATCH_TOKEN || "");
-  if (!token) throw new Error("GITHUB_WORKFLOW_DISPATCH_TOKEN is required");
-  const scheduledAt = new Date(Number(controller.scheduledTime));
+  if (!token) return { dispatched: false, reason: "GITHUB_WORKFLOW_DISPATCH_TOKEN_MISSING" };
+  const context = scheduledCronContext(controller);
+  if (
+    Number.isInteger(context.schedule.newYorkHour)
+    && newYorkHour(context.scheduledAt) !== context.schedule.newYorkHour
+  ) {
+    return { dispatched: false, reason: "INACTIVE_US_POST_CLOSE_DST_VARIANT" };
+  }
+  const cron = `${context.minute} ${context.hour} * * ${context.schedule.githubWeekdays}`;
+  const scheduledAt = context.scheduledAt;
   const response = await fetch(GITHUB_WORKFLOW_DISPATCH_URL, {
     method: "POST",
     headers: {
@@ -2039,6 +2778,15 @@ export default {
     try {
       if (url.pathname.startsWith("/api/")) {
         response = await handleApi(request, env);
+      } else if (url.pathname === EMBEDDED_DATA_MANIFEST_PATH) {
+        const assetResponse = await env.ASSETS.fetch(request);
+        const headers = new Headers(assetResponse.headers);
+        headers.set("cache-control", "no-store");
+        response = new Response(assetResponse.body, {
+          status: assetResponse.status,
+          statusText: assetResponse.statusText,
+          headers,
+        });
       } else {
         response = await env.ASSETS.fetch(request);
       }

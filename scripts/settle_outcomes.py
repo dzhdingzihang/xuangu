@@ -509,6 +509,7 @@ def yahoo_adjusted_rows(symbol: str, market: str, limit: int = 260) -> list[dict
         quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
         adjclose = ((result.get("indicators") or {}).get("adjclose") or [{}])[0].get("adjclose") or []
         opens = quote.get("open") or []
+        lows = quote.get("low") or []
         closes = quote.get("close") or []
         timezone_name = (result.get("meta") or {}).get("exchangeTimezoneName")
         exchange_tz = ZoneInfo(timezone_name or ("America/New_York" if market == "us" else "Asia/Hong_Kong"))
@@ -519,6 +520,7 @@ def yahoo_adjusted_rows(symbol: str, market: str, limit: int = 260) -> list[dict
     for index, timestamp in enumerate(timestamps):
         try:
             raw_open = finite_positive(opens[index])
+            raw_low = finite_positive(lows[index]) if index < len(lows) else None
             raw_close = finite_positive(closes[index])
             adjusted_close = finite_positive(adjclose[index])
         except (IndexError, TypeError):
@@ -526,13 +528,14 @@ def yahoo_adjusted_rows(symbol: str, market: str, limit: int = 260) -> list[dict
         if raw_open is None or raw_close is None or adjusted_close is None:
             continue
         factor = adjusted_close / raw_close
-        rows.append(
-            {
-                "date": dt.datetime.fromtimestamp(float(timestamp), exchange_tz).date().isoformat(),
-                "open": round(raw_open * factor, 8),
-                "close": round(adjusted_close, 8),
-            }
-        )
+        row = {
+            "date": dt.datetime.fromtimestamp(float(timestamp), exchange_tz).date().isoformat(),
+            "open": round(raw_open * factor, 8),
+            "close": round(adjusted_close, 8),
+        }
+        if raw_low is not None:
+            row["low"] = round(raw_low * factor, 8)
+        rows.append(row)
     return rows[-limit:]
 
 

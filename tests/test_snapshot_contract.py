@@ -843,6 +843,7 @@ class SnapshotContractTests(unittest.TestCase):
                 "SCHEDULED_SOURCE_INVOCATION_SLOT": "2026-08-21T08:17:00+08:00",
                 "SCHEDULER_DELAY_SECONDS": "45000",
                 "SCHEDULE_RECOVERY_MODE": "late_cron_recovery",
+                "SCHEDULE_GENERATION_STARTED_AT": "2026-08-21T20:47:12+08:00",
                 "GENERATION_ATTEMPT": "2",
                 "GITHUB_RUN_ID": "123456",
             },
@@ -860,6 +861,18 @@ class SnapshotContractTests(unittest.TestCase):
                 "recovery_mode": "late_cron_recovery",
                 "generation_attempt": 2,
                 "run_id": "123456:2",
+                "scheduler_health": {
+                    "contract_version": "scheduler-health-v1",
+                    "source_invocation_slot": "2026-08-21T08:17:00+08:00",
+                    "effective_checkpoint": "2026-08-21T20:17:00+08:00",
+                    "effective_invocation_slot": "2026-08-21T20:47:00+08:00",
+                    "scheduler_start_delay_seconds": 45000,
+                    "recovery_mode": "late_cron_recovery",
+                    "generation_started_at": "2026-08-21T20:47:12+08:00",
+                    "generation_delay_seconds": None,
+                    "publication_delay_seconds": None,
+                    "missed_checkpoints_24h": None,
+                },
             },
         )
 
@@ -985,6 +998,43 @@ class SnapshotContractTests(unittest.TestCase):
             validate_snapshot(ineffective_late_recovery),
         )
 
+    def test_us_post_close_schedule_accepts_friday_new_york_close_on_cn_saturday(self) -> None:
+        valid = dynamic_hk_us_snapshot_fixture()
+        valid["model_version"] = server.MODEL_VERSION
+        valid["generated_at"] = "2026-08-29T04:55:00+08:00"
+        valid["automation"].update(
+            {
+                "trigger": "schedule",
+                "scheduled_slot": "2026-08-29T04:17:00+08:00",
+                "scheduled_invocation_slot": "2026-08-29T04:47:00+08:00",
+                "source_invocation_slot": "2026-08-29T04:47:00+08:00",
+                "scheduler_delay_seconds": 480,
+                "recovery_mode": "on_time",
+            }
+        )
+
+        errors = validate_snapshot(valid)
+
+        self.assertFalse(any("configured invocation" in error for error in errors), errors)
+        self.assertNotIn(
+            "automation.scheduled_slot does not match its invocation checkpoint",
+            errors,
+        )
+
+        inactive_dst_variant = copy.deepcopy(valid)
+        inactive_dst_variant["generated_at"] = "2026-08-29T05:55:00+08:00"
+        inactive_dst_variant["automation"].update(
+            {
+                "scheduled_slot": "2026-08-29T05:17:00+08:00",
+                "scheduled_invocation_slot": "2026-08-29T05:47:00+08:00",
+                "source_invocation_slot": "2026-08-29T05:47:00+08:00",
+            }
+        )
+        self.assertIn(
+            "automation.scheduled_invocation_slot is not a configured invocation",
+            validate_snapshot(inactive_dst_variant),
+        )
+
     def test_three_markets_keep_old_fields_and_add_v2_contract(self) -> None:
         snapshot = snapshot_fixture()
         legacy_actions = {key: section["decision"]["action"] for key, section in snapshot["markets"].items()}
@@ -1044,10 +1094,10 @@ class SnapshotContractTests(unittest.TestCase):
     def test_enrichment_publishes_independent_production_rule_contract(self) -> None:
         enriched = server.enrich_snapshot_v2(snapshot_fixture())
 
-        self.assertEqual(server.MODEL_VERSION, "smart-selector-2026-08-26.2-dual-track-rule")
+        self.assertEqual(server.MODEL_VERSION, "smart-selector-2026-08-29.1-two-tier-rule")
         self.assertEqual(enriched["production_decision"]["contract_version"], "production-rule-10d-v1")
-        self.assertEqual(enriched["production_decision"]["action_basis"], "dual_track_candidate_qualification_v3")
-        self.assertEqual(enriched["production_decision"]["rule_model_id"], "ten-day-audited-rule-ensemble-v3")
+        self.assertEqual(enriched["production_decision"]["action_basis"], "dual_track_candidate_qualification_v4")
+        self.assertEqual(enriched["production_decision"]["rule_model_id"], "ten-day-audited-rule-ensemble-v4")
         self.assertEqual(enriched["production_decision"]["action"], "NO_QUALIFIED_PICK")
         self.assertEqual(enriched["production_decision"]["score_kind"], "RULE_QUALIFICATION_SCORE")
         self.assertIsNone(enriched["production_decision"]["probability"])
@@ -1138,7 +1188,7 @@ class SnapshotContractTests(unittest.TestCase):
             }
         )
         self.assertIn(
-            "production_decision does not match deterministic current V3 rebuild",
+            "production_decision does not match deterministic current V4 rebuild",
             validate_snapshot(forged),
         )
 
@@ -1186,7 +1236,7 @@ class SnapshotContractTests(unittest.TestCase):
             )
             candidate["qualification_track"] = "quality_technical"
         self.assertIn(
-            "production_decision does not match deterministic current V3 rebuild",
+            "production_decision does not match deterministic current V4 rebuild",
             validate_snapshot(wrong_track),
         )
 
@@ -1197,7 +1247,7 @@ class SnapshotContractTests(unittest.TestCase):
             errors,
         )
         self.assertIn(
-            "production_decision does not match deterministic current V3 rebuild",
+            "production_decision does not match deterministic current V4 rebuild",
             errors,
         )
 
@@ -1304,6 +1354,48 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertIn(
             "production_decision.evaluated_candidates[0] requires event candidate scan",
             validate_snapshot(unscanned),
+        )
+
+    def test_current_v4_quality_track_allows_unscanned_event_enrichment_and_requires_exact_plan(self) -> None:
+        snapshot = current_v3_snapshot()
+        qualify_current_v3_row(snapshot, 0, with_positive_event=False)
+        source_row = snapshot["global_decision"]["evaluated_candidates"][0]
+        source_row["event_candidate_scanned"] = False
+        source_row["blocker_codes"] = [
+            "EVENT_CANDIDATE_NOT_SCANNED",
+            "VERIFIED_POSITIVE_EVENT_MISSING",
+        ]
+        entry = snapshot["production_rule_inputs"]["rows"][0]
+        candidate_snapshot = copy.deepcopy(entry["candidate_snapshot"])
+        entry.clear()
+        entry.update(production_rule_model.freeze_production_rule_input_row(source_row, 0))
+        entry.update(
+            {
+                "market": source_row["market"],
+                "code": source_row["code"],
+                "source_candidate_present": True,
+                "source_data_quality_score": 100.0,
+                "candidate_snapshot": candidate_snapshot,
+            }
+        )
+        rebuild_current_v3(snapshot)
+
+        primary = snapshot["production_decision"]["primary"]
+        self.assertEqual(primary["qualification_track"], "quality_technical")
+        self.assertFalse(primary["event_candidate_scanned"])
+        self.assertEqual(primary["ten_day_trade_plan"]["contract_version"], "ten-day-trade-plan-v1")
+        production_errors = [
+            error for error in validate_snapshot(snapshot) if error.startswith("production")
+        ]
+        self.assertEqual(production_errors, [])
+
+        tampered = copy.deepcopy(snapshot)
+        tampered["production_decision"]["evaluated_candidates"][0]["ten_day_trade_plan"][
+            "reference_quote"
+        ]["currency"] = "USD"
+        self.assertIn(
+            "production_decision.evaluated_candidates[0].ten_day_trade_plan.entry_zone currency is inconsistent",
+            validate_snapshot(tampered),
         )
 
     def test_new_model_rejects_v2_pair_but_archived_v2_contract_remains_supported(self) -> None:

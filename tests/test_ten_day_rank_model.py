@@ -239,6 +239,45 @@ class TenDayRankModelTests(unittest.TestCase):
         self.assertEqual(metrics["top1_absolute_hit_rate"], 1.0)
         json.dumps(metrics, allow_nan=False)
 
+    def test_block_bootstrap_resamples_complete_date_market_cells(self) -> None:
+        records = [
+            {
+                "market": "a_share",
+                "code": f"EARLY-{index}",
+                "signal_date": "2026-01-02",
+                "predicted_net_excess_return": index / 10,
+                "net_excess_return": index / 10,
+                "stock_net_return": index / 10,
+            }
+            for index in range(10)
+        ]
+        records.append(
+            {
+                "market": "a_share",
+                "code": "LATE",
+                "signal_date": "2026-01-03",
+                "predicted_net_excess_return": -0.5,
+                "net_excess_return": -0.5,
+                "stock_net_return": -0.5,
+            }
+        )
+
+        intervals = rank_model.block_bootstrap_confidence_intervals(
+            records,
+            repetitions=1,
+            block_size=1,
+        )
+
+        # The fixed RNG first chooses the later one-row cell twice.  A valid
+        # cell bootstrap therefore cannot leak a partial slice of the earlier
+        # ten-row cell into this replicate.
+        self.assertEqual(intervals["mean_top1_net_excess_return"]["lower"], -0.5)
+        self.assertEqual(intervals["mean_top1_net_excess_return"]["upper"], -0.5)
+        self.assertEqual(
+            intervals["mean_top1_net_excess_return"]["resampling_unit"],
+            "complete_date_market_cell",
+        )
+
     def test_collecting_contract_can_never_self_authorize(self) -> None:
         signal = dt.date(2025, 1, 2)
         samples = [sample_for_date(signal, f"S{index}", float(index), index / 100) for index in range(40)]
@@ -253,6 +292,7 @@ class TenDayRankModelTests(unittest.TestCase):
         )
 
         self.assertEqual(contract["status"], "COLLECTING")
+        self.assertEqual(contract["artifact_contract_version"], "ten-day-rank-artifact-v2")
         self.assertFalse(contract["calibrated"])
         self.assertFalse(contract["costs_ready"])
         self.assertFalse(contract["tail_risk_ready"])
@@ -262,6 +302,52 @@ class TenDayRankModelTests(unittest.TestCase):
         self.assertIsNone(contract["expected_net_excess_return"])
         self.assertEqual(contract["shadow_predictions"], [])
         self.assertEqual(contract["training_provenance"], "point_in_time_universe_ledger")
+        json.dumps(contract, allow_nan=False)
+
+    def test_invalid_ledger_reason_does_not_claim_verified_empty_history(self) -> None:
+        contract = rank_model.build_collecting_contract(
+            collection_diagnostics={"error_type": "ContractError", "sample_count": 0},
+            additional_reason_codes=("POINT_IN_TIME_LEDGER_INVALID",),
+        )
+        self.assertIn("POINT_IN_TIME_LEDGER_INVALID", contract["reason_codes"])
+        self.assertNotIn("POINT_IN_TIME_LEDGER_EMPTY", contract["reason_codes"])
+        self.assertIn("collection_diagnostics", contract)
+
+    def test_fit_walk_forward_uses_real_counts_final_holdout_and_never_promotes_itself(self) -> None:
+        first = dt.date(2024, 1, 2)
+        samples = []
+        for day_index in range(75):
+            signal = first + dt.timedelta(days=day_index * 2)
+            for symbol in range(4):
+                feature = float(symbol + day_index % 3)
+                samples.append(
+                    sample_for_date(
+                        signal,
+                        f"S{day_index}-{symbol}",
+                        feature,
+                        feature / 100,
+                    )
+                )
+
+        contract = rank_model.fit_walk_forward(
+            samples,
+            min_train_days=20,
+            test_block_days=10,
+        )
+
+        self.assertEqual(contract["status"], "SHADOW_READY")
+        self.assertEqual(contract["sample_count"], 300)
+        self.assertGreater(contract["fold_count"], 0)
+        self.assertEqual(
+            contract["validation"]["final_holdout"]["distinct_test_date_count"],
+            10,
+        )
+        self.assertIn("block_bootstrap_95pct", contract["validation"])
+        self.assertFalse(contract["validation"]["data_completeness_gate_passed"])
+        self.assertFalse(contract["promotion_gate_passed"])
+        self.assertFalse(contract["promotion_authorized"])
+        self.assertFalse(contract["production_eligible"])
+        self.assertFalse(contract["participates_in_decision"])
         json.dumps(contract, allow_nan=False)
 
 

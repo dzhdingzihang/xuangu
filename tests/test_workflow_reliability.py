@@ -14,9 +14,19 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "deploy-worker.yml"
 OBSERVATION_WORKFLOW = ROOT / ".github" / "workflows" / "settle-observations.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_deployment.py"
 WRANGLER = ROOT / "wrangler.jsonc"
 README = ROOT / "README.md"
+PINNED_ACTIONS = {
+    "checkout": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "setup-python": "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+    "setup-node": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+    "cache-restore": "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+    "cache-save": "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+    "upload-artifact": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "download-artifact": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+}
 
 
 def load_verify_module():
@@ -235,7 +245,41 @@ def ui_delivery_fixtures(
 
 
 class WorkflowReliabilityTests(unittest.TestCase):
-    def test_isolated_observation_settlement_workflow_is_bounded_and_json_only(self) -> None:
+    def test_independent_ci_is_branch_protection_ready_and_never_publishes(self) -> None:
+        self.assertTrue(CI_WORKFLOW.is_file())
+        workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+        for token in (
+            "pull_request:",
+            "branches: [main]",
+            "permissions:",
+            "contents: read",
+            "python -m unittest discover -s tests -v",
+            "node --check src/index.js",
+            "Parse workflow YAML",
+            "yaml.safe_load",
+            "npm run build",
+            "python scripts/publish_data_assets.py --source-root public/data --dry-run",
+            "npx --no-install wrangler deploy --dry-run",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, workflow)
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", workflow)
+        self.assertNotIn("GITHUB_WORKFLOW_DISPATCH_TOKEN", workflow)
+        self.assertEqual(
+            workflow.count("python scripts/publish_data_assets.py --source-root public/data --dry-run"),
+            1,
+        )
+
+    def test_live_workflows_fail_closed_instead_of_switching_r2_alias(self) -> None:
+        guard = "R2 publication is fail-closed until the alias and Worker can roll back atomically."
+        for path in (WORKFLOW, OBSERVATION_WORKFLOW):
+            workflow = path.read_text(encoding="utf-8")
+            with self.subTest(workflow=path.name):
+                self.assertIn("ENABLE_R2_DATA_PUBLISH", workflow)
+                self.assertIn(guard, workflow)
+                self.assertNotIn("scripts/publish_data_assets.py", workflow)
+
+    def test_isolated_observation_settlement_workflow_is_bounded_and_publishes_history(self) -> None:
         self.assertTrue(OBSERVATION_WORKFLOW.is_file())
         workflow = OBSERVATION_WORKFLOW.read_text(encoding="utf-8")
         for token in (
@@ -245,34 +289,71 @@ class WorkflowReliabilityTests(unittest.TestCase):
             "cancel-in-progress: false",
             "permissions: {}",
             "contents: write",
-            "actions/checkout@v7",
-            "actions/setup-python@v7",
+            PINNED_ACTIONS["checkout"],
+            "persist-credentials: false",
+            PINNED_ACTIONS["setup-python"],
+            PINNED_ACTIONS["setup-node"],
             'python-version: "3.12"',
             "cache: pip",
             "pip install -r requirements.txt",
             "timeout-minutes: 40",
             "python scripts/settle_observations.py --max-workers 12 --retries 0",
+            "python scripts/settle_rule_outcomes.py --max-workers 12 --retries 0",
             "observation_outcome_ledger.validate_outcome_batch",
+            "rule_outcome_ledger.validate_rule_outcome_batch",
             "data/outcomes/observation-settlements",
+            "data/outcomes/rule-settlements",
             "-name '*.json'",
             "git fetch --prune origin main",
             "rebase origin/main",
             'validate_only "${settlement_tree}"',
             "Observation settlement join changed after rebase",
             "push origin HEAD:main",
+            "push_with_scoped_token",
+            "GIT_CONFIG_VALUE_0=\"AUTHORIZATION: basic ${auth_header}\"",
             "for attempt in 1 2 3",
             "Observation settlement failed after 3 bounded attempts",
+            "npm ci",
+            "python scripts/verify_deployment.py data/picks/latest.json",
+            "--adopt-newer-live",
+            "python scripts/build_worker_assets.py",
+            "R2 publication is fail-closed until the alias and Worker can roll back atomically.",
+            "npx --no-install wrangler deploy",
+            "/api/history?page=1&limit=1",
+            "untracked_count=0",
             "[skip ci]",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, workflow)
         self.assertGreaterEqual(workflow.count('validate_only "${settlement_tree}"'), 2)
+        self.assertEqual(workflow.count('post_rebase_validation_status="$?"'), 1)
+        self.assertNotIn('if ! validate_only', workflow)
+        self.assertEqual(workflow.count('settle_and_validate "${settlement_tree}"'), 1)
+        self.assertEqual(workflow.count('settlement_status="$?"'), 1)
+        self.assertNotIn('if ! settle_and_validate', workflow)
+        self.assertEqual(workflow.count('publish_history_only "${settlement_tree}"'), 2)
+        self.assertEqual(workflow.count('history_publish_status="$?"'), 2)
+        self.assertNotIn('if ! publish_history_only', workflow)
         self.assertNotIn("git add data\n", workflow)
-        self.assertNotIn("data/picks", workflow)
-        self.assertNotIn("wrangler", workflow.lower())
-        self.assertNotIn("npm ", workflow)
         self.assertNotIn("continue-on-error", workflow)
         self.assertNotIn("--retries 2", workflow)
+        self.assertNotIn("CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}", workflow)
+        self.assertGreaterEqual(
+            workflow.count("CLOUDFLARE_API_TOKEN='${{ secrets.CLOUDFLARE_API_TOKEN }}'"),
+            4,
+        )
+        self.assertLess(
+            workflow.index("--adopt-newer-live"),
+            workflow.index("python scripts/build_worker_assets.py"),
+        )
+        self.assertIn("history_deploy_attempted=0", workflow)
+        self.assertIn('if [ "${history_deploy_attempted}" = "1" ]; then', workflow)
+        self.assertIn("history_deploy_attempted=1", workflow)
+        self.assertNotIn("history_deployed", workflow)
+        self.assertLess(
+            workflow.index("history_deploy_attempted=1"),
+            workflow.rindex("npx --no-install wrangler deploy"),
+        )
 
     def test_readme_documents_recovery_freshness_ui_and_observation_boundaries(self) -> None:
         readme = README.read_text(encoding="utf-8")
@@ -330,12 +411,15 @@ class WorkflowReliabilityTests(unittest.TestCase):
 
     def test_workflow_has_source_aware_fallbacks_and_stale_push_guard(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertEqual(workflow.count("- cron:"), 14)
+        self.assertEqual(workflow.count("- cron:"), 9)
         for hour in ("0", "2", "4", "7", "8", "12"):
-            self.assertIn(f'cron: "17 {hour} * * 1-5"', workflow)
             self.assertIn(f'cron: "47 {hour} * * 1-5"', workflow)
-        self.assertIn('cron: "47 14 * * 1-5"', workflow)
         self.assertIn('cron: "17 15 * * 1-5"', workflow)
+        self.assertIn('cron: "47 20 * * 1-5"', workflow)
+        self.assertIn('cron: "47 21 * * 1-5"', workflow)
+        self.assertNotIn('cron: "47 12 * * 0"', workflow)
+        self.assertNotIn('cron: "17 0 * * 1-5"', workflow)
+        self.assertNotIn('cron: "47 14 * * 1-5"', workflow)
         self.assertNotIn('cron: "58 0,1,2,4,5,6,15 * * 1-5"', workflow)
         self.assertNotIn('cron: "28 1,2,3,5,6,7,16 * * 1-5"', workflow)
         self.assertIn("cancel-in-progress: false", workflow)
@@ -411,17 +495,22 @@ class WorkflowReliabilityTests(unittest.TestCase):
     def test_workflow_actions_use_node24_runtime_generations(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         expected_counts = {
-            "actions/checkout@v7": 2,
-            "actions/setup-python@v7": 2,
-            "actions/setup-node@v7": 1,
-            "actions/cache/restore@v6": 3,
-            "actions/cache/save@v6": 3,
-            "actions/upload-artifact@v7": 1,
-            "actions/download-artifact@v8": 1,
+            PINNED_ACTIONS["checkout"]: 2,
+            PINNED_ACTIONS["setup-python"]: 2,
+            PINNED_ACTIONS["setup-node"]: 1,
+            PINNED_ACTIONS["cache-restore"]: 3,
+            PINNED_ACTIONS["cache-save"]: 3,
+            PINNED_ACTIONS["upload-artifact"]: 1,
+            PINNED_ACTIONS["download-artifact"]: 1,
         }
         for action, count in expected_counts.items():
             with self.subTest(action=action):
                 self.assertEqual(workflow.count(action), count)
+
+        for path in (WORKFLOW, OBSERVATION_WORKFLOW, CI_WORKFLOW):
+            for action in re.findall(r"uses:\s+([^\s#]+)", path.read_text(encoding="utf-8")):
+                with self.subTest(path=path.name, action=action):
+                    self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
 
     def test_workflow_archives_verified_timestamp_and_optional_ledger_or_fails_red(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -431,12 +520,17 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertIn("immutable archive snapshot sha256", workflow)
         self.assertIn('pathlib.Path("data/outcomes").rglob("*.json")', workflow)
         self.assertIn('rglob(pattern)', workflow)
-        self.assertIn("actions/upload-artifact@v7", workflow)
-        self.assertIn("actions/download-artifact@v8", workflow)
+        self.assertIn(PINNED_ACTIONS["upload-artifact"], workflow)
+        self.assertIn(PINNED_ACTIONS["download-artifact"], workflow)
         self.assertIn("Install archive validation dependencies", workflow)
         self.assertIn("git worktree add --detach", workflow)
         self.assertIn('rebase origin/main', workflow)
         self.assertIn("Archive push attempt ${attempt}/3", workflow)
+        self.assertIn('git -C "${archive_tree}" add -- data', workflow)
+        self.assertIn('archive_add_status="$?"', workflow)
+        self.assertIn("Archive staging failed on attempt ${attempt}", workflow)
+        self.assertIn("push_archive_with_scoped_token", workflow)
+        self.assertEqual(workflow.count("persist-credentials: false"), 2)
         self.assertIn("Archive failed after 3 bounded attempts", workflow)
         self.assertIn("[skip ci]", workflow)
         self.assertIn("from scripts.snapshot_archive_policy import ARCHIVE_POLICY, archive_reasons", workflow)
@@ -455,7 +549,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertIn("contents: read", deploy_section)
         self.assertNotIn("contents: write", deploy_section)
         self.assertIn("contents: write", archive_section)
-        self.assertLess(workflow.index("npx wrangler deploy"), workflow.index("Verify complete deployed contract"))
+        self.assertLess(workflow.index("npx --no-install wrangler deploy"), workflow.index("Verify complete deployed contract"))
         self.assertIn("python scripts/verify_deployment.py public/data/picks/latest.json", workflow)
         self.assertIn("--attempts 8", workflow)
         self.assertIn("--timeout-seconds 15", workflow)
@@ -464,7 +558,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         validation = "python scripts/validate_snapshot.py data/picks/latest.json"
         self.assertIn(validation, workflow)
-        self.assertLess(workflow.index(validation), workflow.index("npx wrangler deploy"))
+        self.assertLess(workflow.index(validation), workflow.index("npx --no-install wrangler deploy"))
         validation_step = workflow[
             workflow.rindex("- name:", 0, workflow.index(validation)) : workflow.index(validation) + len(validation)
         ]
@@ -473,10 +567,10 @@ class WorkflowReliabilityTests(unittest.TestCase):
             validation_step,
         )
 
-    def test_failed_post_deploy_verification_rolls_back_exact_previous_version(self) -> None:
+    def test_failed_deployment_attempt_or_verification_rolls_back_exact_previous_version(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         capture = "npx --no-install wrangler deployments status --name xuangu --json"
-        deploy = "npx wrangler deploy\n          --message"
+        deploy = "npx --no-install wrangler deploy\n          --message"
         verify = "Verify complete deployed contract"
         rollback = "npx --no-install wrangler rollback"
         for token in (
@@ -486,8 +580,8 @@ class WorkflowReliabilityTests(unittest.TestCase):
             "id: verify_deployment",
             rollback,
             "steps.rollback_target.outputs.version_id",
-            "steps.deploy_worker.outcome == 'success'",
-            "steps.verify_deployment.outcome == 'failure'",
+            "steps.rollback_target.outcome == 'success'",
+            "steps.deploy_worker.outcome != 'skipped'",
             "--yes",
             "rollback-target-latest.json",
             "rollback-result-deployment.json",
@@ -497,6 +591,8 @@ class WorkflowReliabilityTests(unittest.TestCase):
         ):
             with self.subTest(token=token):
                 self.assertIn(token, workflow)
+        self.assertNotIn("steps.deploy_worker.outcome == 'success'", workflow)
+        self.assertNotIn("steps.verify_deployment.outcome == 'failure'", workflow)
         self.assertLess(workflow.index(capture), workflow.index(deploy))
         self.assertLess(workflow.index(deploy), workflow.index(verify))
         self.assertLess(workflow.index(verify), workflow.index(rollback))
@@ -560,7 +656,7 @@ class DeploymentVerifierTests(unittest.TestCase):
             [],
         )
 
-    def test_workflow_utc_crons_match_the_verifier_checkpoint_set(self) -> None:
+    def test_workflow_utc_crons_are_watchdogs_plus_post_close_variants(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         actual: set[tuple[int, int]] = set()
         for minute, hours in re.findall(r'cron: "(\d+) ([\d,]+) \* \* 1-5"', workflow):
@@ -568,7 +664,15 @@ class DeploymentVerifierTests(unittest.TestCase):
                 local_minutes = (int(hour) * 60 + int(minute) + 8 * 60) % (24 * 60)
                 actual.add(divmod(local_minutes, 60))
 
-        self.assertEqual(actual, set(self.module.SCHEDULED_REFRESH_CHECKPOINTS))
+        expected_watchdogs = {
+            (8, 47), (10, 47), (12, 47), (15, 47), (16, 47), (20, 47), (23, 17),
+            (4, 47), (5, 47),
+        }
+        self.assertEqual(actual, expected_watchdogs)
+        self.assertTrue(
+            {(8, 47), (10, 47), (12, 47), (15, 47), (16, 47), (20, 47), (23, 17)}
+            .issubset(set(self.module.SCHEDULED_REFRESH_CHECKPOINTS))
+        )
 
     def test_scheduled_snapshot_status_contract_rejects_device_or_live_mode(self) -> None:
         self.assertEqual(
