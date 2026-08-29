@@ -1371,11 +1371,26 @@ class BuildWorkerAssetsTests(unittest.TestCase):
                 name: json.loads((picks / name).read_text(encoding="utf-8"))
                 for name in ("ui-bootstrap.json", "ui-candidates.json", "ui-events.json")
             }
+            oversized_history_row = {
+                "snapshot_key": snapshot["snapshot_key"],
+                "analysis_models": {
+                    "ten_day_excess_rank": {"diagnostics": "x" * 25_000},
+                },
+                "production_decision": {
+                    "action": "QUALIFIED_PICK",
+                    "qualified_candidate_count": 10,
+                    "primary": {"code": "PFE", "qualification_score": 75.0},
+                    "qualified_candidates": [
+                        {"code": f"Q{index}", "evidence": "y" * 2_000}
+                        for index in range(10)
+                    ],
+                },
+            }
             manifest = build_worker_assets.build_data_manifest_assets(
                 snapshot,
                 source_bytes,
                 ui_assets,
-                {"summaries": [], "history_evaluation": {}},
+                {"summaries": [oversized_history_row], "history_evaluation": {}},
                 data_root,
             )
 
@@ -1402,6 +1417,20 @@ class BuildWorkerAssetsTests(unittest.TestCase):
             )
             candidate_list = json.loads((data_root / manifest["candidates_key"]).read_text())
             self.assertTrue(candidate_list["candidates"])
+            history_list = json.loads((data_root / manifest["history_key"]).read_text())
+            history_row = history_list["history"][0]
+            self.assertNotIn("analysis_models", history_row)
+            self.assertNotIn(
+                "qualified_candidates", history_row["production_decision"]
+            )
+            self.assertEqual(history_row["production_decision"]["primary"]["code"], "PFE")
+            self.assertEqual(
+                history_row["production_decision"]["qualified_candidate_count"], 10
+            )
+            self.assertIn("analysis_models", oversized_history_row)
+            self.assertIn(
+                "qualified_candidates", oversized_history_row["production_decision"]
+            )
             self.assertEqual(
                 json.loads((data_root / manifest["summary_key"]).read_text())["feature_cutoff_at"],
                 snapshot["feature_cutoff_at"],

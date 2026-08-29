@@ -1832,6 +1832,24 @@ def _scheduler_health(snapshot: dict, history_manifest: dict) -> dict:
     }
 
 
+def compact_history_list_row(row: dict) -> dict:
+    """Keep the paginated history index bounded without losing its primary audit row.
+
+    Full model diagnostics and every qualified candidate remain available in
+    the immutable snapshot and the archival manifest.  The history list UI
+    only consumes the production primary plus the published counts, so copying
+    those large duplicate structures into every list row is both unnecessary
+    and capable of blocking an otherwise valid data publication.
+    """
+
+    result = copy.deepcopy(row)
+    result.pop("analysis_models", None)
+    production = result.get("production_decision")
+    if isinstance(production, dict):
+        production.pop("qualified_candidates", None)
+    return result
+
+
 def build_data_manifest_assets(
     snapshot: dict,
     source_snapshot_bytes: bytes,
@@ -1903,10 +1921,15 @@ def build_data_manifest_assets(
             raise ValueError(
                 f"event list row {index} exceeds {MAX_DATA_EVENT_ROW_BYTES} bytes: {byte_size}"
             )
+    history_rows = [
+        compact_history_list_row(row)
+        for row in (history_manifest.get("summaries") or [])
+        if isinstance(row, dict)
+    ]
     history_payload = {
         "contract_version": HISTORY_LIST_CONTRACT_VERSION,
         **identity,
-        "history": copy.deepcopy(history_manifest.get("summaries") or []),
+        "history": history_rows,
         "history_evaluation": copy.deepcopy(history_manifest.get("history_evaluation") or {}),
         "observation_ledger": copy.deepcopy(history_manifest.get("observation_ledger") or {}),
         "observation_performance": copy.deepcopy(history_manifest.get("observation_performance") or {}),
