@@ -480,6 +480,9 @@ let view = schedulerHealthPresentation();
 assert.equal(view.primaryState, "ENABLED");
 assert.equal(view.primaryLabel, "GitHub Actions 主调度已启用");
 assert.equal(view.cloudflareDispatchLabel, "可选 dispatch 未启用（不影响主调度）");
+assert.equal(view.contractLabel, "scheduler-health-v2");
+assert.equal(view.schedulerGapLabel, "无");
+assert.equal(view.gapLabel, "scheduler-health-v2 · 调度缺口：无");
 assert.equal(view.watchdogLabel, "30 分钟 watchdog 已配置");
 assert.equal(view.nextActiveRefresh, state.status.next_active_refresh);
 assert.equal(view.usPrimaryCheckpoints, "04:17 夏令时 / 05:17 冬令时");
@@ -493,7 +496,7 @@ assert.match(view.publicationSlo, /证据初始化中/);
 assert.equal(view.readinessLayers.research.label, "已就绪");
 assert.equal(view.readinessLayers.checkpoint.label, "证据初始化中");
 assert.equal(view.readinessLayers.unattended.label, "证据初始化中");
-assert.equal(view.readinessLayers.calibrated.label, "证据初始化中");
+assert.equal(view.readinessLayers.calibrated.label, "未就绪");
 assert.throws(() => validateResourcePayload("scheduler", { ...gate, snapshot_key: "other.json" }));
 assert.throws(() => validateResourcePayload("scheduler", { ...gate, scheduler_primary_provider: "cloudflare" }));
 assert.throws(() => validateResourcePayload("scheduler", {
@@ -571,7 +574,8 @@ state.schedulerGate = legacyGate;
 state.status = {};
 view = schedulerHealthPresentation();
 assert.equal(view.primaryState, "UNKNOWN", "v1 is accepted read-only, never promoted to GitHub primary evidence");
-assert.match(view.gapLabel, /旧版调度合同/);
+assert.equal(view.contractLabel, "scheduler-health-v1（只读）");
+assert.match(view.schedulerGapLabel, /旧版调度合同/);
 state.schedulerGate = null;
 assert.equal(schedulerHealthPresentation().primaryState, "UNKNOWN");
 """

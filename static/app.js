@@ -4651,11 +4651,15 @@ function schedulerHealthPresentation() {
     ? "GitHub Actions 主调度已启用"
     : primaryState === "DISABLED" ? "GitHub Actions 主调度未启用" : "GitHub Actions 主调度状态未知";
   const primaryTone = primaryState === "ENABLED" ? "positive" : primaryState === "DISABLED" ? "negative" : "warning";
-  const gapLabel = statusFieldsPresent && (!statusReady || !v2ContractReady || !contractsConsistent)
+  const schedulerGapLabel = statusFieldsPresent && (!statusReady || !v2ContractReady || !contractsConsistent)
     ? "未知（状态 API 与 gate-status 合同缺失或不一致）"
     : legacyContractReady ? "旧版调度合同仅供读取，主调度状态未知"
       : !v2ContractReady ? "未知（gate-status v2 合同不可用）"
         : primaryEnabled ? "无" : "GitHub Actions 主调度未启用";
+  const contractLabel = v2ContractReady
+    ? gate.contract_version
+    : legacyContractReady ? `${gate.contract_version}（只读）` : "未知";
+  const gapLabel = `${contractLabel} · 调度缺口：${schedulerGapLabel}`;
   const schedulerReadiness = v2ContractReady
     && (contractsConsistent || gateOnlyFallback)
     ? gate.scheduler_readiness : "UNKNOWN";
@@ -4712,11 +4716,14 @@ function schedulerHealthPresentation() {
     research: readinessLayerPresentation(readinessSource.research_decision_ready, initializing),
     checkpoint: readinessLayerPresentation(readinessSource.checkpoint_evidence_ready, initializing),
     unattended: readinessLayerPresentation(readinessSource.unattended_refresh_ready, initializing),
-    calibrated: readinessLayerPresentation(readinessSource.calibrated_execution_ready, initializing),
+    // Calibration authorization is a model-readiness fact, not scheduler
+    // evidence. Never disguise a known false value as ledger initialization.
+    calibrated: readinessLayerPresentation(readinessSource.calibrated_execution_ready, false),
   };
   const usSchedule = statusReady ? status.schedule_us_post_close : null;
   return {
-    contractReady, statusReady, contractsConsistent, primaryState, primaryLabel, primaryTone, gapLabel,
+    contractReady, statusReady, contractsConsistent, primaryState, primaryLabel, primaryTone,
+    contractLabel, schedulerGapLabel, gapLabel,
     activeMode, schedulerReadiness, readinessLabel, readinessTone,
     cloudflareDispatchEnabled, cloudflareDispatchLabel, publicationSlo, readinessLayers,
     hasBatchPublicationEvidence, batchEvidence, watchdogLabel, watchdogDetail,
