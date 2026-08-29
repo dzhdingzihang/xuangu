@@ -816,6 +816,60 @@ assert.equal(schedulerHealthPresentation().primaryState, "UNKNOWN");
         self.assertIn("shadow-model-card", self.js + self.css)
         self.assertNotIn("正式上涨概率", self.js)
 
+    def test_historical_replay_card_states_its_retrospective_shortlist_boundary(self) -> None:
+        self.assertRegex(self.js, r"function renderHistoricalReplayCard\(")
+        for phrase in (
+            "历史真实交易日回放 · 研究隔离",
+            "Archived shortlist only",
+            "retrospective",
+            "not full historical universe",
+            "ARCHIVED_SHORTLIST_ONLY",
+            "不能消除短名单选择偏差",
+        ):
+            self.assertIn(phrase, self.js)
+        run_app_node(
+            r"""
+const isolated = renderHistoricalReplayCard({
+  status: "READY",
+  evidence_class: "RETROSPECTIVE",
+  universe_scope: "ARCHIVED_SHORTLIST_ONLY",
+  full_point_in_time_universe: false,
+  cohort_count: 5,
+  independent_entry_date_count: 4,
+  shortlist_count: 15,
+  settled_count: 10,
+  pending_count: 5,
+  market_counts: { a_share: 5, hk: 5, us: 5 },
+  metrics: {
+    sample_count: 10,
+    mean_net_return: 0.02,
+    mean_net_excess_return: 0.01,
+    positive_net_return_rate: 0.6,
+  },
+  included_in_live_observation_performance: false,
+  included_in_shadow_research: false,
+  included_in_executable_performance: false,
+  calibrated: false,
+  participates_in_decision: false,
+  production_eligible: false,
+  promotion_eligible: false,
+  authorizes_production: false,
+});
+assert.match(isolated, /data-replay-isolated="true"/);
+assert.match(isolated, /false \/ false \/ false/);
+assert.match(isolated, />4<\/strong>/);
+assert.match(isolated, /2\.00%/);
+
+const invalid = renderHistoricalReplayCard({
+  status: "READY",
+  full_point_in_time_universe: true,
+  participates_in_decision: true,
+});
+assert.match(invalid, /FAIL_CLOSED/);
+assert.match(invalid, /data-replay-isolated="false"/);
+"""
+        )
+
     def test_research_priority_uses_the_server_candidate_snapshot_without_silent_substitution(self) -> None:
         self.assertRegex(self.js, r"function researchCandidateSnapshot\(")
         self.assertIn("priority?.candidate_snapshot", self.js)

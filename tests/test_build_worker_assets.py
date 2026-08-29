@@ -940,6 +940,62 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         self.assertNotIn("private_fold_rows", result["validation"])
         self.assertNotIn("coefficients", result["market_models"]["a_share"])
 
+    def test_historical_replay_summary_is_bounded_and_cannot_publish_authority(self) -> None:
+        pick = {
+            "analysis_models": {
+                "historical_replay": {
+                    "schema_version": "archived-shortlist-replay-summary-v1",
+                    "track": "ARCHIVED_SHORTLIST_REPLAY",
+                    "evidence_class": "RETROSPECTIVE",
+                    "universe_scope": "ARCHIVED_SHORTLIST_ONLY",
+                    "full_point_in_time_universe": False,
+                    "status": "READY",
+                    "cohort_count": 9,
+                    "signal_date_count": 4,
+                    "independent_entry_date_count": 7,
+                    "shortlist_count": 27,
+                    "settled_count": 18,
+                    "pending_count": 9,
+                    "status_counts": {"SETTLED": 18, "PENDING_MATURITY": 9},
+                    "market_counts": {"a_share": 10, "hk": 8, "us": 9},
+                    "metrics": {
+                        "sample_count": 18,
+                        "mean_net_return": 0.02,
+                        "mean_net_excess_return": 0.01,
+                        "positive_net_return_rate": 0.6,
+                        "private_distribution": [1, 2, 3],
+                    },
+                    "cohorts": [{"large": "drop-me"}] * 100,
+                    "participates_in_decision": True,
+                    "promotion_eligible": True,
+                    "authorizes_production": True,
+                }
+            }
+        }
+
+        result = build_worker_assets.summarize_analysis_models(pick)["historical_replay"]
+
+        self.assertEqual(result["cohort_count"], 9)
+        self.assertEqual(result["signal_date_count"], 4)
+        self.assertEqual(result["independent_entry_date_count"], 7)
+        self.assertEqual(result["metrics"]["sample_count"], 18)
+        self.assertNotIn("private_distribution", result["metrics"])
+        self.assertNotIn("cohorts", result)
+        self.assertEqual(result["evidence_class"], "RETROSPECTIVE")
+        self.assertEqual(result["universe_scope"], "ARCHIVED_SHORTLIST_ONLY")
+        self.assertFalse(result["full_point_in_time_universe"])
+        for field in (
+            "included_in_live_observation_performance",
+            "included_in_shadow_research",
+            "included_in_executable_performance",
+            "calibrated",
+            "participates_in_decision",
+            "production_eligible",
+            "promotion_eligible",
+            "authorizes_production",
+        ):
+            self.assertIs(result[field], False)
+
     def test_worker_runtime_is_a_bounded_prevalidated_summary(self) -> None:
         snapshot = runtime_snapshot_fixture()
         source_bytes = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()

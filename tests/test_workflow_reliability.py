@@ -15,6 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "deploy-worker.yml"
 OBSERVATION_WORKFLOW = ROOT / ".github" / "workflows" / "settle-observations.yml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+HISTORICAL_REPLAY_WORKFLOW = ROOT / ".github" / "workflows" / "historical-replay.yml"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_deployment.py"
 WRANGLER = ROOT / "wrangler.jsonc"
 README = ROOT / "README.md"
@@ -520,6 +521,55 @@ class WorkflowReliabilityTests(unittest.TestCase):
             workflow.index("history_deploy_attempted=1"),
             workflow.rindex("npx --no-install wrangler deploy"),
         )
+
+    def test_historical_replay_runs_only_in_github_and_dispatches_a_fresh_snapshot(self) -> None:
+        self.assertTrue(HISTORICAL_REPLAY_WORKFLOW.is_file())
+        workflow = HISTORICAL_REPLAY_WORKFLOW.read_text(encoding="utf-8")
+        for token in (
+            "workflow_dispatch:",
+            'cron: "37 5 * * 1-6"',
+            "permissions: {}",
+            "group: xuangu-historical-replay",
+            "cancel-in-progress: false",
+            "runs-on: ubuntu-latest",
+            "timeout-minutes: 60",
+            "contents: write",
+            "actions: write",
+            PINNED_ACTIONS["checkout"],
+            "persist-credentials: false",
+            PINNED_ACTIONS["setup-python"],
+            'python-version: "3.12"',
+            "cache: pip",
+            PINNED_ACTIONS["cache-restore"],
+            PINNED_ACTIONS["cache-save"],
+            "python scripts/build_historical_replay.py",
+            "--max-workers 8",
+            "data/backtests/archived-shortlist-replay-v1.json",
+            "push_with_scoped_token",
+            "GIT_CONFIG_VALUE_0=\"AUTHORIZATION: basic ${auth_header}\"",
+            "for attempt in 1 2 3",
+            "git fetch --prune origin main",
+            "rebase origin/main",
+            "[skip ci]",
+            "actions/workflows/deploy-worker.yml/dispatches",
+            "ref=main",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, workflow)
+        lowered = workflow.lower()
+        for forbidden in (
+            "futu",
+            "opend",
+            "cloudflare_api_token",
+            "wrangler",
+            "data/picks/latest.json",
+            "server.py --once",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, lowered)
+        self.assertNotIn("persist-credentials: true", workflow)
+        self.assertNotIn("continue-on-error", workflow)
+        self.assertNotIn("git add data", workflow)
 
     def test_readme_documents_recovery_freshness_ui_and_observation_boundaries(self) -> None:
         readme = README.read_text(encoding="utf-8")

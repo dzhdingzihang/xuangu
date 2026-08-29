@@ -184,6 +184,35 @@ A / 港 / 美的 Legacy 分布刻度并不相同，质量通道因此使用 64 /
 
 每个新快照还冻结 `feature_cutoff_at`：所有特征的 `observed_at` 必须不晚于 cutoff，且 cutoff 必须早于对应市场下一交易日开盘。旧快照不会事后回填为点时训练样本；缺少合法 cutoff、成员来源或源快照摘要时，Rank 样本链失败关闭。
 
+### 7.2 GitHub 云端历史回放
+
+仓库额外维护 `ARCHIVED_SHORTLIST_REPLAY` 研究轨，用过去真正保存下来的决策快照复盘“当时已进入首选或观察名单的股票”。它由 `.github/workflows/historical-replay.yml` 在 GitHub-hosted runner 上运行，读取不可变 `data/picks/*.json`，按每个 `entry_trade_date × market` 选择生成时间最晚且确有短名单的合法快照，再用复权日 K 结算。这样，同一入场日盘前的多次刷新只算一次；开盘后生成、自然顺延到下一个入场日的快照仍保留为独立 cohort：
+
+```text
+快照生成并冻结候选
+  → 快照发布后的第一个对应市场 regular open 入场
+  → 从入场日计第 10 个真实交易日 close 退出
+  → 扣市场成本
+  → 减去同窗口注册宽基净收益
+```
+
+注册基准继续使用 A 股 `510300`、港股 `2800.HK`、美股 `SPY`。行情必须明确为公司行动调整序列；缺开盘、退出收盘、基准同窗口或调整口径时保持 `PENDING_DATA`，不能用相邻日期或原始未复权价格补齐。已经 `SETTLED` 的回放行保持不可变，供应商之后修订数据也不能静默重写旧结果。
+
+这条轨道比“拿今天的股票名单向前套历史 K 线”更接近真实复盘，因为候选和因子确实来自当时保存的快照；但它仍然只覆盖**当时归档的短名单**，不是当日全市场真实 `300 / 200 / 300` 召回池，也不补写当时没有保存的退市证券、停牌状态、公告修订或财务发布时间。因此公开合同固定为：
+
+```text
+evidence_class=RETROSPECTIVE
+universe_scope=ARCHIVED_SHORTLIST_ONLY
+full_point_in_time_universe=false
+calibrated=false
+participates_in_decision=false
+production_eligible=false
+promotion_eligible=false
+authorizes_production=false
+```
+
+它保留旧评分、置信度、推荐度、通道和排序及其真实 10 交易日结果，为后续按因子分层诊断提供可审计底表；当前页面发布的是短名单整体结果，不把它伪装成单因子因果效果。它不计入前瞻观察天数，不与 `MODEL_OBSERVATION`、`SHADOW_RESEARCH`、`EXECUTABLE_MODEL` 或规则资格收益混合，也不能因为回放指标好看就自动生成正式候选。生产晋级仍只接受未来真实冻结、等待成熟且通过独立留出与治理门槛的证据。
+
 ### 8. global 严格门禁
 
 跨市场正式动作由 `strict_cross_market_gate_v1` 控制。以下任一类条件不满足，就输出 `NO_VALID_PICK`：
@@ -234,16 +263,17 @@ A / 港 / 美的 Legacy 分布刻度并不相同，质量通道因此使用 64 /
 
 这套规则已经替代“周一到周五等于交易日”的旧逻辑。
 
-## 四类隔离历史证据与规则资格留痕
+## 五类隔离历史证据与规则资格留痕
 
-历史检验使用四类物理隔离的证据，原始 `data/picks/*.json` 始终保持不可变，任何一类都不能借另一类的结果扩大自己的样本分母：
+历史检验使用五类物理隔离的证据，原始 `data/picks/*.json` 始终保持不可变，任何一类都不能借另一类的结果扩大自己的样本分母：
 
 - **规则资格结果**：每次 V4 `production_decision` 保存稳定 `qualification_id`、通道、资格分、门禁证据、严格交易复核计划和 10 日窗口。`data/outcomes/rule-settlements/<snapshot>.json` 对当批全部合格候选（含是否 primary）按“下一交易日开盘到第 10 个交易日收盘”登记并结算，同时记录市场注册基准、费用后绝对/超额收益和最大不利波动。它只评估规则，不计算 Brier/ECE，不进入校准概率样本，也不能授权生产。
 - **正式可执行轨**：写入 `data/outcomes/executable/<prediction_id>.json`，`track=EXECUTABLE_MODEL`。只有完整、已校准且通过严格门禁的 `global_decision.primary` 才能登记；`NO_VALID_PICK`、Legacy、V4 规则资格和研究优先项都不会进入正式收益分母。
 - **Shadow 研究轨**：继续写入 `data/outcomes/<prediction_id>.json`，`track=SHADOW_RESEARCH`。只有符合该版本研究采样合同的预测才登记影子概率、净效用、尾部风险、成本和模型产物身份；不合格概率不会被错记成研究样本。
 - **完整观察轨**：写入 `data/outcomes/observations/obscohort_<id>.json`，`track=MODEL_OBSERVATION`，并在 `observation-settlements` 中独立结算。cohort/revision 冻结源快照文件名、SHA-256、字节数、生成时点和 `feature_cutoff_at`，再连接源快照里的 `point_in_time_universe` 读取当时特征；它用于诊断原概率模型及净超额排序 V2，明确 `included_in_shadow_research=false`、`included_in_executable_performance=false`、`authorizes_production=false`。
+- **归档短名单回放轨**：写入 `data/backtests/archived-shortlist-replay-v1.json`，`track=ARCHIVED_SHORTLIST_REPLAY`。它只复盘历史快照当时实际保存的首选/观察名单与因子，使用真实交易所日历、调整行情、成本和注册基准生成回顾性结果；明确 `universe_scope=ARCHIVED_SHORTLIST_ONLY`，不冒充完整点时候选池，不进入任何生产晋级分母。
 
-四类证据的结算合同共同遵循：
+五类证据的结算合同共同遵循：
 
 - 入场采用下一交易日开盘，退出采用第 10 个交易日收盘；
 - 合同同时固化交易所日历给出的真实开盘、收盘时刻；不会用 UTC 午夜伪装成交时间；
@@ -323,6 +353,8 @@ Cloudflare Cron 触发的 `workflow_dispatch` 是可选冗余调用器，不再�
 每次实际 cron 都记录来源调用点、逻辑检查点、开始延迟、恢复模式和生成时间；对应审计字段包括 `source_invocation_slot`、`scheduled_invocation_slot` 与 `scheduler_delay_seconds`。发布前按“调用点 + 生成时间”做单调校验，迟到旧任务不能覆盖新批次。普通延迟仍在原调用点的 4 小时窗口内处理；超过窗口时进入有界 `late_cron_recovery`，有效恢复调用点最多 12 小时。`schedule_gate.py` 只用线上完整 `/api/latest` 作为“已成功发布”证据：线上不可达、目标批次缺失/失败，或行情/候选池处于可恢复降级时继续运行。门禁硬校验 A/港/美实际召回达到 `300 / 200 / 300`，并检查动态来源、行情、A 股基础/技术评分及深研覆盖；仓库里的 `latest.json` 不能单独抑制刷新，因为它不证明 Cloudflare 已经切换成功。
 
 观察/规则结算与选股生成分离：`settle-observations.yml` 每天北京时间 `06:30` 主跑，`12:30` 执行幂等 watchdog，也可手动触发。它同时更新 observation settlement 与 rule settlement，验证后提交必要 JSON，并立即构建、部署历史资产；即使没有新提交也会验证并发布当前历史口径。对每个结算发布尝试只做单轮行情请求（`--retries 0`）；未成熟预测正常保持 `PENDING_MATURITY`，行情源超时或缺数固化为 `PENDING_DATA` 等待下次运行。Workflow 整体设置 40 分钟硬超时，给安装依赖、结算、最多 3 次 Git 冲突处理、历史构建、部署和验收留出有界时间。只有合同冲突、无法读取的账本、非法结算结果或历史线上验收失败才让 Workflow 标红。
+
+归档短名单回放由独立 `historical-replay.yml` 执行，使用单独并发锁，避免延迟的研究任务阻塞生产检查点。GitHub Actions Cache 仅用于减少重复行情请求，不是长期证据；最终合同化 JSON 才是可审计产物。产物改变时，Workflow 只提交这一个白名单文件，并通过 GitHub 自己的 workflow dispatch 请求现有 `deploy-worker.yml` 生成和发布新快照；回放任务本身不持有 Cloudflare 密钥，不调用 OpenD/Futu，也不直接改写 `latest.json`。
 
 一次生成与 outcome 结算各最多尝试 3 次。部署前执行单元测试、JavaScript 语法检查、snapshot schema 校验和 immutable 快照一致性检查；部署后先轻量轮询 `generated_at` / `snapshot_key` 直到新版本收敛，再验证完整快照摘要、历史、不可变快照、页面合同和所有可见候选行情，避免在边缘版本传播期每轮重复执行整套探针。生成、测试或部署前校验失败时不会切换生产版。部署前还会记录当前唯一 100% 生效的 Cloudflare Worker Version 和快照摘要；若部署后完整验收失败，Workflow 会标红并自动回滚到该精确版本，再核对旧快照身份与摘要。这是自动恢复，不是零暴露发布：新版在部署后验证窗口内可能短暂在线；回滚本身若失败也会继续标红，需要人工处理。
 

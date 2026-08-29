@@ -1,0 +1,222 @@
+name: Build Historical Archived Shortlist Replay
+
+on:
+  schedule:
+    # Beijing 13:37. The replay is idempotent, so delayed GitHub schedules scan
+    # and settle the same immutable archived cohorts without relying on punctuality.
+    - cron: "37 5 * * 1-6"
+  workflow_dispatch:
+    inputs:
+      as_of:
+        description: Optional timezone-aware replay cutoff; blank uses current UTC
+        required: false
+        type: string
+      max_cohorts:
+        description: Bounded number of newest immutable snapshot-market cohorts
+        required: false
+        default: "2000"
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: xuangu-historical-replay
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: write
+    env:
+      ARTIFACT_PATH: data/backtests/archived-shortlist-replay-v1.json
+      REPLAY_CACHE_DIR: data/runtime-cache/historical-replay
+      REPLAY_AS_OF: ${{ inputs.as_of || '' }}
+      REPLAY_MAX_COHORTS: ${{ inputs.max_cohorts || '2000' }}
+      PYTHONHASHSEED: "0"
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Resolve bounded cache identity
+        id: cache_identity
+        run: |
+          set -euo pipefail
+          echo "day=$(date -u +%F)" >> "${GITHUB_OUTPUT}"
+          mkdir -p "${REPLAY_CACHE_DIR}"
+
+      - name: Restore same-day replay price cache
+        id: replay_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ env.REPLAY_CACHE_DIR }}
+          key: historical-replay-price-v1-${{ runner.os }}-${{ steps.cache_identity.outputs.day }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            historical-replay-price-v1-${{ runner.os }}-${{ steps.cache_identity.outputs.day }}-
+
+      - name: Install replay dependencies
+        run: pip install -r requirements.txt
+
+      - name: Test historical replay contracts
+        run: >-
+          python -m unittest discover -s tests
+          -p 'test_*historical_replay.py' -v
+
+      - name: Build and validate research-only replay artifact
+        env:
+          HISTORICAL_REPLAY_CACHE_DIR: ${{ env.REPLAY_CACHE_DIR }}
+        run: |
+          set -euo pipefail
+          arguments=(
+            --picks-dir data/picks
+            --output "${ARTIFACT_PATH}"
+            --max-cohorts "${REPLAY_MAX_COHORTS}"
+            --max-workers 8
+            --cache-dir "${REPLAY_CACHE_DIR}"
+          )
+          if [ -n "${REPLAY_AS_OF}" ]; then
+            arguments+=(--as-of "${REPLAY_AS_OF}")
+          fi
+          python scripts/build_historical_replay.py "${arguments[@]}"
+          python scripts/build_historical_replay.py \
+            --output "${ARTIFACT_PATH}" \
+            --validate-only
+
+      - name: Save validated same-day replay price cache
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ env.REPLAY_CACHE_DIR }}
+          key: historical-replay-price-v1-${{ runner.os }}-${{ steps.cache_identity.outputs.day }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload replay recovery artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: historical-replay-${{ github.run_id }}
+          path: ${{ env.ARTIFACT_PATH }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Detect a changed validated replay
+        id: replay_change
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain=v1 -- "${ARTIFACT_PATH}")" ]; then
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Persist only the replay artifact with bounded conflict retries
+        id: publish_replay
+        if: steps.replay_change.outputs.changed == 'true'
+        run: |
+          set -uo pipefail
+          artifact_source="${GITHUB_WORKSPACE}/${ARTIFACT_PATH}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          push_with_scoped_token() {
+            replay_tree="$1"
+            auth_header="$(printf 'x-access-token:%s' '${{ github.token }}' | base64 | tr -d '\n')"
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}" \
+              git -C "${replay_tree}" push origin HEAD:main
+            push_status="$?"
+            unset auth_header
+            return "${push_status}"
+          }
+
+          for attempt in 1 2 3; do
+            echo "Historical replay push attempt ${attempt}/3"
+            if ! git fetch --prune origin main; then
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            attempt_root="$(mktemp -d "${RUNNER_TEMP}/xuangu-replay-${attempt}-XXXXXX")"
+            replay_tree="${attempt_root}/worktree"
+            if ! git worktree add --detach "${replay_tree}" origin/main; then
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            mkdir -p "${replay_tree}/$(dirname "${ARTIFACT_PATH}")"
+            if ! cp "${artifact_source}" "${replay_tree}/${ARTIFACT_PATH}"; then
+              git worktree remove --force "${replay_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            if ! python "${replay_tree}/scripts/build_historical_replay.py" \
+              --output "${replay_tree}/${ARTIFACT_PATH}" \
+              --validate-only; then
+              git worktree remove --force "${replay_tree}"
+              exit 1
+            fi
+            if ! git -C "${replay_tree}" add -- "${ARTIFACT_PATH}"; then
+              git worktree remove --force "${replay_tree}"
+              exit 1
+            fi
+            staged_paths="$(git -C "${replay_tree}" diff --cached --name-only)"
+            if [ -n "${staged_paths}" ] && [ "${staged_paths}" != "${ARTIFACT_PATH}" ]; then
+              echo "Refusing to persist anything except ${ARTIFACT_PATH}: ${staged_paths}" >&2
+              git worktree remove --force "${replay_tree}"
+              exit 1
+            fi
+            if git -C "${replay_tree}" diff --cached --quiet; then
+              echo "Replay artifact was already persisted by a newer run."
+              git worktree remove "${replay_tree}"
+              echo "published=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            git -C "${replay_tree}" config user.name "github-actions[bot]"
+            git -C "${replay_tree}" config user.email \
+              "41898282+github-actions[bot]@users.noreply.github.com"
+            if ! git -C "${replay_tree}" commit \
+              -m "Update archived shortlist historical replay [skip ci]"; then
+              git worktree remove --force "${replay_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            if ! git fetch --prune origin main || \
+              ! git -C "${replay_tree}" rebase origin/main; then
+              git -C "${replay_tree}" rebase --abort >/dev/null 2>&1 || :
+              git worktree remove --force "${replay_tree}"
+              sleep "$((attempt * 5))"
+              continue
+            fi
+            if ! python "${replay_tree}/scripts/build_historical_replay.py" \
+              --output "${replay_tree}/${ARTIFACT_PATH}" \
+              --validate-only; then
+              git worktree remove --force "${replay_tree}"
+              exit 1
+            fi
+            if push_with_scoped_token "${replay_tree}"; then
+              git worktree remove "${replay_tree}"
+              echo "published=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            git worktree remove --force "${replay_tree}"
+            sleep "$((attempt * 5))"
+          done
+
+          echo "Historical replay publish failed after 3 bounded attempts" >&2
+          exit 1
+
+      - name: Dispatch a fresh production snapshot after replay publication
+        if: steps.publish_replay.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh api --method POST
+          "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-worker.yml/dispatches"
+          -f ref=main

@@ -1962,6 +1962,62 @@ class SelectorV2Tests(unittest.TestCase):
         after = {key: candidate[key] for key in before}
         self.assertEqual(after, before)
 
+    def test_historical_replay_loader_publishes_only_a_non_authorizing_summary(self) -> None:
+        fake_module = mock.Mock()
+        fake_module.validate_replay_artifact.side_effect = lambda payload: payload
+        fake_module.public_model_summary.return_value = {
+            "schema_version": "archived-shortlist-replay-summary-v1",
+            "status": "READY",
+            "cohort_count": 7,
+            "shortlist_count": 21,
+            "settled_count": 15,
+            "pending_count": 6,
+            "metrics": {"sample_count": 15, "mean_net_return": 0.01},
+            # The server must override any accidental authority claim.
+            "participates_in_decision": True,
+            "promotion_eligible": True,
+            "authorizes_production": True,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "replay.json"
+            path.write_text(json.dumps({"fixture": True}), encoding="utf-8")
+            with mock.patch.object(server, "historical_replay", fake_module):
+                summary = server.load_historical_replay_summary(path)
+
+        self.assertEqual(summary["evidence_class"], "RETROSPECTIVE")
+        self.assertEqual(summary["universe_scope"], "ARCHIVED_SHORTLIST_ONLY")
+        self.assertFalse(summary["full_point_in_time_universe"])
+        for field in (
+            "included_in_live_observation_performance",
+            "included_in_shadow_research",
+            "included_in_executable_performance",
+            "calibrated",
+            "participates_in_decision",
+            "production_eligible",
+            "promotion_eligible",
+            "authorizes_production",
+        ):
+            self.assertIs(summary[field], False)
+        fake_module.validate_replay_artifact.assert_called_once_with({"fixture": True})
+
+    def test_historical_replay_loader_fails_closed_for_missing_or_bad_artifact(self) -> None:
+        fake_module = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with mock.patch.object(server, "historical_replay", fake_module):
+                missing = server.load_historical_replay_summary(root / "missing.json")
+                invalid_path = root / "invalid.json"
+                invalid_path.write_text("{", encoding="utf-8")
+                invalid = server.load_historical_replay_summary(invalid_path)
+
+        self.assertEqual(missing["status"], "UNAVAILABLE")
+        self.assertEqual(missing["reason_codes"], ["HISTORICAL_REPLAY_ARTIFACT_MISSING"])
+        self.assertEqual(invalid["reason_codes"], ["HISTORICAL_REPLAY_ARTIFACT_UNREADABLE"])
+        for summary in (missing, invalid):
+            self.assertFalse(summary["participates_in_decision"])
+            self.assertFalse(summary["promotion_eligible"])
+            self.assertFalse(summary["authorizes_production"])
+
 
 if __name__ == "__main__":
     unittest.main()

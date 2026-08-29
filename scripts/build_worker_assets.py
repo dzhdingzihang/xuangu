@@ -159,6 +159,44 @@ TEN_DAY_RANK_SUMMARY_FIELDS = (
     "artifact_sha256",
     "reason_codes",
 )
+HISTORICAL_REPLAY_SUMMARY_FIELDS = (
+    "schema_version",
+    "model_id",
+    "track",
+    "evidence_class",
+    "universe_scope",
+    "full_point_in_time_universe",
+    "status",
+    "evaluated_at",
+    "probability_status",
+    "cohort_count",
+    "signal_date_count",
+    "independent_entry_date_count",
+    "shortlist_count",
+    "settled_count",
+    "pending_count",
+    "included_in_live_observation_performance",
+    "included_in_shadow_research",
+    "included_in_executable_performance",
+    "calibrated",
+    "participates_in_decision",
+    "production_eligible",
+    "promotion_eligible",
+    "authorizes_production",
+    "artifact_sha256",
+    "summary_sha256",
+    "limitations",
+    "reason_codes",
+    "error_type",
+)
+HISTORICAL_REPLAY_METRIC_FIELDS = (
+    "sample_count",
+    "mean_net_return",
+    "mean_net_total_return",
+    "mean_net_excess_return",
+    "positive_net_return_rate",
+    "positive_net_excess_return_rate",
+)
 WORKER_RUNTIME_CONTRACT_VERSION = "worker-runtime-v1"
 WORKER_LIVE_INDEX_CONTRACT_VERSION = "worker-live-index-v1"
 WORKER_UI_BOOTSTRAP_CONTRACT_VERSION = "ui-bootstrap-v1"
@@ -587,6 +625,63 @@ def summarize_analysis_models(pick: dict) -> dict:
             }
         if rank_summary:
             result["ten_day_excess_rank"] = rank_summary
+    historical_replay = ((pick.get("analysis_models") or {}).get("historical_replay") or {})
+    if isinstance(historical_replay, dict) and historical_replay:
+        replay_summary = {
+            key: copy.deepcopy(historical_replay.get(key))
+            for key in HISTORICAL_REPLAY_SUMMARY_FIELDS
+            if key in historical_replay
+        }
+        for mapping_field in ("status_counts", "market_counts"):
+            values = historical_replay.get(mapping_field)
+            if isinstance(values, dict):
+                replay_summary[mapping_field] = {
+                    str(key): copy.deepcopy(value)
+                    for key, value in list(sorted(values.items(), key=lambda item: str(item[0])))[:12]
+                    if isinstance(key, str)
+                    and isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value >= 0
+                }
+        metrics = historical_replay.get("metrics")
+        if isinstance(metrics, dict):
+            replay_summary["metrics"] = {
+                key: copy.deepcopy(metrics.get(key))
+                for key in HISTORICAL_REPLAY_METRIC_FIELDS
+                if key in metrics
+            }
+        if isinstance(replay_summary.get("reason_codes"), list):
+            replay_summary["reason_codes"] = [
+                str(value)
+                for value in replay_summary["reason_codes"][:8]
+                if isinstance(value, str) and value
+            ]
+        if isinstance(replay_summary.get("limitations"), list):
+            replay_summary["limitations"] = [
+                str(value)
+                for value in replay_summary["limitations"][:8]
+                if isinstance(value, str) and value
+            ]
+        # Worker summaries repeat the server-side authority boundary rather than
+        # trusting optional or future artifact fields.
+        replay_summary.update(
+            {
+                "track": "ARCHIVED_SHORTLIST_REPLAY",
+                "evidence_class": "RETROSPECTIVE",
+                "universe_scope": "ARCHIVED_SHORTLIST_ONLY",
+                "full_point_in_time_universe": False,
+                "included_in_live_observation_performance": False,
+                "included_in_shadow_research": False,
+                "included_in_executable_performance": False,
+                "calibrated": False,
+                "participates_in_decision": False,
+                "production_eligible": False,
+                "promotion_eligible": False,
+                "authorizes_production": False,
+            }
+        )
+        if replay_summary:
+            result["historical_replay"] = replay_summary
     return result
 
 

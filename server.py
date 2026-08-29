@@ -39,6 +39,11 @@ import production_rule_model
 import rule_outcome_ledger
 
 try:
+    import historical_replay
+except ImportError:  # Retrospective replay is an isolated optional research artifact.
+    historical_replay = None
+
+try:
     import ten_day_model
 except ImportError:  # The selector must still publish an explicit fail-closed card.
     ten_day_model = None
@@ -80,6 +85,7 @@ A_SHARE_KLINE_CACHE = CACHE / "runtime-cache" / "a_share_daily.json"
 DYNAMIC_MARKET_CACHE = CACHE / "runtime-cache" / "hk_us_dynamic_recall.json"
 HK_US_KLINE_CACHE = CACHE / "runtime-cache" / "hk_us_daily.json"
 MARKET_RECALL_EXPANSION_PATH = CACHE / "universes" / "market_recall_expansion_v2.json"
+HISTORICAL_REPLAY_ARTIFACT_PATH = CACHE / "backtests" / "archived-shortlist-replay-v1.json"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CN_TZ = ZoneInfo("Asia/Shanghai")
 MODEL_VERSION = "smart-selector-2026-08-29.1-two-tier-rule"
@@ -4095,6 +4101,95 @@ def unavailable_ten_day_shadow_contract(reason_code: str, error_type: str | None
     if error_type:
         result["error_type"] = error_type
     return result
+
+
+def unavailable_historical_replay_summary(
+    reason_code: str,
+    error_type: str | None = None,
+) -> dict:
+    """Return a non-authorizing public card when the replay cannot be read.
+
+    The archived-shortlist replay is retrospective research, not a replacement
+    for the prospective point-in-time ledger.  Keep that trust boundary even
+    when its artifact or implementation is unavailable.
+    """
+
+    result = {
+        "schema_version": "archived-shortlist-replay-summary-v1",
+        "model_id": "archived-shortlist-replay-v1",
+        "track": "ARCHIVED_SHORTLIST_REPLAY",
+        "evidence_class": "RETROSPECTIVE",
+        "status": "UNAVAILABLE",
+        "universe_scope": "ARCHIVED_SHORTLIST_ONLY",
+        "full_point_in_time_universe": False,
+        "included_in_live_observation_performance": False,
+        "included_in_shadow_research": False,
+        "included_in_executable_performance": False,
+        "calibrated": False,
+        "participates_in_decision": False,
+        "production_eligible": False,
+        "promotion_eligible": False,
+        "authorizes_production": False,
+        "reason_codes": [reason_code],
+    }
+    if error_type:
+        result["error_type"] = error_type
+    return result
+
+
+def load_historical_replay_summary(
+    path: pathlib.Path = HISTORICAL_REPLAY_ARTIFACT_PATH,
+) -> dict:
+    """Load, validate, and bound the cloud-produced retrospective replay."""
+
+    if historical_replay is None:
+        return unavailable_historical_replay_summary(
+            "HISTORICAL_REPLAY_MODULE_UNAVAILABLE"
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return unavailable_historical_replay_summary(
+            "HISTORICAL_REPLAY_ARTIFACT_MISSING"
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return unavailable_historical_replay_summary(
+            "HISTORICAL_REPLAY_ARTIFACT_UNREADABLE",
+            type(exc).__name__,
+        )
+    try:
+        validated = historical_replay.validate_replay_artifact(payload)
+        summary = historical_replay.public_model_summary(
+            payload if validated is None else validated
+        )
+        if not isinstance(summary, dict):
+            raise TypeError("historical replay public summary must be an object")
+        summary = dict(summary)
+        # Defense in depth: a retrospective artifact can never grant authority,
+        # even if a later summary schema accidentally changes its defaults.
+        summary.update(
+            {
+                "track": "ARCHIVED_SHORTLIST_REPLAY",
+                "evidence_class": "RETROSPECTIVE",
+                "universe_scope": "ARCHIVED_SHORTLIST_ONLY",
+                "full_point_in_time_universe": False,
+                "included_in_live_observation_performance": False,
+                "included_in_shadow_research": False,
+                "included_in_executable_performance": False,
+                "calibrated": False,
+                "participates_in_decision": False,
+                "production_eligible": False,
+                "promotion_eligible": False,
+                "authorizes_production": False,
+            }
+        )
+        json.dumps(summary, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        return summary
+    except Exception as exc:
+        return unavailable_historical_replay_summary(
+            "HISTORICAL_REPLAY_ARTIFACT_INVALID",
+            type(exc).__name__,
+        )
 
 
 def build_ten_day_shadow_model_contract(snapshot: dict, generated_at: dt.datetime | str) -> dict:
@@ -8517,6 +8612,9 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         if latest_path.exists():
             cached = json.loads(latest_path.read_text(encoding="utf-8"))
             if cached.get("model_version") == MODEL_VERSION and cached.get("target_date") == target_day.isoformat():
+                cached.setdefault("analysis_models", {})[
+                    "historical_replay"
+                ] = load_historical_replay_summary()
                 return cached
 
     hot_date, event_rows = find_hot_pool(signal_day)
@@ -8851,6 +8949,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "reason_codes": ["RANK_MODEL_MODULE_UNAVAILABLE"],
         }
     result["analysis_models"]["ten_day_excess_rank"] = rank_contract
+    result["analysis_models"]["historical_replay"] = load_historical_replay_summary()
     result["rule_outcome_tracking"] = history_evaluation.evaluate_rule_outcome_performance(
         rule_outcome_ledger.load_rule_outcome_batches(OUTCOMES / "rule-settlements")
     )
