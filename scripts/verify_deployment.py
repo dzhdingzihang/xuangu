@@ -58,18 +58,21 @@ UI_ASSET_SPECS = {
         "api_path": "/api/latest-summary",
         "static_path": "/data/picks/ui-bootstrap.json",
         "contract_version": "ui-bootstrap-v1",
+        "api_contract_version": "ui-bootstrap-v1",
         "max_bytes": 192 * 1024,
     },
     "candidates": {
         "api_path": "/api/candidates",
         "static_path": "/data/picks/ui-candidates.json",
         "contract_version": "ui-candidates-v1",
+        "api_contract_version": "candidate-list-v1",
         "max_bytes": 768 * 1024,
     },
     "events": {
         "api_path": "/api/events",
         "static_path": "/data/picks/ui-events.json",
         "contract_version": "ui-events-v1",
+        "api_contract_version": "event-list-v1",
         "max_bytes": 512 * 1024,
     },
 }
@@ -847,6 +850,48 @@ def _snapshot_use_errors(
     return errors
 
 
+def _paged_api_errors(prefix: str, payload: Mapping[str, object], rows: object) -> list[str]:
+    errors: list[str] = []
+    page = payload.get("page")
+    limit = payload.get("limit")
+    total = payload.get("total")
+    returned = payload.get("returned_count")
+    has_more = payload.get("has_more")
+    for field, value, minimum in (
+        ("page", page, 1),
+        ("limit", limit, 1),
+        ("total", total, 0),
+        ("returned_count", returned, 0),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+            errors.append(f"{prefix}.{field} is not an integer >= {minimum}")
+    if type(has_more) is not bool:
+        errors.append(f"{prefix}.has_more is not a boolean")
+    if not (
+        isinstance(page, int) and not isinstance(page, bool) and page >= 1
+        and isinstance(limit, int) and not isinstance(limit, bool) and limit >= 1
+        and isinstance(total, int) and not isinstance(total, bool) and total >= 0
+        and isinstance(returned, int) and not isinstance(returned, bool) and returned >= 0
+    ):
+        return errors
+    if isinstance(rows, list) and returned != len(rows):
+        errors.append(
+            f"{prefix}.returned_count: expected {len(rows)}, got {returned}"
+        )
+    offset = (page - 1) * limit
+    expected_returned = min(limit, max(0, total - offset))
+    if returned != expected_returned:
+        errors.append(
+            f"{prefix}.returned_count: expected page slice {expected_returned}, got {returned}"
+        )
+    expected_has_more = offset + returned < total
+    if isinstance(has_more, bool) and has_more != expected_has_more:
+        errors.append(
+            f"{prefix}.has_more: expected {expected_has_more}, got {has_more}"
+        )
+    return errors
+
+
 def ui_api_contract_errors(
     local: dict,
     payloads: Mapping[str, dict],
@@ -876,7 +921,7 @@ def ui_api_contract_errors(
             prefix,
             asset,
             local=local,
-            contract_version=str(spec["contract_version"]),
+            contract_version=str(spec["api_contract_version"]),
             source_snapshot_sha256=source_snapshot_sha256,
             source_snapshot_byte_size=source_snapshot_byte_size,
         ))
@@ -911,10 +956,23 @@ def ui_api_contract_errors(
                 errors.append(f"{prefix}.candidates is not an array")
             if not isinstance(count, int) or isinstance(count, bool) or count < 0:
                 errors.append(f"{prefix}.candidate_count is not a non-negative integer")
-            elif isinstance(candidates, list) and count != len(candidates):
+            elif payload.get("total") != count:
                 errors.append(
-                    f"{prefix}.candidate_count: expected {len(candidates)}, got {count}"
+                    f"{prefix}.total: expected candidate_count {count}, got {payload.get('total')!r}"
                 )
+            errors.extend(_paged_api_errors(prefix, payload, candidates))
+        if name == "events":
+            events = payload.get("events")
+            count = payload.get("event_count")
+            if not isinstance(events, list):
+                errors.append(f"{prefix}.events is not an array")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                errors.append(f"{prefix}.event_count is not a non-negative integer")
+            elif payload.get("total") != count:
+                errors.append(
+                    f"{prefix}.total: expected event_count {count}, got {payload.get('total')!r}"
+                )
+            errors.extend(_paged_api_errors(prefix, payload, events))
     return errors
 
 
