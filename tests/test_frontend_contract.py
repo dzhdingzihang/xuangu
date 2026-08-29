@@ -371,6 +371,7 @@ AbortSignal.any = savedAny;
         for field in (
             "scheduler_primary_provider",
             "scheduler_primary_enabled",
+            "scheduler_health_contract_version",
             "cloudflare_dispatch_enabled",
             "publication_slo_seconds",
             "publication_within_slo",
@@ -452,6 +453,7 @@ state.status = {
   source_snapshot_byte_size: state.snapshot.source_snapshot.byte_size,
   scheduler_primary_provider: "github_actions",
   scheduler_primary_enabled: true,
+  scheduler_health_contract_version: "scheduler-health-v2",
   cloudflare_dispatch_enabled: false,
   active_refresh_mode: "github_actions_primary_with_30m_watchdog",
   research_decision_ready: true,
@@ -470,6 +472,10 @@ state.status = {
   },
 };
 assert.equal(validActiveRefreshStatus(), true);
+assert.equal(validActiveRefreshStatus({
+  ...state.status,
+  scheduler_health_contract_version: "scheduler-health-v1",
+}), false);
 let view = schedulerHealthPresentation();
 assert.equal(view.primaryState, "ENABLED");
 assert.equal(view.primaryLabel, "GitHub Actions 主调度已启用");
@@ -1890,7 +1896,9 @@ assert.equal(candidateId({ code: "BRK.B" }, "us"), candidateId({ symbol: "BRK_B"
         self.assertIn("historyError", self.js)
         self.assertIn("HISTORY_DATA_UNAVAILABLE", self.js)
         self.assertIn("getHistoryPayload", self.js)
-        self.assertIn("HISTORY_LIMIT = 120", self.js)
+        self.assertIn("HISTORY_LIMIT = 5", self.js)
+        self.assertNotIn("HISTORY_LIMIT = 120", self.js)
+        self.assertIn('resource === "history" ? HISTORY_LIMIT : LIST_PAGE_SIZE', self.js)
         self.assertIn("暂无已结算的可执行预测样本", self.js)
         self.assertIn("原始运行", self.js)
         self.assertIn("决策日", self.js)

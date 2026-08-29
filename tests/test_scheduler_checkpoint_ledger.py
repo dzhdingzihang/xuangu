@@ -130,6 +130,40 @@ class SchedulerCheckpointLedgerTests(unittest.TestCase):
         self.assertFalse(result["slo"]["guaranteed"])
         self.assertFalse(result["slo"]["public_data_source_sla"])
 
+    def test_empty_initializing_ledger_never_labels_unobserved_checkpoints_missed(self) -> None:
+        evaluated = dt.datetime.fromisoformat("2026-08-27T18:00:00+08:00")
+
+        result = ledger.aggregate_receipts([], evaluated_at=evaluated)
+
+        self.assertEqual(result["readiness"], "INITIALIZING")
+        self.assertIsNone(result["ledger_started_at"])
+        self.assertIsNone(result["missed_checkpoints_24h"])
+        self.assertTrue(result["checkpoints"])
+        self.assertEqual(
+            {row["status"] for row in result["checkpoints"]},
+            {"UNOBSERVED_BEFORE_LEDGER"},
+        )
+
+    def test_incomplete_window_uses_unknown_after_ledger_start_not_missed(self) -> None:
+        evaluated = dt.datetime.fromisoformat("2026-08-27T18:00:00+08:00")
+        expected = ledger.expected_primary_checkpoints(evaluated)
+        first_observed = expected[0]
+
+        result = ledger.aggregate_receipts(
+            [receipt_for(first_observed, run_id=33251500001)],
+            evaluated_at=evaluated,
+        )
+
+        statuses = {row["checkpoint"]: row["status"] for row in result["checkpoints"]}
+        self.assertEqual(result["readiness"], "INITIALIZING")
+        self.assertEqual(
+            statuses[first_observed.isoformat(timespec="seconds")],
+            "ON_TIME",
+        )
+        self.assertIn("UNKNOWN_WINDOW_INCOMPLETE", set(statuses.values()))
+        self.assertNotIn("MISSED", set(statuses.values()))
+        self.assertIsNone(result["missed_checkpoints_24h"])
+
     def _full_window_receipts(self, evaluated: dt.datetime) -> tuple[list[dict], list[dt.datetime]]:
         expected = ledger.expected_primary_checkpoints(evaluated)
         receipts = [

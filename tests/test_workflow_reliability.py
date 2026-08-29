@@ -829,6 +829,7 @@ class DeploymentVerifierTests(unittest.TestCase):
             "cloudflare_dispatch_enabled": False,
             "cloudflare_dispatch_optional": True,
             "active_refresh_mode": "github_actions_primary_with_30m_watchdog",
+            "scheduler_health_contract_version": "scheduler-health-v2",
             "readiness_contract_version": "production-readiness-v1",
             "research_decision_ready": False,
             "checkpoint_evidence_ready": False,
@@ -908,6 +909,16 @@ class DeploymentVerifierTests(unittest.TestCase):
         errors = self.module.scheduled_snapshot_status_errors(self.local, unsafe)
         self.assertTrue(any("data_mode" in error for error in errors))
         self.assertTrue(any("device_dependency" in error for error in errors))
+
+        wrong_scheduler_contract = dict(
+            self.status,
+            scheduler_health_contract_version="scheduler-health-v1",
+        )
+        errors = self.module.scheduled_snapshot_status_errors(
+            self.local,
+            wrong_scheduler_contract,
+        )
+        self.assertTrue(any("scheduler_health_contract_version" in error for error in errors))
 
     def test_scheduled_snapshot_status_requires_the_exact_active_refresh_path(self) -> None:
         wrong = dict(

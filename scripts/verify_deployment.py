@@ -504,6 +504,7 @@ def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
             "23:17",
         ],
         "snapshot_as_of": local.get("generated_at"),
+        "scheduler_health_contract_version": "scheduler-health-v2",
         "readiness_contract_version": "production-readiness-v1",
         "scheduler_primary_provider": "github_actions",
         "cloudflare_dispatch_optional": True,

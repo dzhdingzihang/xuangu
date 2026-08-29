@@ -424,12 +424,18 @@ def aggregate_receipts(
         )
         deadline = checkpoint + dt.timedelta(minutes=grace_minutes)
         if not matching:
-            missed += 1
+            if coverage_complete:
+                status = "MISSED"
+                missed += 1
+            elif ledger_started is None or checkpoint < ledger_started:
+                status = "UNOBSERVED_BEFORE_LEDGER"
+            else:
+                status = "UNKNOWN_WINDOW_INCOMPLETE"
             rows.append(
                 {
                     "checkpoint": _iso(checkpoint),
                     "deadline": _iso(deadline),
-                    "status": "MISSED",
+                    "status": status,
                     "receipt_id": None,
                     "published_at": None,
                     "publication_delay_seconds": None,

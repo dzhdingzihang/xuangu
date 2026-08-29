@@ -131,7 +131,10 @@ const GLOBAL_BLOCKER_META = {
   QUOTE_HEALTH_INCOMPLETE: "行情覆盖率或源时间不完整",
 };
 const STATUS_POLL_INTERVAL_MS = 5 * 60 * 1000;
-const HISTORY_LIMIT = 120;
+// Keep the browser request inside the Worker history contract. Older rows are
+// retrieved with the existing "load more" control instead of one oversized
+// response.
+const HISTORY_LIMIT = 5;
 const LIST_PAGE_SIZE = 25;
 const SEARCH_DEBOUNCE_MS = 150;
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -4586,6 +4589,7 @@ function validActiveRefreshStatus(status = state.status) {
     && status.scheduler_primary_provider === "github_actions"
     && enabled === true
     && typeof status.cloudflare_dispatch_enabled === "boolean"
+    && status.scheduler_health_contract_version === "scheduler-health-v2"
     && ACTIVE_REFRESH_MODES.has(mode)
     && readinessFields.every((field) => typeof status[field] === "boolean")
     && typeof status.next_active_refresh === "string"
@@ -4603,7 +4607,8 @@ function activeRefreshStatusFieldsPresent(status = state.status) {
     && [
       "scheduler_primary_provider", "scheduler_primary_enabled",
       "cloudflare_dispatch_enabled", "active_refresh_mode", "next_active_refresh",
-      "schedule_us_post_close", "research_decision_ready",
+      "schedule_us_post_close", "scheduler_health_contract_version",
+      "research_decision_ready",
       "checkpoint_evidence_ready", "unattended_refresh_ready",
       "calibrated_execution_ready",
     ]

@@ -2237,6 +2237,7 @@ function buildStatusPayload(latest, current = new Date(), env = {}, schedulerHea
       dst_variant_selected_at_runtime: true,
     },
     recompute_supported: false,
+    scheduler_health_contract_version: "scheduler-health-v2",
     readiness_contract_version: "production-readiness-v1",
     research_decision_ready: researchDecisionReady,
     checkpoint_evidence_ready: checkpointEvidenceReady,

@@ -125,6 +125,7 @@ class WorkerApiContractTests(unittest.TestCase):
             assert.equal(status.cloudflare_dispatch_enabled, false);
             assert.equal(status.cloudflare_dispatch_optional, true);
             assert.equal(status.active_refresh_mode, "github_actions_primary_with_30m_watchdog");
+            assert.equal(status.scheduler_health_contract_version, "scheduler-health-v2");
             assert.equal(status.next_active_refresh, module.nextActiveRefresh(new Date(status.time), true));
             assert.equal(status.schedule_us_post_close.contract_version, "us-post-close-schedule-v1");
             assert.deepEqual(status.schedule_us_post_close.watchdog_beijing_variants, ["04:47 夏令时", "05:47 冬令时"]);
