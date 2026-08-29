@@ -484,6 +484,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
             "R2 publication is fail-closed until the alias and Worker can roll back atomically.",
             "npx --no-install wrangler deploy",
             "/api/history?page=1&limit=1",
+            '"User-Agent": "xuangu-deployment-verifier/2.0"',
             "untracked_count=0",
             "[skip ci]",
         ):

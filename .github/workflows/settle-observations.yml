@@ -212,7 +212,14 @@ jobs:
               try:
                   request = urllib.request.Request(
                       "https://xuangu.alixjd.com/api/history?page=1&limit=1",
-                      headers={"Accept": "application/json", "Cache-Control": "no-cache"},
+                      headers={
+                          "Accept": "application/json",
+                          "Cache-Control": "no-cache",
+                          # Match the deployment verifier's explicit client
+                          # identity. Cloudflare may reject the default
+                          # Python-urllib user agent from hosted runners.
+                          "User-Agent": "xuangu-deployment-verifier/2.0",
+                      },
                   )
                   with urllib.request.urlopen(request, timeout=15) as response:
                       live = json.loads(response.read().decode("utf-8"))
