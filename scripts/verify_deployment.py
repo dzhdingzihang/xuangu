@@ -35,21 +35,16 @@ ALLOWED_GLOBAL_ACTIONS = {"NO_VALID_PICK", "REVIEW_EXECUTABLE_PICK"}
 ALLOWED_PRODUCTION_ACTIONS = {"NO_QUALIFIED_PICK", "QUALIFIED_PICK"}
 DEFAULT_BASE_URL = "https://xuangu.alixjd.com"
 SHANGHAI_TIME_ZONE = ZoneInfo("Asia/Shanghai")
-SCHEDULED_REFRESH_CHECKPOINTS = (
-    (8, 17),
-    (8, 47),
-    (10, 17),
-    (10, 47),
-    (12, 17),
-    (12, 47),
-    (15, 17),
-    (15, 47),
-    (16, 17),
-    (16, 47),
-    (20, 17),
-    (20, 47),
-    (22, 47),
-    (23, 17),
+NEW_YORK_TIME_ZONE = ZoneInfo("America/New_York")
+CLOUDFLARE_PRIMARY_UTC_SCHEDULES = (
+    (17, (0, 2, 4, 7, 8, 12), None),
+    (47, (14,), None),
+    (17, (20, 21), 16),
+)
+GITHUB_WATCHDOG_UTC_SCHEDULES = (
+    (47, (0, 2, 4, 7, 8, 12), None),
+    (17, (15,), None),
+    (47, (20, 21), 16),
 )
 ResponsePayload = tuple[int, Mapping[str, str], bytes]
 ERROR_BODY_PREVIEW_BYTES = 512
@@ -184,24 +179,45 @@ def _parse_moment(value: object) -> dt.datetime:
     return parsed
 
 
-def next_scheduled_refresh(value: object) -> dt.datetime:
-    """Independently calculate the next primary or health-fallback invocation."""
+def next_scheduled_refresh(
+    value: object,
+    *,
+    primary_enabled: bool,
+) -> dt.datetime:
+    """Mirror the actually enabled UTC cron path, including New York DST."""
+    if type(primary_enabled) is not bool:
+        raise ValueError("primary_enabled must be a boolean")
     current = value if isinstance(value, dt.datetime) else _parse_moment(value)
     if current.tzinfo is None or current.utcoffset() is None:
         raise ValueError("current time must be timezone-aware")
-    local = current.astimezone(SHANGHAI_TIME_ZONE)
+    current_utc = current.astimezone(dt.timezone.utc)
+    schedules = (
+        CLOUDFLARE_PRIMARY_UTC_SCHEDULES
+        if primary_enabled
+        else GITHUB_WATCHDOG_UTC_SCHEDULES
+    )
+    candidates: list[dt.datetime] = []
     for day_offset in range(9):
-        day = local.date() + dt.timedelta(days=day_offset)
+        day = current_utc.date() + dt.timedelta(days=day_offset)
         if day.weekday() >= 5:
             continue
-        for hour, minute in SCHEDULED_REFRESH_CHECKPOINTS:
-            checkpoint = dt.datetime.combine(
-                day,
-                dt.time(hour, minute),
-                tzinfo=SHANGHAI_TIME_ZONE,
-            )
-            if checkpoint > local:
-                return checkpoint
+        for minute, hours, new_york_hour in schedules:
+            for hour in hours:
+                checkpoint = dt.datetime.combine(
+                    day,
+                    dt.time(hour, minute),
+                    tzinfo=dt.timezone.utc,
+                )
+                if checkpoint <= current_utc:
+                    continue
+                if (
+                    new_york_hour is not None
+                    and checkpoint.astimezone(NEW_YORK_TIME_ZONE).hour != new_york_hour
+                ):
+                    continue
+                candidates.append(checkpoint)
+    if candidates:
+        return min(candidates).astimezone(SHANGHAI_TIME_ZONE)
     raise ValueError("unable to find next scheduled refresh")
 
 
@@ -447,6 +463,9 @@ def status_deployment_errors(
 def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
     """Require the deployed Worker to advertise the device-free snapshot mode."""
     errors: list[str] = []
+    primary_enabled = status.get("scheduler_primary_enabled")
+    if type(primary_enabled) is not bool:
+        errors.append("status.scheduler_primary_enabled is not a boolean")
     required_values = {
         "data_mode": "scheduled_snapshot",
         "quote_delivery_mode": "scheduled_snapshot",
@@ -471,6 +490,20 @@ def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
             "23:17",
         ],
         "snapshot_as_of": local.get("generated_at"),
+        "active_refresh_mode": (
+            "cloudflare_primary_with_github_watchdog"
+            if primary_enabled is True
+            else "github_watchdog_only"
+        ),
+        "schedule_us_post_close": {
+            "contract_version": "us-post-close-schedule-v1",
+            "market_time_zone": "America/New_York",
+            "market_checkpoint": "16:17",
+            "primary_beijing_variants": ["04:17 夏令时", "05:17 冬令时"],
+            "watchdog_beijing_variants": ["04:47 夏令时", "05:47 冬令时"],
+            "china_days": "周二至周六",
+            "dst_variant_selected_at_runtime": True,
+        },
     }
     if isinstance(local.get("production_decision"), dict):
         required_values.update({
@@ -485,20 +518,26 @@ def scheduled_snapshot_status_errors(local: dict, status: dict) -> list[str]:
             errors.append(f"status.{field}: expected {expected!r}, got {actual!r}")
 
     parsed: dict[str, dt.datetime] = {}
-    for field in ("time", "next_refresh"):
+    for field in ("time", "next_refresh", "next_active_refresh"):
         try:
             parsed[field] = _parse_moment(status.get(field))
         except (TypeError, ValueError):
             errors.append(f"status.{field} is not a timezone-aware timestamp")
-    if all(field in parsed for field in ("time", "next_refresh")):
-        if parsed["next_refresh"].utcoffset() != dt.timedelta(hours=8):
-            errors.append("status.next_refresh is not expressed in Asia/Shanghai (+08:00)")
-        expected = next_scheduled_refresh(parsed["time"])
-        if parsed["next_refresh"] != expected:
-            errors.append(
-                f"status.next_refresh: expected {expected.isoformat()}, "
-                f"got {status.get('next_refresh')!r}"
-            )
+    if "time" in parsed and type(primary_enabled) is bool:
+        expected = next_scheduled_refresh(
+            parsed["time"],
+            primary_enabled=primary_enabled,
+        )
+        for field in ("next_refresh", "next_active_refresh"):
+            if field not in parsed:
+                continue
+            if parsed[field].utcoffset() != dt.timedelta(hours=8):
+                errors.append(f"status.{field} is not expressed in Asia/Shanghai (+08:00)")
+            if parsed[field] != expected:
+                errors.append(
+                    f"status.{field}: expected {expected.isoformat()}, "
+                    f"got {status.get(field)!r}"
+                )
     return errors
 
 

@@ -629,7 +629,19 @@ class DeploymentVerifierTests(unittest.TestCase):
                 "08:47", "10:47", "12:47", "15:47", "16:47", "20:47", "23:17",
             ],
             "snapshot_as_of": self.local["generated_at"],
+            "scheduler_primary_enabled": True,
+            "active_refresh_mode": "cloudflare_primary_with_github_watchdog",
             "next_refresh": "2026-08-24T08:17:00+08:00",
+            "next_active_refresh": "2026-08-24T08:17:00+08:00",
+            "schedule_us_post_close": {
+                "contract_version": "us-post-close-schedule-v1",
+                "market_time_zone": "America/New_York",
+                "market_checkpoint": "16:17",
+                "primary_beijing_variants": ["04:17 夏令时", "05:17 冬令时"],
+                "watchdog_beijing_variants": ["04:47 夏令时", "05:47 冬令时"],
+                "china_days": "周二至周六",
+                "dst_variant_selected_at_runtime": True,
+            },
             "runtime_contract_version": "worker-runtime-v1",
             "source_snapshot_sha256": self.source_sha256,
             "source_snapshot_byte_size": self.source_byte_size,
@@ -669,9 +681,13 @@ class DeploymentVerifierTests(unittest.TestCase):
             (4, 47), (5, 47),
         }
         self.assertEqual(actual, expected_watchdogs)
-        self.assertTrue(
-            {(8, 47), (10, 47), (12, 47), (15, 47), (16, 47), (20, 47), (23, 17)}
-            .issubset(set(self.module.SCHEDULED_REFRESH_CHECKPOINTS))
+        self.assertEqual(
+            self.module.GITHUB_WATCHDOG_UTC_SCHEDULES,
+            (
+                (47, (0, 2, 4, 7, 8, 12), None),
+                (17, (15,), None),
+                (47, (20, 21), 16),
+            ),
         )
 
     def test_scheduled_snapshot_status_contract_rejects_device_or_live_mode(self) -> None:
@@ -688,7 +704,7 @@ class DeploymentVerifierTests(unittest.TestCase):
         self.assertTrue(any("data_mode" in error for error in errors))
         self.assertTrue(any("device_dependency" in error for error in errors))
 
-    def test_scheduled_snapshot_status_requires_exact_next_primary_or_fallback_checkpoint(self) -> None:
+    def test_scheduled_snapshot_status_requires_the_exact_active_refresh_path(self) -> None:
         wrong = dict(
             self.status,
             next_refresh="2026-08-23T03:02:00+08:00",
@@ -700,19 +716,34 @@ class DeploymentVerifierTests(unittest.TestCase):
             self.status,
             time="2026-08-24T08:18:00+08:00",
             next_refresh="2026-08-24T08:47:00+08:00",
+            next_active_refresh="2026-08-24T08:47:00+08:00",
         )
-        self.assertEqual(
-            self.module.scheduled_snapshot_status_errors(self.local, after_primary),
-            [],
-        )
+        errors = self.module.scheduled_snapshot_status_errors(self.local, after_primary)
+        self.assertTrue(any("next_refresh" in error for error in errors))
+        self.assertTrue(any("next_active_refresh" in error for error in errors))
 
         after_fallback = dict(
             self.status,
             time="2026-08-24T08:48:00+08:00",
             next_refresh="2026-08-24T10:17:00+08:00",
+            next_active_refresh="2026-08-24T10:17:00+08:00",
         )
         self.assertEqual(
             self.module.scheduled_snapshot_status_errors(self.local, after_fallback),
+            [],
+        )
+
+    def test_scheduled_snapshot_status_uses_active_watchdog_path_when_primary_is_disabled(self) -> None:
+        watchdog = dict(
+            self.status,
+            time="2026-08-29T17:13:45+08:00",
+            scheduler_primary_enabled=False,
+            active_refresh_mode="github_watchdog_only",
+            next_refresh="2026-08-31T08:47:00+08:00",
+            next_active_refresh="2026-08-31T08:47:00+08:00",
+        )
+        self.assertEqual(
+            self.module.scheduled_snapshot_status_errors(self.local, watchdog),
             [],
         )
 
