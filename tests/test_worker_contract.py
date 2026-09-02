@@ -1032,6 +1032,7 @@ class WorkerApiContractTests(unittest.TestCase):
 
     def test_wrangler_uses_primary_and_dst_crons_within_free_limit(self) -> None:
         config = json.loads((ROOT / "wrangler.jsonc").read_text(encoding="utf-8"))
+        self.assertEqual(config["vars"]["CLOUDFLARE_SCHEDULER_ENABLED"], "1")
         crons = config["triggers"]["crons"]
         self.assertEqual(
             crons,

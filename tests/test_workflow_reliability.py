@@ -589,7 +589,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
             "06:30",
             "40 分钟",
             "单轮行情请求",
-            "CLOUDFLARE_SCHEDULER_ENABLED=0",
+            "CLOUDFLARE_SCHEDULER_ENABLED=1",
             "GITHUB_WORKFLOW_DISPATCH_TOKEN",
             "Actions: write",
             "不能自动授权生产概率模型",

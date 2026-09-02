@@ -1323,6 +1323,14 @@ def _dynamic_hk_candidate(item: dict, query_route: str, observed_at: str) -> tup
             round(amount / data_progress, 2) if projection_allowed else None
         ),
     }
+    if market_cap > 0:
+        metrics.update(
+            {
+                "market_cap_currency": "HKD",
+                "market_cap_kind": "total",
+                "market_cap_source_field": "market_cap",
+            }
+        )
     return {
         "symbol": symbol,
         "name": name,
@@ -1634,7 +1642,9 @@ def _eastmoney_dynamic_candidate(
                 "source_timestamp": timestamp,
             }
         )
-        if market_key == "hk":
+        if market_key == "hk" and safe_float(
+            candidate["recall_metrics"].get("market_cap")
+        ) > 0:
             candidate["recall_metrics"].update(
                 {
                     "market_cap_currency": "HKD",
@@ -1895,7 +1905,10 @@ def _dynamic_recall_manifest(selected: list[dict], market_key: str) -> list[dict
                 "primary_route": candidate.get("selection_route") or lineage.get("primary_route"),
                 "recall_routes": [item.get("route") for item in lineage.get("recall_routes") or []],
                 "source": candidate.get("source"),
-                "sources": list(candidate.get("sources") or [candidate.get("source")]),
+                "sources": list(
+                    candidate.get("sources")
+                    or ([candidate.get("source")] if candidate.get("source") else [])
+                ),
                 "observed_at": candidate.get("observed_at"),
                 "recall_metrics": dict(candidate.get("recall_metrics") or {}),
             }
@@ -7732,6 +7745,11 @@ def score_serenity_candidates(
                 "vol_ratio": round(quote["vol_ratio"], 2),
                 "float_mcap_yi": 0,
                 "dynamic_recall_score": candidate.get("recall_priority_score"),
+                "source": candidate.get("source"),
+                "sources": list(candidate.get("sources") or [candidate.get("source")]),
+                "observed_at": candidate.get("observed_at"),
+                "recall_routes": list(candidate.get("recall_routes") or []),
+                "selection_route": candidate.get("selection_route"),
                 "recall_metrics": dict(candidate.get("recall_metrics") or {}),
                 "reason_tags": "、".join(candidate.get("themes") or []),
                 "theme_tags": candidate.get("themes") or [],

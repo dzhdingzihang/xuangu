@@ -11,7 +11,7 @@ XuanGu 是一个面向未来约两周（10 个交易日）的 A 股、港股、�
 - **三市场动态候选池**：A 股动态召回 300 只；港股、美股在每次定时或手动快照生成任务中重新读取公开市场横截面，并分别动态召回 200 / 300 只，不再使用仓库静态名单决定入池成员。
 - **A 股 300 只完整深评**：全部有效行情候选先完成基础评分和技术评分；技术 K 线完整、满足交易性过滤的候选最多 300 只继续运行 Legacy、V2、双低、Chan/CZSC、Serenity、UZI 与评审团深研，不再把第 97–300 只固定挡在深度评分之外。
 - **双层生产输出**：当前 `production_decision` V4 在共享安全门禁后分别运行“事件催化”和“质量趋势”两条规则资格通道，产出 `QUALIFIED_PICK / NO_QUALIFIED_PICK`；`global_decision` 继续负责独立的严格校准概率。V1–V3 只用于读取历史快照。规则资格分不等于上涨概率，Shadow 模型也不会因为规则轨有候选而被授权。
-- **纯云端自动更新**：GitHub Actions 是不需要设备或额外 dispatch token 的主调度，在多个市场检查点生成并校验不可变快照，30 分钟后的 GitHub watchdog 只在主批次未健康发布时补跑；Cloudflare Worker 负责发布，其定时 `workflow_dispatch` 只是可选冗余路径。缺少 Cloudflare 专用 token 不会关闭 GitHub 主调度，也不计为生产故障。每日末次检查点、规则合格批次或正式可执行批次进入长期归档，不依赖 Render、OpenD 或个人电脑常开。
+- **纯云端自动更新**：Cloudflare Cron 在多个市场检查点独立触发 GitHub `workflow_dispatch`；GitHub Actions 原生 `schedule` 在同一检查点提供不依赖 Cloudflare token 的降级触发，30 分钟后的 GitHub watchdog 只在检查点尚未健康发布时补跑。并发锁和线上 `schedule_gate` 会去重，同一检查点不会重复发布。每日末次检查点、规则合格批次或正式可执行批次进入长期归档，不依赖 Render、OpenD 或个人电脑常开。
 - **时效失败关闭**：已发布结论与“现在能否使用”分开。快照过期时仍保留历史规则合格记录，但运行合同切换为 `HISTORICAL_RESEARCH_ONLY`、`current_decision_allowed=false`，当前可执行候选强制为 0。
 
 页面提供今日答案、候选池、事件证据、历史检验、模型逻辑和数据健康六个 Tab。首屏只读与快照身份绑定的轻量摘要，候选、事件和历史数据在进入对应 Tab 时才按需加载。所有数字均来自已发布快照；浏览器只展示服务端已经发布且校验一致的结果，不会自行补选或把计划价冒充实时行情。
@@ -338,7 +338,7 @@ Python 选股程序不会在 Worker 或浏览器请求中重算。页面初始�
 
 ## 数据更新时序与可靠性
 
-当前实际启用的是 GitHub Actions 原生主调度 + GitHub watchdog。系统展示时区为 `Asia/Shanghai`，主检查点如下：
+生产调度采用 Cloudflare Cron 独立检查点触发 + GitHub Actions 原生 `schedule` 降级触发 + GitHub watchdog 补跑。系统展示时区为 `Asia/Shanghai`，检查点如下：
 
 ```text
 周一至周五：08:17 / 10:17 / 12:17 / 15:17 / 16:17 / 20:17 / 22:47
@@ -346,9 +346,9 @@ Python 选股程序不会在 Worker 或浏览器请求中重算。页面初始�
               = 北京周二至周六 04:17（夏令时）/ 05:17（冬令时）
 ```
 
-GitHub 还在每个主检查点 30 分钟后运行 watchdog：北京时间 `08:47 / 10:47 / 12:47 / 15:47 / 16:47 / 20:47 / 23:17`，纽约收盘后 `16:47`（北京夏令时 `04:47`、冬令时 `05:47`）。watchdog 会先核对线上完整快照；主检查点已健康覆盖时直接跳过，不会重复生成。
+Cloudflare Cron 与 GitHub 原生 `schedule` 会在同一检查点分别发起调用；Workflow 的并发锁与 `schedule_gate` 以线上完整快照去重，先完成的健康发布会让后续调用跳过。GitHub 还在每个检查点 30 分钟后运行 watchdog：北京时间 `08:47 / 10:47 / 12:47 / 15:47 / 16:47 / 20:47 / 23:17`，纽约收盘后 `16:47`（北京夏令时 `04:47`、冬令时 `05:47`）。watchdog 会先核对线上完整快照；目标检查点已健康覆盖时直接跳过，不会重复生成。
 
-Cloudflare Cron 触发的 `workflow_dispatch` 是可选冗余调用器，不再承担主检查点。它只在 `CLOUDFLARE_SCHEDULER_ENABLED=1` 且配置了专用最小权限 token 时启用；开关为 `0` 或缺少 token 只表示“可选 dispatch 未启用”，不影响 GitHub 主调度和 watchdog，也不应计为调度故障。`/api/status.next_refresh` 与数据健康 Tab 按 GitHub 主检查点、watchdog 及纽约夏/冬令时计算；Cloudflare 可选路径的状态独立展示。
+仓库已将 `CLOUDFLARE_SCHEDULER_ENABLED=1`，使 Cloudflare Cron 成为独立检查点触发器；Worker 只有在同时配置专用最小权限 `GITHUB_WORKFLOW_DISPATCH_TOKEN` 时才会实际 dispatch。版本库开关不证明生产 secret 已存在，缺少 secret 时 Cloudflare 路径会明确显示为未就绪，但不会阻止部署，也不会关闭 GitHub 原生 `schedule` 与 watchdog 降级链路。`/api/status.next_refresh` 与数据健康 Tab 应按检查点、watchdog 及纽约夏/冬令时计算，并独立展示 Cloudflare dispatch 是否真正可用。
 
 每次实际 cron 都记录来源调用点、逻辑检查点、开始延迟、恢复模式和生成时间；对应审计字段包括 `source_invocation_slot`、`scheduled_invocation_slot` 与 `scheduler_delay_seconds`。发布前按“调用点 + 生成时间”做单调校验，迟到旧任务不能覆盖新批次。普通延迟仍在原调用点的 4 小时窗口内处理；超过窗口时进入有界 `late_cron_recovery`，有效恢复调用点最多 12 小时。`schedule_gate.py` 只用线上完整 `/api/latest` 作为“已成功发布”证据：线上不可达、目标批次缺失/失败，或行情/候选池处于可恢复降级时继续运行。门禁硬校验 A/港/美实际召回达到 `300 / 200 / 300`，并检查动态来源、行情、A 股基础/技术评分及深研覆盖；仓库里的 `latest.json` 不能单独抑制刷新，因为它不证明 Cloudflare 已经切换成功。
 
@@ -373,7 +373,7 @@ API 和页面不用一个绿色 `ok` 概括全部能力，而是分层发布：
 | 传输/合同组装 | `ok` | 当次 HTTP 请求成功，且 API 能从同一 manifest generation 组装通过身份校验的响应；不表示选股、无人值守或概率模型已就绪 |
 | 当前研究决策 | `research_decision_ready` | 快照时效、三市场候选/行情覆盖和规则安全门禁足以支持当前研究或规则复核；不等于校准概率可执行 |
 | 检查点证据 | `checkpoint_evidence_ready` | 已形成完整 24 小时 `scheduler-checkpoint-ledger-v1` 证据窗口；初始化期必须为 `false`/`INITIALIZING` |
-| 无人值守刷新 | `unattended_refresh_ready` | GitHub 主调度和 watchdog 配置有效，且完整账本未发现超出目标的迟到或遗漏；它仍是运营 SLO，不是外部 SLA |
+| 无人值守刷新 | `unattended_refresh_ready` | 在线调度与 watchdog 配置有效，且完整检查点账本未发现超出目标的迟到或遗漏；Cloudflare dispatch 是否已接通由独立字段报告。它仍是运营 SLO，不是外部 SLA |
 | 校准执行 | `calibrated_execution_ready` | 前瞻样本、校准、交易成本、尾部风险和人工治理授权全部通过，才能为 `true`；样本尚未成熟时应明确显示 `COLLECTING`，不能从规则合格分推导为可执行 |
 
 因此 `ok=true` 与一个或多个独立 `ready=false` 同时出现是合法且必要的诚实状态；页面必须分别展示原因，不能用传输成功覆盖数据、调度或校准未就绪。
@@ -422,7 +422,7 @@ GET /api/live?market=us&code=PWR
 
 契约要点：
 
-- `/api/status` 返回快照版本、新鲜度、`snapshot_as_of`、按 GitHub 主检查点/watchdog 计算的 `next_refresh`、`active_refresh_mode`、美股收盘夏/冬令时时点、`data_mode=scheduled_snapshot` 和 `device_dependency=false`。`ok` 只表示传输与合同组装成功；`research_decision_ready`、`checkpoint_evidence_ready`、`unattended_refresh_ready` 和 `calibrated_execution_ready` 必须独立解读。快照过期时 `snapshot_use` 以 `SNAPSHOT_NOT_FRESH` 失败关闭。
+- `/api/status` 返回快照版本、新鲜度、`snapshot_as_of`、按 Cloudflare/GitHub 检查点与 watchdog 计算的 `next_refresh`、`active_refresh_mode`、美股收盘夏/冬令时时点、`data_mode=scheduled_snapshot` 和 `device_dependency=false`。`ok` 只表示传输与合同组装成功；`research_decision_ready`、`checkpoint_evidence_ready`、`unattended_refresh_ready` 和 `calibrated_execution_ready` 必须独立解读。快照过期时 `snapshot_use` 以 `SNAPSHOT_NOT_FRESH` 失败关闭。
 - `/api/gate-status` 返回生成/发布时间、来源调用点、逻辑检查点、调度延迟、恢复模式、发布后端和检查点账本状态。有合法 ledger 但尚未满 24 小时时发布 `INITIALIZING_24H_LEDGER`；还没有可验证 ledger 时才是 `UNAVAILABLE_NO_COMPLETE_LEDGER`。两种情况都必须使 `missed_checkpoints_24h=null`，不会拿未知冒充 0 次遗漏。
 - `/api/latest-summary`、`/api/candidates`、单股详情、`/api/events` 和 `/api/history` 必须来自同一个 `data-manifest-v1` generation，并具有相同 `snapshot_key`、源快照 SHA-256 和字节数；身份不一致返回 503。候选搜索/市场过滤和分页由服务端完成，`scanned_count` 始终是完整扫描数，不会被当前页条数替代。候选列表以 `candidate-list-v2` + `candidate-role-v1` 分开规则主候选、规则合格项与 Legacy 市场首选。
 - `/api/events` 发布 `event-list-v2`，默认 bound-first，并在分页前完成 `scope`、`decision_bound`、`decision_eligible`、`event_id`、`market`、`symbol`、`event_type`、`direction` 和 `q` 过滤。非法事件筛选返回 `400 INVALID_EVENT_FILTER`。
@@ -482,7 +482,7 @@ npm run dev
 ### GitHub / Cloudflare Secrets
 
 - `CLOUDFLARE_API_TOKEN`：Worker 部署权限。
-- Cloudflare 定时 `workflow_dispatch` 是可选冗余路径，默认配置为 `CLOUDFLARE_SCHEDULER_ENABLED=0`。GitHub Actions 主调度与 30 分钟 watchdog 不使用该开关和 token；因此缺少 `GITHUB_WORKFLOW_DISPATCH_TOKEN` 是合法的默认配置，不是调度故障。如需启用 Cloudflare 冗余 dispatch，必须为仓库 `dzhdingzihang/xuangu` 单独创建只有 `Actions: write` 的 fine-grained token，并以 Wrangler secret `GITHUB_WORKFLOW_DISPATCH_TOKEN` 保存；不得复用 `CLOUDFLARE_API_TOKEN`、任何行情密钥或本地 `gh` 的宽权限凭证。Worker 只接受白名单表达式，并在运行时跳过不匹配纽约 `16:17` 的 DST 变体。
+- Cloudflare 定时 `workflow_dispatch` 是独立检查点触发路径，仓库配置为 `CLOUDFLARE_SCHEDULER_ENABLED=1`。这只启用代码路径，不代表生产 secret 已配置；必须为仓库 `dzhdingzihang/xuangu` 单独创建只有 `Actions: write` 的 fine-grained token，并以 Wrangler secret `GITHUB_WORKFLOW_DISPATCH_TOKEN` 保存。不得复用 `CLOUDFLARE_API_TOKEN`、任何行情密钥或本地 `gh` 的宽权限凭证。GitHub Actions 原生 `schedule` 与 30 分钟 watchdog 不使用该开关或 token，因此 secret 缺失不会令部署失败，仍可由降级链路刷新；但数据健康状态必须明确报告 Cloudflare dispatch 未就绪。Worker 只接受白名单表达式，并在运行时跳过不匹配纽约 `16:17` 的 DST 变体。
 - R2 当前未启用，内嵌同代资产是正式生产数据后端。现阶段不得设置 `ENABLE_R2_DATA_PUBLISH=1`；Workflow 会在 alias 切换前失败关闭并主动拒绝该配置。如果未来由 R2 manifest 供应数据，某个 R2 object 的内嵌回退也只接受同 generation 且 key / SHA-256 / 字节数一致的副本，不会把 R2 缺口静默降级为跨代数据。启用前必须补齐 alias 与 Worker Version 的原子切换、联合回滚与线上故障演练。
 - 定时选股不需要 OpenD、Tunnel、Render 或个人设备密钥。
 
@@ -512,7 +512,7 @@ curl -fsS 'https://xuangu.alixjd.com/api/history?view=daily&limit=5'
 curl -fsSI https://xuangu.alixjd.com/
 ```
 
-验收 `/api/status` 时应确认 `snapshot_generation=github-actions`、`data_mode=scheduled_snapshot`、`device_dependency=false`、`snapshot_as_of`、`active_refresh_mode`、`next_refresh`，以及 `research_decision_ready`、`checkpoint_evidence_ready`、`unattended_refresh_ready`、`calibrated_execution_ready` 四层状态。当前主路径应表达为 GitHub primary + 30 分钟 watchdog；Cloudflare 可选 dispatch 的开关/token 状态应独立展示，未启用不应把主路径降级成 watchdog-only 或故障。同时检查 `/api/gate-status` 的 snapshot identity、发布后端、receipt 证据滞后批次和 24 小时 ledger 状态；初始窗口显示 `INITIALIZING` 是预期状态。如果检查 `/api/live` 兼容路由，预期 `provider_class=SCHEDULED_SNAPSHOT` 与 `is_realtime=false`，不应期待 `REALTIME`。
+验收 `/api/status` 时应确认 `snapshot_generation=github-actions`、`data_mode=scheduled_snapshot`、`device_dependency=false`、`snapshot_as_of`、`active_refresh_mode`、`next_refresh`，以及 `research_decision_ready`、`checkpoint_evidence_ready`、`unattended_refresh_ready`、`calibrated_execution_ready` 四层状态。调度路径应表达为 Cloudflare 独立检查点触发 + GitHub 原生 `schedule` 降级触发 + 30 分钟 watchdog；Cloudflare 开关/token 状态必须独立展示，不能把仅有版本库开关误报为 dispatch 已可用。同时检查 `/api/gate-status` 的 snapshot identity、发布后端、receipt 证据滞后批次和 24 小时 ledger 状态；初始窗口显示 `INITIALIZING` 是预期状态。如果检查 `/api/live` 兼容路由，预期 `provider_class=SCHEDULED_SNAPSHOT` 与 `is_realtime=false`，不应期待 `REALTIME`。
 
 `xuangu.alixjd.com` 的生产页面、API 和定时更新均不依赖 Render、OpenD 或个人电脑。
 

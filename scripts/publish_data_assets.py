@@ -220,7 +220,7 @@ def publication_manifest(manifest: dict, published_at: str | None = None) -> dic
                     checkpoint_publication_delay
                     <= int(health.get("publication_slo_seconds") or 45 * 60)
                     if isinstance(checkpoint_publication_delay, int)
-                    else None
+                    else False
                 )
             ),
             "published_at": result["published_at"],

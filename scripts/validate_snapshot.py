@@ -1513,13 +1513,41 @@ def _append_current_hk_liquidity_row_errors(row: dict, prefix: str, errors: list
         errors.append(f"{prefix}.recall_metrics.liquidity_policy_version is invalid")
     if metrics.get("liquidity_standard_amount_threshold") != HK_STANDARD_MIN_AMOUNT_HKD:
         errors.append(f"{prefix}.recall_metrics.liquidity_standard_amount_threshold is invalid")
-    for field, expected in (
-        ("market_cap_currency", "HKD"),
-        ("market_cap_kind", "total"),
-        ("market_cap_source_field", "f20"),
-    ):
-        if metrics.get(field) != expected:
-            errors.append(f"{prefix}.recall_metrics.{field} must be {expected}")
+    market_cap = metrics.get("market_cap")
+    has_positive_market_cap = bool(finite_number(market_cap) and market_cap > 0)
+    if has_positive_market_cap:
+        source = str(row.get("source") or "")
+        expected_source_field = {
+            "eastmoney_delay_hk_market": "f20",
+            "sina_hk_market": "market_cap",
+        }.get(source)
+        if not source and metrics.get("market_cap_source_field") in {"f20", "market_cap"}:
+            # Older decision mirrors did not repeat the manifest source. Keep
+            # those archived rows auditable by their already-published field
+            # lineage; current scoring now preserves the source explicitly.
+            expected_source_field = metrics.get("market_cap_source_field")
+        expected_provenance = (
+            ("market_cap_currency", "HKD"),
+            ("market_cap_kind", "total"),
+            ("market_cap_source_field", expected_source_field),
+        )
+        for field, expected in expected_provenance:
+            if expected is None:
+                errors.append(
+                    f"{prefix}.recall_metrics.{field} has no supported source provenance"
+                )
+            elif metrics.get(field) != expected:
+                errors.append(f"{prefix}.recall_metrics.{field} must be {expected}")
+    else:
+        for field in (
+            "market_cap_currency",
+            "market_cap_kind",
+            "market_cap_source_field",
+        ):
+            if metrics.get(field) not in (None, ""):
+                errors.append(
+                    f"{prefix}.recall_metrics.{field} must be absent without positive market_cap evidence"
+                )
     amount = metrics.get("amount")
     if not finite_number(amount) or amount < 0:
         errors.append(f"{prefix}.recall_metrics.amount is invalid")

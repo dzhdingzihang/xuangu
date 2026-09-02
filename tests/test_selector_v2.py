@@ -12,6 +12,7 @@ from unittest import mock
 
 import requests
 import server
+from scripts.validate_snapshot import _append_current_hk_liquidity_row_errors
 
 
 def fixture_kline(count: int = 40) -> list[dict]:
@@ -814,6 +815,49 @@ class SelectorV2Tests(unittest.TestCase):
         self.assertGreaterEqual(discovery["excluded_counts"]["invalid_source_timestamp"], 1)
         self.assertTrue(discovery["discovery_pagination_complete"])
 
+    def test_hk_discovery_publishes_market_cap_provenance_only_with_evidence(self) -> None:
+        observed_at = "2026-08-26T16:10:00+08:00"
+        source_timestamp = int(
+            dt.datetime.fromisoformat("2026-08-26T16:00:00+08:00").timestamp()
+        )
+        eastmoney_item = eastmoney_hk_fixture_row(700, source_timestamp)
+        eastmoney, reason, _timestamp = server._eastmoney_dynamic_candidate(
+            eastmoney_item,
+            "liquidity",
+            "hk",
+            observed_at,
+        )
+        self.assertIsNone(reason)
+        self.assertEqual(eastmoney["recall_metrics"]["market_cap_source_field"], "f20")
+
+        eastmoney_without_cap = dict(eastmoney_item)
+        eastmoney_without_cap["f20"] = None
+        no_cap, no_cap_reason, _timestamp = server._eastmoney_dynamic_candidate(
+            eastmoney_without_cap,
+            "liquidity",
+            "hk",
+            observed_at,
+        )
+        self.assertIsNone(no_cap_reason)
+        self.assertNotIn("market_cap_source_field", no_cap["recall_metrics"])
+
+        sina, sina_reason = server._dynamic_hk_candidate(
+            {
+                "symbol": "00700",
+                "name": "腾讯控股",
+                "lasttrade": 580,
+                "volume": 1_000_000,
+                "amount": 30_000_000,
+                "changepercent": 1,
+                "ticktime": source_timestamp,
+            },
+            "liquidity",
+            observed_at,
+        )
+        self.assertIsNone(sina_reason)
+        self.assertIsNone(sina["recall_metrics"]["market_cap"])
+        self.assertNotIn("market_cap_source_field", sina["recall_metrics"])
+
     def test_hk_adaptive_pages_fail_closed_on_failure_duplicate_and_max_shortfall(self) -> None:
         observed = dt.datetime.fromisoformat("2026-08-26T09:40:00+08:00")
         source_timestamp = int(dt.datetime.fromisoformat("2026-08-26T09:25:00+08:00").timestamp())
@@ -1263,6 +1307,59 @@ class SelectorV2Tests(unittest.TestCase):
         by_code = {row["code"]: row for row in scored["candidates"]}
         self.assertNotEqual(by_code["BBB.HK"]["entry_price"], 13)
         self.assertNotEqual(by_code["CCC.HK"]["entry_price"], 0)
+
+    def test_hk_scoring_preserves_dynamic_recall_audit_evidence(self) -> None:
+        observed_at = "2026-08-26T09:40:00+08:00"
+        source_timestamp = int(
+            dt.datetime.fromisoformat("2026-08-26T09:25:00+08:00").timestamp()
+        )
+        candidate, reason, _timestamp = server._eastmoney_dynamic_candidate(
+            eastmoney_hk_fixture_row(
+                700,
+                source_timestamp,
+                amount=2_500_000,
+                symbol_number=700,
+            ),
+            "liquidity",
+            "hk",
+            observed_at,
+        )
+        self.assertIsNone(reason)
+        self.assertIsNotNone(candidate)
+
+        kline = fixture_kline(40)
+        kline[-1] = {**kline[-1], "date": "2026-08-25"}
+        live = {
+            "0700.HK": {
+                "price": 12,
+                "change_pct": 1,
+                "session": "regular",
+                "session_label": "盘中",
+                "source": "Yahoo 1m includePrePost",
+                "source_as_of": "2026-08-26T09:35:00+08:00",
+                "fetched_at": observed_at,
+            }
+        }
+        as_of = dt.datetime.fromisoformat(observed_at)
+        with (
+            mock.patch.object(server, "now_cn", return_value=as_of),
+            mock.patch.object(server, "yahoo_realtime_quotes", return_value=live),
+            mock.patch.object(server, "yahoo_kline_map", return_value={"0700.HK": kline}),
+        ):
+            scored = server.score_serenity_candidates("hk", [candidate], as_of=as_of)
+
+        self.assertEqual(scored["scored_size"], 1)
+        published = scored["candidates"][0]
+        self.assertEqual(published["observed_at"], observed_at)
+        self.assertEqual(published["source"], "eastmoney_delay_hk_market")
+        self.assertIn("intraday_liquidity_completion", published["recall_routes"])
+        errors: list[str] = []
+        _append_current_hk_liquidity_row_errors(
+            published,
+            "markets.hk.candidate[0700.HK]",
+            errors,
+        )
+        self.assertEqual(errors, [])
 
     def test_a_share_full_pool_technical_score_precedes_deep_research(self) -> None:
         codes = ("600000", "000001", "300001")

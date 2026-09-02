@@ -12,6 +12,7 @@ from unittest import mock
 import production_rule_model
 import server
 from scripts.validate_snapshot import (
+    _append_current_hk_liquidity_row_errors,
     dynamic_manifest_source_freshness,
     validate_snapshot,
     validate_snapshot_file,
@@ -687,6 +688,62 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertIn(
             "markets.hk.stats.recall_manifest[1].recall_metrics.liquidity_policy_version is invalid",
             validate_snapshot(policy_attack),
+        )
+
+    def test_hk_market_cap_provenance_matches_the_actual_discovery_source(self) -> None:
+        standard_metrics = {
+            "amount": 30_000_000,
+            "amount_currency": "HKD",
+            "market_cap": None,
+            "liquidity_admission": "observed_amount",
+            "liquidity_policy_version": server.HK_INTRADAY_LIQUIDITY_POLICY_VERSION,
+            "liquidity_standard_amount_threshold": server.HK_STANDARD_MIN_AMOUNT_HKD,
+        }
+        sina_row = {
+            "source": "sina_hk_market",
+            "observed_at": "2026-08-26T16:10:00+08:00",
+            "recall_routes": ["liquidity"],
+            "recall_metrics": standard_metrics,
+        }
+        errors: list[str] = []
+        _append_current_hk_liquidity_row_errors(
+            sina_row,
+            "markets.hk.stats.recall_manifest[0]",
+            errors,
+        )
+        self.assertEqual(errors, [])
+
+        forged_sina = copy.deepcopy(sina_row)
+        forged_sina["recall_metrics"].update(
+            {
+                "market_cap_currency": "HKD",
+                "market_cap_kind": "total",
+                "market_cap_source_field": "f20",
+            }
+        )
+        forged_errors: list[str] = []
+        _append_current_hk_liquidity_row_errors(
+            forged_sina,
+            "markets.hk.stats.recall_manifest[0]",
+            forged_errors,
+        )
+        self.assertIn(
+            "markets.hk.stats.recall_manifest[0].recall_metrics.market_cap_source_field must be absent without positive market_cap evidence",
+            forged_errors,
+        )
+
+        eastmoney_row = copy.deepcopy(sina_row)
+        eastmoney_row["source"] = "eastmoney_delay_hk_market"
+        eastmoney_row["recall_metrics"]["market_cap"] = 5_000_000_000
+        eastmoney_errors: list[str] = []
+        _append_current_hk_liquidity_row_errors(
+            eastmoney_row,
+            "markets.hk.stats.recall_manifest[0]",
+            eastmoney_errors,
+        )
+        self.assertIn(
+            "markets.hk.stats.recall_manifest[0].recall_metrics.market_cap_source_field must be f20",
+            eastmoney_errors,
         )
 
     def test_current_hk_liquidity_uses_break_clock_and_half_day_xhkg_schedule(self) -> None:

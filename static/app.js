@@ -131,6 +131,7 @@ const GLOBAL_BLOCKER_META = {
   QUOTE_HEALTH_INCOMPLETE: "行情覆盖率或源时间不完整",
 };
 const STATUS_POLL_INTERVAL_MS = 5 * 60 * 1000;
+const RESUME_REFRESH_DEBOUNCE_MS = 250;
 // Keep the browser request inside the Worker history contract. Older rows are
 // retrieved with the existing "load more" control instead of one oversized
 // response.
@@ -2004,6 +2005,7 @@ async function applyBootstrapPayload(payload) {
     state.status = { ...(state.status || {}), ...status };
   }
   syncPreferredCandidate({ revealQualified: snapshotChanged });
+  return snapshotChanged;
 }
 
 function renderTabDataState(tab) {
@@ -4948,11 +4950,12 @@ async function refreshAll() {
   try {
     const bootstrap = await getJson("/api/latest-summary");
     if (requestGeneration !== snapshotLoadGeneration) return;
-    await applyBootstrapPayload(bootstrap);
+    const snapshotChanged = await applyBootstrapPayload(bootstrap);
     scheduleNextRefreshPoll();
     renderRail(); updateTopbar(); renderActiveTab();
     await ensureTabData(state.tab);
-    showToast("最新已发布快照已刷新。Cloudflare 页面不会在线重算选股。", "success");
+    const notice = snapshotRefreshNotice(snapshotChanged);
+    showToast(notice.message, notice.type);
   } catch (error) {
     renderActiveTab();
     showToast(error.message || "刷新失败", "error");
@@ -4966,6 +4969,12 @@ let snapshotLoadGeneration = 0;
 let nextRefreshPollTimer = null;
 const CHECKPOINT_POLL_SKEW_MS = 250;
 const CHECKPOINT_POLL_RETRY_MS = 15_000;
+
+function snapshotRefreshNotice(snapshotChanged) {
+  return snapshotChanged
+    ? { message: "检测到新决策快照，页面已更新。", type: "success" }
+    : { message: "当前已是最新已发布快照。", type: "info" };
+}
 
 function nextRefreshPollDelay(nextRefresh, now = Date.now()) {
   const checkpoint = Date.parse(nextRefresh || "");
@@ -5047,6 +5056,28 @@ async function pollStatus() {
     statusPollInFlight = false;
     scheduleNextRefreshPoll();
   }
+}
+
+let resumeRefreshTimer = null;
+
+function queueResumeRefresh() {
+  if (document.visibilityState === "hidden") return;
+  if (resumeRefreshTimer !== null) window.clearTimeout(resumeRefreshTimer);
+  resumeRefreshTimer = window.setTimeout(() => {
+    resumeRefreshTimer = null;
+    void pollStatus();
+  }, RESUME_REFRESH_DEBOUNCE_MS);
+}
+
+function handleVisibilityRefresh() {
+  if (document.visibilityState === "visible") queueResumeRefresh();
+}
+
+function installResumeRefreshListeners() {
+  document.addEventListener("visibilitychange", handleVisibilityRefresh);
+  window.addEventListener("pageshow", queueResumeRefresh);
+  window.addEventListener("focus", queueResumeRefresh);
+  window.addEventListener("online", queueResumeRefresh);
 }
 
 function rowForKey(key) {
@@ -5272,6 +5303,8 @@ async function initialize() {
     $$(".view-loading").forEach((view) => { view.innerHTML = `<div class="empty-state">${icon("ph-warning-circle")}<h3>无法读取决策快照</h3><p>${esc(error.message || "请稍后刷新")}</p><button class="icon-button" type="button" onclick="location.reload()">重新加载</button></div>`; });
     showToast(error.message || "初始化失败", "error");
     window.setTimeout(pollStatus, 5000);
+  } finally {
+    installResumeRefreshListeners();
   }
 }
 

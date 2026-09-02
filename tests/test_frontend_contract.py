@@ -918,6 +918,69 @@ assert.match(invalid, /data-replay-isolated="false"/);
         for label in ("计划批次已发布", "等待计划批次", "计划批次已过期", "状态未知"):
             self.assertIn(label, self.js)
 
+    def test_page_resume_events_debounce_snapshot_polling(self) -> None:
+        for binding in (
+            'document.addEventListener("visibilitychange", handleVisibilityRefresh)',
+            'window.addEventListener("pageshow", queueResumeRefresh)',
+            'window.addEventListener("focus", queueResumeRefresh)',
+            'window.addEventListener("online", queueResumeRefresh)',
+        ):
+            self.assertIn(binding, self.js)
+
+        run_app_node(
+            r"""
+let calls = 0;
+let nextTimer = 0;
+const timers = new Map();
+window.setTimeout = (callback) => {
+  const id = ++nextTimer;
+  timers.set(id, callback);
+  return id;
+};
+window.clearTimeout = (id) => timers.delete(id);
+pollStatus = async () => { calls += 1; };
+
+document.visibilityState = "hidden";
+queueResumeRefresh();
+assert.equal(timers.size, 0);
+
+document.visibilityState = "visible";
+queueResumeRefresh();
+queueResumeRefresh();
+queueResumeRefresh();
+assert.equal(timers.size, 1);
+[...timers.values()][0]();
+assert.equal(calls, 1);
+"""
+        )
+
+    def test_manual_refresh_distinguishes_new_and_current_snapshot(self) -> None:
+        run_app_node(
+            r"""
+const changed = snapshotRefreshNotice(true);
+assert.equal(changed.type, "success");
+assert.match(changed.message, /新决策快照/);
+const current = snapshotRefreshNotice(false);
+assert.equal(current.type, "info");
+assert.match(current.message, /已是最新/);
+"""
+        )
+
+        apply_block = self.js[
+            self.js.index("async function applyBootstrapPayload("):
+            self.js.index("function renderTabDataState(")
+        ]
+        self.assertIn("return snapshotChanged;", apply_block)
+        refresh_block = self.js[
+            self.js.index("async function refreshAll("):
+            self.js.index("function nextRefreshPollDelay(")
+        ]
+        self.assertIn(
+            "const snapshotChanged = await applyBootstrapPayload(bootstrap)",
+            refresh_block,
+        )
+        self.assertIn("snapshotRefreshNotice(snapshotChanged)", refresh_block)
+
     def test_initial_load_is_bounded_and_tabs_load_only_their_required_payloads(self) -> None:
         self.assertIn("const TAB_DATA_REQUIREMENTS", self.js)
         self.assertRegex(self.js, r"async function ensureTabData\(")

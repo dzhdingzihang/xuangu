@@ -92,6 +92,27 @@ class PublishDataAssetsTests(unittest.TestCase):
         )
         self.assertIsNone(initializing["scheduler_health"]["publication_within_slo"])
 
+    def test_manual_publication_without_checkpoint_fails_closed_for_slo(self) -> None:
+        published = publish_data_assets.publication_manifest(
+            {
+                "generated_at": "2026-09-02T09:53:37+00:00",
+                "scheduler_health": {
+                    "scheduler_readiness": "DEGRADED",
+                    "generation_delay_seconds": None,
+                    "publication_slo_seconds": 2700,
+                },
+            },
+            published_at="2026-09-02T09:56:46+00:00",
+        )
+
+        self.assertIsNone(
+            published["scheduler_health"]["checkpoint_publication_delay_seconds"]
+        )
+        self.assertIs(
+            published["scheduler_health"]["publication_within_slo"],
+            False,
+        )
+
     def test_immutable_objects_are_verified_before_alias_switch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = pathlib.Path(temporary)
