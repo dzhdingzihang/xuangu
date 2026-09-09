@@ -620,6 +620,15 @@ const readyGate = {
   published_on_time_24h: 7,
 };
 assert.equal(validateResourcePayload("scheduler", readyGate), readyGate);
+const manualGate = {
+  ...readyGate, effective_checkpoint: null, effective_invocation_slot: null,
+  source_invocation_slot: null, checkpoint_publication_delay_seconds: null,
+  publication_within_slo: null, unattended_refresh_ready: false,
+};
+assert.equal(validateResourcePayload("scheduler", manualGate), manualGate);
+assert.throws(() => validateResourcePayload("scheduler", { ...manualGate, publication_within_slo: true }));
+assert.throws(() => validateResourcePayload("scheduler", { ...manualGate, unattended_refresh_ready: true }));
+assert.throws(() => validateResourcePayload("scheduler", { ...readyGate, publication_within_slo: null }));
 state.schedulerGate = readyGate;
 state.status = {
   ...state.status,

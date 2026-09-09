@@ -644,8 +644,19 @@ def scheduler_gate_errors(local: dict, status: dict, gate: dict) -> list[str]:
     else:
         if not isinstance(missed, int) or isinstance(missed, bool) or missed < 0:
             errors.append("gate.missed_checkpoints_24h is not a non-negative integer")
-        if type(gate.get("publication_within_slo")) is not bool:
-            errors.append("gate.publication_within_slo is not a boolean")
+        checkpoint = gate.get("effective_checkpoint")
+        checkpoint_delay = gate.get("checkpoint_publication_delay_seconds")
+        within_slo = gate.get("publication_within_slo")
+        # A manual refresh has no assigned checkpoint even after the 24-hour
+        # ledger has matured. Its per-publication SLO is unavailable, not a
+        # malformed publication or evidence of successful scheduled delivery.
+        unscheduled_unmeasured = checkpoint is None and checkpoint_delay is None
+        if within_slo is None and unscheduled_unmeasured:
+            pass
+        elif type(within_slo) is not bool:
+            errors.append("gate.publication_within_slo must be a boolean when checkpoint evidence exists")
+        elif within_slo is True and (checkpoint is None or checkpoint_delay is None):
+            errors.append("gate.publication_within_slo cannot be true without checkpoint timing evidence")
 
     slo = gate.get("scheduler_slo")
     if not isinstance(slo, dict):

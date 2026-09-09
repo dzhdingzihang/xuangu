@@ -2143,7 +2143,9 @@ function validSchedulerGatePayload(payload) {
   const countsValid = countFields.every((field) => (
     Number.isInteger(payload[field]) && payload[field] >= 0
   ));
-  const publicationWithinSloValid = initializing || payload.published_at === null
+  const noCheckpointMeasurement = payload.effective_checkpoint === null
+    && payload.checkpoint_publication_delay_seconds === null;
+  const publicationWithinSloValid = initializing || payload.published_at === null || noCheckpointMeasurement
     ? payload.publication_within_slo === null
     : typeof payload.publication_within_slo === "boolean";
   return Boolean(
@@ -2159,6 +2161,7 @@ function validSchedulerGatePayload(payload) {
     && Number.isInteger(payload.publication_slo_seconds)
     && payload.publication_slo_seconds > 0
     && publicationWithinSloValid
+    && (payload.publication_within_slo === true || payload.unattended_refresh_ready === false)
     && isRecord(slo)
     && slo.contract_version === "scheduler-slo-v1"
     && slo.guaranteed === false
@@ -4886,7 +4889,7 @@ function schedulerHealthPresentation() {
   const publicationSlo = initializing
     ? `${fmt(sloMinutes, 0)} 分钟发布服务目标（非保证）· 证据初始化中`
     : v2ContractReady
-      ? `${fmt(sloMinutes, 0)} 分钟发布服务目标（非保证）· ${gate.publication_within_slo === true ? "最近批次在目标内" : gate.publication_within_slo === false ? "最近批次超出目标" : "最近批次证据未知"}`
+      ? `${fmt(sloMinutes, 0)} 分钟发布服务目标（非保证）· ${gate.publication_within_slo === true ? "最近批次在目标内" : gate.publication_within_slo === false ? "最近批次超出目标" : gate.effective_checkpoint === null ? "手动/非定时批次，准点指标不适用" : "最近批次证据未知"}`
       : "发布服务目标未知（不构成保证）";
   const readinessSource = contractsConsistent ? status : gateOnlyFallback ? gate : {};
   const readinessLayers = {

@@ -1026,6 +1026,60 @@ class DeploymentVerifierTests(unittest.TestCase):
         errors = self.module.scheduler_gate_errors(self.local, self.status, unsafe_slo)
         self.assertTrue(any("guaranteed" in error for error in errors))
 
+    def test_scheduler_gate_accepts_manual_refresh_without_slo_after_ledger_matures(self) -> None:
+        status = dict(self.status, checkpoint_evidence_ready=True, unattended_refresh_ready=False)
+        gate = scheduler_gate_fixture(
+            self.local, status, scheduler_readiness="DEGRADED", checkpoint_evidence_ready=True,
+            checkpoint_coverage_status="COMPLETE_24H_LEDGER", missed_checkpoints_24h=2,
+            effective_checkpoint=None, checkpoint_publication_delay_seconds=None,
+            publication_within_slo=None,
+        )
+        self.assertEqual(self.module.scheduler_gate_errors(self.local, status, gate), [])
+        self.assertIsNone(gate["publication_within_slo"])
+        self.assertIs(gate["unattended_refresh_ready"], False)
+        # READY describes the prior ledger; a manual publication still cannot
+        # establish that this publication met a scheduled checkpoint.
+        ready_ledger = dict(gate, scheduler_readiness="READY", missed_checkpoints_24h=0)
+        self.assertEqual(self.module.scheduler_gate_errors(self.local, status, ready_ledger), [])
+        claimed_ready = dict(ready_ledger, unattended_refresh_ready=True)
+        errors = self.module.scheduler_gate_errors(self.local, status, claimed_ready)
+        self.assertTrue(any("unattended_refresh_ready" in error for error in errors))
+
+    def test_scheduler_gate_requires_boolean_slo_for_scheduled_publication(self) -> None:
+        status = dict(self.status, checkpoint_evidence_ready=True, unattended_refresh_ready=False)
+        gate = scheduler_gate_fixture(
+            self.local, status, scheduler_readiness="DEGRADED", checkpoint_evidence_ready=True,
+            checkpoint_coverage_status="COMPLETE_24H_LEDGER", missed_checkpoints_24h=2,
+            effective_checkpoint="2026-08-21T15:17:00+08:00",
+            checkpoint_publication_delay_seconds=600,
+        )
+        for within_slo in (True, False):
+            with self.subTest(within_slo=within_slo):
+                self.assertEqual(self.module.scheduler_gate_errors(
+                    self.local, status, dict(gate, publication_within_slo=within_slo),
+                ), [])
+        for overrides in (
+            {}, {"checkpoint_publication_delay_seconds": None}, {"effective_checkpoint": None},
+        ):
+            with self.subTest(overrides=overrides):
+                errors = self.module.scheduler_gate_errors(self.local, status, dict(gate, **overrides))
+                self.assertTrue(any("publication_within_slo" in error for error in errors))
+
+    def test_scheduler_gate_unavailable_timing_cannot_claim_slo_success(self) -> None:
+        status = dict(self.status, checkpoint_evidence_ready=True, unattended_refresh_ready=False)
+        base = scheduler_gate_fixture(
+            self.local, status, scheduler_readiness="DEGRADED", checkpoint_evidence_ready=True,
+            checkpoint_coverage_status="COMPLETE_24H_LEDGER", missed_checkpoints_24h=2,
+            publication_within_slo=True,
+        )
+        for overrides in (
+            {}, {"effective_checkpoint": "2026-08-21T15:17:00+08:00"},
+            {"checkpoint_publication_delay_seconds": 600},
+        ):
+            with self.subTest(overrides=overrides):
+                errors = self.module.scheduler_gate_errors(self.local, status, dict(base, **overrides))
+                self.assertTrue(any("cannot be true without checkpoint timing evidence" in error for error in errors))
+
     def test_mismatch_reports_snapshot_key_and_sha(self) -> None:
         latest = dict(self.latest, snapshot_key="old.json")
         errors = self.module.deployment_mismatches(self.local, self.status, latest)
