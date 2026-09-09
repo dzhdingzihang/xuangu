@@ -4,6 +4,10 @@ import copy
 import datetime as dt
 import json
 import math
+import pathlib
+import subprocess
+import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -37,6 +41,25 @@ def opportunity_candidate(code: str) -> dict:
 
 
 class ReturnOpportunityIntegrationTests(unittest.TestCase):
+    def test_standalone_deployment_verifier_can_load_opportunity_publisher(self) -> None:
+        verifier = pathlib.Path(server.__file__).parent / "scripts" / "verify_deployment.py"
+        program = """
+import runpy, sys
+namespace = runpy.run_path(sys.argv[1])
+errors = namespace['ui_api_contract_errors'](
+    {'return_opportunities': {'candidates': []}},
+    {'latest-summary': {'ok': True, 'latest': {}}},
+    source_snapshot_sha256='a' * 64, source_snapshot_byte_size=1,
+)
+assert any('return_opportunities' in error for error in errors), errors
+"""
+        with tempfile.TemporaryDirectory() as outside_repo:
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", program, str(verifier)],
+                cwd=outside_repo, capture_output=True, text=True, timeout=30,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_tencent_overlay_and_compaction_keep_bar_provenance(self) -> None:
         response = mock.Mock()
         response.json.return_value = {"data": {"sh600000": {"qfqday": [

@@ -9,6 +9,7 @@ import math
 import os
 import pathlib
 import re
+import sys
 import tempfile
 import time
 import urllib.error
@@ -16,6 +17,10 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from zoneinfo import ZoneInfo
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 IDENTITY_FIELDS = (
