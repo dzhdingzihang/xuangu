@@ -10,7 +10,7 @@ from unittest import mock
 import return_opportunity
 import server
 from market_calendar import session_dates
-from scripts import build_worker_assets
+from scripts import build_worker_assets, verify_deployment
 from tests.test_build_worker_assets import runtime_quote_candidate, runtime_snapshot_fixture
 
 
@@ -37,6 +37,91 @@ def opportunity_candidate(code: str) -> dict:
 
 
 class ReturnOpportunityIntegrationTests(unittest.TestCase):
+    def test_tencent_overlay_and_compaction_keep_bar_provenance(self) -> None:
+        response = mock.Mock()
+        response.json.return_value = {"data": {"sh600000": {"qfqday": [
+            ["2026-08-24", "10", "10.1", "10.2", "9.9", "12000"],
+        ]}}}
+        with mock.patch.object(server, "requests_get_with_retry", return_value=response):
+            history = server.tencent_stock_kline("600000", 32, require_qfq=True)
+        original = copy.deepcopy(history)
+        self.assertEqual(history[0]["volume_unit"], "lot")
+        self.assertEqual(history[0]["price_adjustment"], "tencent_qfqday")
+        quote = {
+            "price": 10.2, "open": 10.1, "high": 10.3, "low": 10.0,
+            "volume": 15000, "amount_wan": 1530,
+            "realtime": {"source_as_of": "2026-08-25T14:55:00+08:00", "volume_unit": "lot"},
+        }
+        overlaid = server.overlay_a_share_quote_bar(history, quote)
+        compact = server.compact_kline(overlaid)
+        self.assertEqual(len(compact), 2)
+        self.assertEqual(compact[0]["price_adjustment"], "tencent_qfqday")
+        self.assertTrue(all(row["volume_unit"] == "lot" for row in compact))
+        self.assertEqual(compact[-1]["amount"], 15_300_000)
+        self.assertEqual(compact[-1]["volume"], 15000)
+        self.assertEqual(history, original)
+
+    def test_mixed_lots_and_shares_produce_equivalent_liquidity_and_volume_scores(self) -> None:
+        share_candidate = opportunity_candidate("600000")
+        share_candidate["realtime"].update({
+            "source_as_of": "2026-08-26T09:45:00+08:00", "volume_unit": "lot",
+        })
+        for row in share_candidate["kline"]:
+            row.update({"volume_unit": "share", "price_adjustment": "yahoo_adjclose_factor_v1", "amount": 42_000_000})
+        mixed_candidate = copy.deepcopy(share_candidate)
+        for row in mixed_candidate["kline"][-5:]:
+            row["volume"] /= 100
+            row.update({"volume_unit": "lot", "price_adjustment": "tencent_qfqday"})
+        share_candidate["kline"] = server.compact_kline(share_candidate["kline"])
+        mixed_candidate["kline"] = server.compact_kline(mixed_candidate["kline"])
+        snapshot = runtime_snapshot_fixture()
+        snapshot["events"] = {"items": []}
+        reference = return_opportunity.build_return_opportunities(snapshot, {"a_share": [share_candidate]})
+        mixed = return_opportunity.build_return_opportunities(snapshot, {"a_share": [mixed_candidate]})
+        self.assertEqual(reference["eligible_count"], 1)
+        self.assertEqual(mixed["eligible_count"], 1)
+        left, right = reference["primary"], mixed["primary"]
+        self.assertEqual(left["metrics"]["volume_ratio_5d_20d"], 1.0)
+        self.assertEqual(right["metrics"]["volume_ratio_5d_20d"], 1.0)
+        self.assertEqual(right["metrics"]["median_daily_traded_value"], 42_000_000)
+        self.assertEqual(left["opportunity_score"], right["opportunity_score"])
+        self.assertEqual(left["components"]["trend_volume"], right["components"]["trend_volume"])
+
+    def test_deployment_verifies_exact_optional_frozen_opportunity_summary(self) -> None:
+        local, _ = self.build_ranked_snapshot()
+        expected = build_worker_assets.summarize_return_opportunities(local)
+        spec = verify_deployment.UI_ASSET_SPECS["latest-summary"]
+        payload = {
+            "ok": True, "contract_version": spec["contract_version"],
+            "latest": {"return_opportunities": copy.deepcopy(expected)}, "status": {},
+        }
+        with (
+            mock.patch.dict(verify_deployment.UI_ASSET_SPECS, {"latest-summary": spec}, clear=True),
+            mock.patch.object(verify_deployment, "_ui_identity_errors", return_value=[]),
+            mock.patch.object(verify_deployment, "_snapshot_use_errors", return_value=[]),
+        ):
+            def errors(snapshot, published):
+                return verify_deployment.ui_api_contract_errors(
+                    snapshot, {"latest-summary": published},
+                    source_snapshot_sha256="a" * 64, source_snapshot_byte_size=1,
+                )
+
+            self.assertEqual(errors(local, payload), [])
+            for change in ("missing", "score_changed", "authority_changed"):
+                altered = copy.deepcopy(payload)
+                if change == "missing":
+                    altered["latest"].pop("return_opportunities")
+                elif change == "score_changed":
+                    altered["latest"]["return_opportunities"]["candidates"][0]["opportunity_score"] += 0.01
+                else:
+                    altered["latest"]["return_opportunities"]["production_eligible"] = True
+                with self.subTest(change=change):
+                    self.assertTrue(any("do not match the frozen research ranking" in error for error in errors(local, altered)))
+            legacy = {key: value for key, value in local.items() if key != "return_opportunities"}
+            legacy_payload = copy.deepcopy(payload)
+            legacy_payload["latest"].pop("return_opportunities")
+            self.assertEqual(errors(legacy, legacy_payload), [])
+
     def build_ranked_snapshot(self) -> tuple[dict, list[dict]]:
         snapshot = runtime_snapshot_fixture()
         snapshot["events"] = {"items": []}

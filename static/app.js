@@ -3345,7 +3345,7 @@ function renderReturnOpportunities(snapshot = state.snapshot) {
     <header><div><span class="return-eyebrow">10 TRADING DAYS · RETURN OPPORTUNITIES</span><h2 id="returnOpportunitiesTitle">${title}<small>优先寻找上行机会</small></h2><p>结合趋势、行业强弱、独立催化与量价结构形成研究排序，同时核验流动性和风险。机会分是规则信号，尚不是预测收益或上涨概率。</p></div><span class="status-pill primary">${stateLabels[view.status]}</span></header>
     <div class="return-opportunity-summary"><span>本轮评估 <b>${fmt(model.evaluated_count, 0)}</b></span><span>研究入围 <b>${fmt(model.eligible_count, 0)}</b></span><span>优先展示 <b>${Math.min(view.rows.length, 6)}</b></span><span>快照生成 <time>${esc(dateTime(snapshot.generated_at))}</time></span></div>
     <div class="return-opportunity-grid">${view.rows.slice(0, 6).map(renderReturnOpportunityCard).join("")}</div>
-    <footer class="return-opportunity-footnote">${icon("ph-info")}<p>排序覆盖本轮有界召回池，不代表全市场收益最高。高波动带来更大的双向变化，需结合风险预算继续核验。</p><button type="button" class="text-button" data-action="go-model">评分逻辑 ${icon("ph-arrow-up-right")}</button></footer>
+    <footer class="return-opportunity-footnote">${icon("ph-info")}<p>排序覆盖本轮有界召回池，不代表全市场收益最高。官方公告只对部分候选深扫，入榜不代表已排除所有事件风险。高波动带来更大的双向变化，需继续核验。</p><button type="button" class="text-button" data-action="go-model">评分逻辑 ${icon("ph-arrow-up-right")}</button></footer>
   </section>`;
 }
 
