@@ -88,8 +88,48 @@ class EventPipelineTests(unittest.TestCase):
 
         symbols = event_pipeline._candidate_symbols(snap, "hk", 1)
 
-        self.assertIn("0300.HK", symbols)
-        self.assertIn("0700.HK", symbols)
+        self.assertEqual(symbols, ["0300.HK"])
+
+    def test_scan_reserves_legacy_and_prioritizes_observed_momentum(self) -> None:
+        steady = [
+            {"code": f"{index:04d}.HK", "recommendation_degree": 90,
+             "v2": {"rank_percentile": 0.90}, "data_quality": {"score": 100},
+             "market_liquidity_percentile": 0.9,
+             "chan": {"metrics": {"pct_5d": 0.5, "distance_ma20_pct": 1, "distance_ma10_pct": 0.2}}}
+            for index in range(1, 21)
+        ]
+        opportunity = [
+            {"code": f"{index:04d}.HK", "recommendation_degree": 55,
+             "v2": {"rank_percentile": 0.80}, "data_quality": {"score": 100},
+             "market_liquidity_percentile": 0.95,
+             "chan": {"metrics": {"pct_5d": 9, "distance_ma20_pct": 7, "distance_ma10_pct": 3}}}
+            for index in range(101, 121)
+        ]
+        snap = snapshot()
+        snap["markets"]["hk"]["_candidate_pool"] = steady + opportunity
+        selected = event_pipeline._candidate_symbols(snap, "hk", 16)
+        self.assertEqual(len(selected), 16)
+        self.assertEqual(len(set(selected) & {item["code"] for item in steady}), 4)
+        self.assertEqual(len(set(selected) & {item["code"] for item in opportunity}), 12)
+        snap["markets"]["hk"]["_candidate_pool"].reverse()
+        self.assertEqual(event_pipeline._candidate_symbols(snap, "hk", 16), selected)
+
+    def test_scan_hard_budget_and_risk_penalty(self) -> None:
+        snap = snapshot()
+        snap["markets"]["hk"]["decision"]["watchlist"] = [
+            {"code": f"{index:04d}.HK"} for index in range(1, 30)
+        ]
+        selected = event_pipeline._candidate_symbols(snap, "hk", 16)
+        self.assertEqual(len(selected), 16)
+        healthy = {"chan": {"metrics": {"pct_5d": 8}}}
+        blocked = {**healthy, "execution_state": "BLOCK", "risk_items": [{"severity": "hard"}]}
+        self.assertGreater(event_pipeline._event_scan_priority(healthy, ""), event_pipeline._event_scan_priority(blocked, ""))
+
+    def test_opportunity_scan_does_not_rank_by_volatility_band(self) -> None:
+        base = {"chan": {"metrics": {"pct_5d": 8}}, "data_quality": {"score": 95}}
+        low_vol = {**base, "estimated_10d_range": {"low_pct": -2, "high_pct": 4}}
+        high_vol = {**base, "estimated_10d_range": {"low_pct": -18, "high_pct": 25}}
+        self.assertEqual(event_pipeline._event_scan_priority(low_vol, ""), event_pipeline._event_scan_priority(high_vol, ""))
 
     def test_collection_defaults_to_sixteen_candidates_per_market(self) -> None:
         snap = snapshot()
@@ -104,7 +144,7 @@ class EventPipelineTests(unittest.TestCase):
 
         self.assertEqual(result["pipeline"]["status"], "READY_EMPTY")
         self.assertEqual(result["pipeline"]["scan_purpose"], "positive_event_enrichment")
-        self.assertEqual(result["pipeline"]["selection_policy"], "rule_priority_and_published_decision_v1")
+        self.assertEqual(result["pipeline"]["selection_policy"], "momentum_opportunity_with_legacy_reserve_v2")
         self.assertEqual(result["pipeline"]["candidate_limit_per_market"], 16)
         self.assertEqual(
             choose.call_args_list,
@@ -167,6 +207,71 @@ class EventPipelineTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["released_at"][:10], "2026-08-22")
         self.assertTrue(events[0]["url"].startswith("https://www1.hkexnews.hk/"))
+
+    def test_five_daily_hk_buybacks_keep_audit_documents_but_no_catalyst_bonus(self) -> None:
+        page = "<table>" + "".join(
+            f"<tr><td>{day}/08/2026 18:30</td><td><a href='/listedco/listconews/sehk/2026/08{day}/hsbc-{day}.pdf'>"
+            "Next Day Disclosure Returns - [Share Buyback]</a></td></tr>"
+            for day in range(18, 23)
+        ) + "</table>"
+        parsed = event_pipeline.parse_hkex_titles(page, "0005.HK", "run-1", now=NOW)
+        events = event_pipeline.cluster_events(parsed)
+        self.assertEqual(len(events), 5)
+        self.assertEqual({event["event_id"] for event in events}, {event["event_id"] for event in parsed})
+        self.assertEqual(len({event["source_document_id"] for event in events}), 5)
+        self.assertEqual(len({event["event_cluster_id"] for event in events}), 1)
+        self.assertTrue(all(event["direction"] == "neutral" and not event["decision_eligible"] for event in events))
+        self.assertTrue(all(event["materiality_basis"] == "title_only_unmeasured" for event in events))
+        self.assertTrue(all(event["cluster_size"] == 5 for event in events))
+        self.assertEqual(sum(event["decision_cluster_representative"] for event in events), 1)
+        self.assertEqual(event_pipeline.cluster_events(events), events)
+
+    def test_distinct_earnings_and_contract_disclosures_do_not_collapse(self) -> None:
+        events = []
+        for index, title in enumerate(("Profit Alert - Positive", "关于签订重大合同的公告", "关于签订重大合同的公告")):
+            events.append(event_pipeline._event(
+                market="hk", symbol="0005.HK", title=title,
+                url=f"https://www1.hkexnews.hk/{index}.pdf", released_at=NOW,
+                run_id="run-1", source_document_id=f"doc-{index}",
+            ))
+        clustered = event_pipeline.cluster_events(events)
+        self.assertEqual(len({item["event_cluster_id"] for item in clustered}), 3)
+        self.assertTrue(all(item["decision_eligible"] and item["direction"] == "positive" for item in clustered))
+
+    def test_verified_same_program_counts_once_but_risk_disclosures_remain_blocking(self) -> None:
+        events = []
+        for index, title in enumerate(("股份回购计划", "股份回购计划", "profit warning - next day disclosure share buyback")):
+            event = event_pipeline._event(
+                market="hk", symbol="0005.HK", title=title,
+                url=f"https://www1.hkexnews.hk/{index}.pdf", released_at=NOW - dt.timedelta(days=index),
+                run_id="run-1", source_document_id=f"doc-{index}",
+            )
+            event["materiality_evidence"] = {"program_id": "approved-program-1", "evidence_status": "verified", "source_document_id": f"doc-{index}"}
+            events.append(event)
+        clustered = event_pipeline.cluster_events(events)
+        self.assertEqual(clustered[0]["event_cluster_id"], clustered[1]["event_cluster_id"])
+        self.assertTrue(clustered[0]["decision_eligible"])
+        self.assertFalse(clustered[1]["decision_eligible"])
+        self.assertTrue(clustered[2]["decision_eligible"])
+        self.assertTrue(clustered[2]["decision_blocking"])
+        self.assertEqual(clustered[2]["direction"], "negative")
+        self.assertNotEqual(clustered[0]["event_cluster_id"], clustered[2]["event_cluster_id"])
+        self.assertEqual(event_pipeline.cluster_events(clustered), clustered)
+
+    def test_title_amount_and_unverified_program_never_prove_materiality(self) -> None:
+        event = event_pipeline._event(
+            market="hk", symbol="0005.HK", title="Next Day Disclosure Returns - [Share Buyback] $5 billion",
+            url="https://www1.hkexnews.hk/a.pdf", released_at=NOW, run_id="run-1", source_document_id="doc-1",
+        )
+        event["materiality_evidence"] = {"program_id": "unknown", "amount": 5_000_000_000}
+        clustered = event_pipeline.cluster_events([event])[0]
+        self.assertFalse(clustered["decision_eligible"])
+        self.assertEqual(clustered["materiality"], "unmeasured")
+        self.assertEqual(clustered["cluster_deduplication_basis"], "issuer_routine_disclosure")
+
+    def test_cninfo_routine_buyback_progress_does_not_override_negative_guard(self) -> None:
+        self.assertEqual(event_pipeline._classify("关于股份回购进展的公告"), ("neutral", "unmeasured", False))
+        self.assertEqual(event_pipeline._classify("关于股份回购进展及监管处罚的公告"), ("negative", "material", True))
 
     def test_self_declared_official_event_on_untrusted_host_is_rejected(self) -> None:
         item = event_pipeline._event(

@@ -17,6 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 import production_rule_model
+import return_opportunity
 from market_calendar import (
     CALENDAR_VERSION,
     calendar_id,
@@ -3044,6 +3045,11 @@ def validate_snapshot(snapshot: dict) -> list[str]:
     _append_schedule_automation_errors(snapshot, errors)
     _append_production_decision_errors(snapshot, errors)
     _append_evidence_loop_errors(snapshot, errors)
+    if "return_opportunities" in snapshot:
+        opportunities = snapshot["return_opportunities"]
+        errors.extend(return_opportunity.validate_return_opportunities(opportunities))
+        if isinstance(opportunities, dict) and opportunities.get("generated_at") != snapshot.get("generated_at"):
+            errors.append("return_opportunities.generated_at does not match source snapshot")
     errors.extend(validate_live_candidate_publication(snapshot))
     return errors
 

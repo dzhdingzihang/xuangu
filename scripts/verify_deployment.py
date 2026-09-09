@@ -1173,6 +1173,11 @@ def ui_api_contract_errors(
             if asset.get("effective_decisions") != payload.get("effective_decisions"):
                 errors.append(f"{prefix}.latest.effective_decisions does not match the API envelope")
         if name == "latest-summary":
+            if "return_opportunities" in local:
+                from scripts.build_worker_assets import summarize_return_opportunities
+                expected_opportunities = summarize_return_opportunities(local)
+                if not isinstance(asset, dict) or asset.get("return_opportunities") != expected_opportunities:
+                    errors.append(f"{prefix}.return_opportunities do not match the frozen research ranking")
             status = payload.get("status")
             if not isinstance(status, dict):
                 errors.append(f"{prefix}.status is not an object")

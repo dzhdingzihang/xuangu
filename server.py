@@ -36,6 +36,7 @@ import history_evaluation
 import model_observation_ledger
 import observation_outcome_ledger
 import production_rule_model
+import return_opportunity
 import rule_outcome_ledger
 
 try:
@@ -890,6 +891,23 @@ def market_universe(market_key: str) -> list[dict]:
     if target is not None and len(rows) != target:
         raise ValueError(f"{market_key} universe size {len(rows)} != target {target}")
     return rows
+
+
+def opportunity_reference_metadata() -> dict:
+    """Labels only: never reuse curated membership, lenses or analyst scores."""
+    expansion = load_market_recall_expansion()
+    result = {}
+    for market_key in ("a_share", "hk", "us"):
+        result[market_key] = {
+            canonical_market_symbol(row["symbol"], market_key, expansion): {
+                "name": row.get("name"),
+                "role": row.get("role"),
+                "themes": list(row.get("themes") or []),
+                "source": "reference_metadata",
+            }
+            for row in market_universe(market_key)
+        }
+    return result
 
 
 def _dynamic_neutral_lens(market_key: str) -> dict:
@@ -5054,6 +5072,14 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
     snapshot["global_decision"] = build_global_ten_day_decision(snapshot)
     snapshot["production_rule_inputs"] = production_rule_model.build_production_rule_inputs(snapshot)
     snapshot["production_decision"] = production_rule_model.build_production_decision(snapshot)
+    # Compute only at generation, while the complete point-in-time scoring pool
+    # is still present. Never reconstruct a new ranking from an archived shortlist.
+    if any("_candidate_pool" in section for section in markets.values() if isinstance(section, dict)):
+        snapshot["return_opportunities"] = return_opportunity.build_return_opportunities(
+            snapshot,
+            {market: _section_candidate_pool(section) for market, section in markets.items()},
+            metadata_by_market=opportunity_reference_metadata(),
+        )
     for section in markets.values():
         if isinstance(section, dict):
             section.pop("_candidate_pool", None)
@@ -6110,6 +6136,7 @@ def eastmoney_stock_kline(code: str, limit: int = MODEL_KLINE_HISTORY_LIMIT) -> 
                 "change_pct": safe_float(parts[8]),
                 "turnover": safe_float(parts[10]),
                 "price_adjustment": "eastmoney_fqt_1_qfq",
+                "volume_unit": "lot",
             }
         )
     return rows
@@ -6161,6 +6188,7 @@ def tencent_stock_kline(
                 "change_pct": pct_change(close, prev_close),
                 "turnover": 0,
                 "price_adjustment": "tencent_qfqday" if qfq_klines else "tencent_adjustment_unknown",
+                "volume_unit": "lot",
             }
         )
     return rows
@@ -6372,6 +6400,7 @@ def overlay_a_share_quote_bar(kline: list[dict], quote: dict, limit: int = 70) -
         "high": high,
         "low": low,
         "volume": safe_float(quote.get("volume")),
+        "volume_unit": quote.get("volume_unit") or (quote.get("realtime") or {}).get("volume_unit") or "lot",
         "amount": safe_float(quote.get("amount_wan")) * 10000,
         "amplitude": safe_float(quote.get("amplitude_pct")),
         "change_pct": safe_float(quote.get("change_pct")),
@@ -6539,6 +6568,7 @@ def yahoo_chart_kline(symbol: str, limit: int = MODEL_KLINE_HISTORY_LIMIT) -> li
                 "turnover": 0,
                 "adjustment_factor": factor,
                 "price_adjustment": "yahoo_adjclose_factor_v1",
+                "volume_unit": "share",
             }
         )
     return rows[-limit:]
@@ -7499,6 +7529,7 @@ def compact_kline(kline: list[dict], limit: int = 32) -> list[dict]:
                 "close": round(safe_float(row.get("close")), 4),
                 "volume": round(safe_float(row.get("volume")), 2),
                 "change_pct": round(safe_float(row.get("change_pct")), 2),
+                **{key: row[key] for key in ("volume_unit", "price_adjustment", "amount") if key in row},
             }
         )
     return rows

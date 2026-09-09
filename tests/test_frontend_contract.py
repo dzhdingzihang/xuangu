@@ -79,12 +79,17 @@ class FrontendContractTests(unittest.TestCase):
             self.assertIn(f'data-tab="{tab}"', self.html)
         self.assertEqual(self.html.count('role="tabpanel"'), 6)
 
-    def test_frontend_exposes_one_user_decision_and_a_server_trade_plan(self) -> None:
+    def test_frontend_exposes_opportunities_before_rule_review_and_a_server_trade_plan(self) -> None:
         self.assertRegex(self.js, r"function userDecisionState\(")
         for state_name in ("ENTER_TRADE_REVIEW", "RESEARCH_ONLY", "NO_ACTION"):
             self.assertIn(state_name, self.js)
         self.assertIn('data-user-decision-state="${esc(decisionState)}"', self.js)
-        self.assertIn("唯一用户结论", self.js)
+        self.assertIn("两周收益机会", self.js)
+        self.assertIn("稳健规则候选", self.js)
+        decision_start = self.js.index("function renderDecision()")
+        decision_end = self.js.index("function filteredCandidates()", decision_start)
+        decision_source = self.js[decision_start:decision_end]
+        self.assertLess(decision_source.index("renderReturnOpportunities(snapshot)"), decision_source.index("user-decision-card"))
         self.assertIn("进入交易复核", self.js)
         self.assertIn("仅继续研究", self.js)
         self.assertIn("今日不行动", self.js)
@@ -110,6 +115,102 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("规则资格分不是上涨概率，也不是收益保证", self.js)
         self.assertIn("advanced-decision-details", self.js + self.css)
         self.assertNotIn("<details class=\"advanced-decision-details\" open", self.js)
+
+    def test_opportunity_board_requires_published_research_contract_and_preserves_cloud_order(self) -> None:
+        run_app_node(
+            r"""
+const makeRow = (code, score, rank) => ({
+  market: "us", code, name: code === "NVDA" ? "英伟达" : "微软",
+  opportunity_score: score, rank, market_rank: rank,
+  qualification_status: "RESEARCH_ELIGIBLE", qualification_blockers: [],
+  probability: null, expected_net_return: null, calibrated: false, production_eligible: false,
+  sector: { name: "半导体", status: "KNOWN", source: "provider" },
+  components: { momentum: { score: 75, weight: 0.28, contribution: 21 } },
+  metrics: { return_20d_pct: 12.3 },
+  reasons: ["量价结构改善"], risk_flags: [],
+  scenario_range: {
+    horizon_trade_days: 10,
+    method_id: "realized-volatility-context-v1", calibrated: false,
+    low_pct: -12, high_pct: 18, source_observations: 20, label: "历史波动情景",
+  },
+  reference_quote: { price: 125, currency: "USD", source: "public_quote", source_as_of: "2026-09-09T10:00:00-04:00", quote_status: "LAST_CLOSE" },
+  risk_budget: { illustrative_weight_pct: 4.1, guaranteed_stop: false, method: "volatility_budget_illustration" },
+});
+// Cloud ranking has a diversity gap; the browser must not re-rank tied rows.
+const rows = [makeRow("NVDA", 80, 1), makeRow("MSFT", 80, 3)];
+state.snapshot = {
+  snapshot_key: "current.json", generated_at: "2026-09-09T22:47:00+08:00",
+  return_opportunities: {
+    contract_version: "return-opportunities-v1", status: "RESEARCH_READY",
+    calibrated: false, production_eligible: false, probability: null, expected_net_return: null,
+    evaluated_count: 800, eligible_count: 20, primary: rows[0], candidates: rows,
+    weights: { momentum: 0.28 },
+  },
+};
+state.status = { ok: true, freshness_state: "fresh" };
+let view = returnOpportunityView();
+assert.equal(view.rows.length, 2);
+assert.equal(view.rows[0].code, "NVDA");
+let html = renderReturnOpportunities();
+assert.ok(html.indexOf("英伟达") < html.indexOf("微软"));
+assert.match(html, /<strong>80<\/strong>/);
+assert.match(html, /125\.00 USD/);
+assert.match(html, /09-09 22:00/);
+assert.match(html, /已实现 20 日涨跌/);
+assert.match(html, /非上涨概率/);
+assert.match(html, /未校准，情景上下沿不是预期收益/);
+assert.match(html, /data-action="open-opportunity" data-key="us:NVDA"/);
+assert.match(renderReturnOpportunityDetail(rows[0], "us"), /趋势动量/);
+assert.match(renderReturnOpportunityDetail(rows[0], "us"), /权重 28%/);
+assert.doesNotMatch(html, /买入|上涨概率 [0-9]/);
+for (const bad of [
+  { calibrated: true }, { production_eligible: true }, { probability: 0.9 },
+  { expected_net_return: 0.2 }, { primary: rows[1] }, { eligible_count: 0 },
+]) {
+  const snapshot = { ...state.snapshot, return_opportunities: { ...state.snapshot.return_opportunities, ...bad } };
+  assert.equal(returnOpportunityView(snapshot).status, "INVALID");
+  assert.doesNotMatch(renderReturnOpportunities(snapshot), /英伟达|data-opportunity-rank/);
+}
+const badRow = { ...rows[0], probability: 0.8 };
+const snapshot = { ...state.snapshot, return_opportunities: { ...state.snapshot.return_opportunities, candidates: [badRow], primary: badRow } };
+assert.equal(returnOpportunityView(snapshot).status, "INVALID");
+"""
+        )
+
+    def test_stale_opportunity_board_hides_cards_without_fabricating_missing_metrics(self) -> None:
+        run_app_node(
+            r"""
+const row = { market: "hk", code: "0700.HK", name: "腾讯控股", rank: 1, market_rank: 1, opportunity_score: 78,
+  qualification_status: "RESEARCH_ELIGIBLE", qualification_blockers: [], probability: null, expected_net_return: null,
+  calibrated: false, production_eligible: false,
+  metrics: { return_20d_pct: null }, scenario_range: { low_pct: -8, high_pct: 12, calibrated: true },
+  reference_quote: { price: 600, source: "public_quote" } };
+state.snapshot = { snapshot_key: "snapshot.json", generated_at: "2026-09-09T22:47:00+08:00",
+  return_opportunities: { contract_version: "return-opportunities-v1", status: "RESEARCH_READY", calibrated: false,
+    production_eligible: false, probability: null, expected_net_return: null,
+    evaluated_count: 800, eligible_count: 1, primary: row, candidates: [row] } };
+state.status = { ok: true, freshness_state: "fresh" };
+let html = renderReturnOpportunities();
+assert.match(html, /参考行情待核验/);
+assert.match(html, /历史情景待发布/);
+assert.match(html, /行业未识别/);
+assert.match(html, /已实现 20 日涨跌<\/dt><dd>未提供/);
+assert.doesNotMatch(html, /600\.00|\+0\.0%|\+12\.0%/);
+for (const freshness_state of ["stale", "updating", "unknown"]) {
+  state.status = { ok: true, freshness_state };
+  html = renderReturnOpportunities();
+  assert.match(html, /HISTORICAL_ONLY/);
+  assert.match(html, /历史机会榜暂停展示/);
+  assert.doesNotMatch(html, /腾讯控股|data-opportunity-rank|open-opportunity/);
+  assert.equal(renderReturnOpportunityRibbon(), "");
+  assert.equal(renderReturnOpportunityDetail(row, "hk"), "");
+}
+state.status = { ok: true, freshness_state: "fresh", snapshot_key: "different.json" };
+assert.equal(returnOpportunityView().status, "HISTORICAL_ONLY");
+state.snapshot = {};
+assert.match(renderReturnOpportunities(), /收益机会榜待下一次云端生成/);
+"""
+        )
 
     def test_trade_plan_contract_is_semantically_validated_without_browser_inference(self) -> None:
         run_app_node(

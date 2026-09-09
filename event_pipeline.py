@@ -64,6 +64,7 @@ NEGATIVE_TERMS = (
     "profit warning",
 )
 MATERIAL_FORMS = {"8-K", "10-K", "10-Q", "20-F", "6-K", "DEF 14A", "SC 13D", "SC 13D/A"}
+EVENT_CLUSTER_VERSION = "event-catalyst-clusters-v1"
 
 
 class EventPipelineError(RuntimeError):
@@ -92,13 +93,110 @@ def _stable_id(*parts: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+def _routine_buyback_disclosure(title: str) -> bool:
+    """Title metadata can identify a routine return, but cannot prove its size."""
+
+    lowered = re.sub(r"\s+", " ", str(title or "")).lower()
+    buyback = any(term in lowered for term in ("buyback", "buy-back", "repurchase", "回购", "回購"))
+    routine = any(
+        term in lowered
+        for term in (
+            "next day disclosure", "next-day disclosure", "monthly return", "daily repurchase",
+            "次日披露", "翌日披露", "月报表", "月報表", "回购进展", "回購進展",
+            "回购股份进展", "回購股份進展", "回购股份的进展", "回購股份的進展",
+            "回购实施情况", "回購實施情況", "回购注销", "回購註銷",
+        )
+    )
+    return buyback and routine
+
+
+def _event_family(title: str) -> str:
+    lowered = str(title or "").lower()
+    if _routine_buyback_disclosure(lowered):
+        return "routine_buyback_disclosure"
+    if any(term in lowered for term in ("回购", "回購", "buyback", "buy-back", "repurchase")):
+        return "buyback"
+    if any(term in lowered for term in ("预增", "扭亏", "预亏", "亏损", "profit", "earnings", "业绩", "業績")):
+        return "earnings"
+    if any(term in lowered for term in ("中标", "合同", "订单", "contract")):
+        return "contract"
+    return "official_filing"
+
+
 def _classify(title: str) -> tuple[str, str, bool]:
     lowered = str(title or "").lower()
     if any(term.lower() in lowered for term in NEGATIVE_TERMS):
         return "negative", "material", True
+    if _routine_buyback_disclosure(title):
+        return "neutral", "unmeasured", False
     if any(term.lower() in lowered for term in POSITIVE_TERMS):
         return "positive", "high", True
     return "neutral", "unknown", False
+
+
+def cluster_events(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep every source document while counting an evidenced program once.
+
+    Routine returns are grouped at issuer/family level for display only: the
+    title does not establish a common buyback program, an amount, or a new
+    economic surprise. Other documents stay independent unless the upstream
+    content evidence explicitly identifies their program. Negative disclosures
+    always retain their own blocking eligibility.
+    """
+
+    result: list[dict[str, Any]] = []
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for source in items:
+        item = dict(source)
+        title = str(item.get("title") or "")
+        family = _event_family(title)
+        negative = str(item.get("direction") or "").lower() == "negative" or any(
+            term.lower() in title.lower() for term in NEGATIVE_TERMS
+        )
+        original_eligible = item.get("decision_eligible_before_clustering", item.get("decision_eligible")) is True
+        item["decision_eligible_before_clustering"] = original_eligible
+        item["decision_eligible"] = original_eligible
+        if family == "routine_buyback_disclosure" and not negative:
+            item.update({
+                "direction": "neutral", "materiality": "unmeasured", "decision_eligible": False,
+                "decision_blocking": False, "materiality_basis": "title_only_unmeasured",
+            })
+        evidence = item.get("materiality_evidence") or {}
+        # A free-form identifier alone does not establish a measured program.
+        program_id = (
+            evidence.get("program_id")
+            if isinstance(evidence, Mapping)
+            and evidence.get("evidence_status") == "verified"
+            and evidence.get("source_document_id") == item.get("source_document_id")
+            else None
+        )
+        if negative:
+            basis, identity = "source_document", item.get("source_document_id") or item.get("event_id")
+        elif family == "routine_buyback_disclosure":
+            basis, identity = "issuer_routine_disclosure", family
+        elif program_id:
+            basis, identity = "verified_program", str(program_id)
+        else:
+            basis, identity = "source_document", item.get("source_document_id") or item.get("event_id")
+        cluster_id = "ecl_" + _stable_id(item.get("market"), item.get("symbol"), family, basis, identity)
+        item.update({
+            "event_family": family, "event_cluster_id": cluster_id,
+            "cluster_version": EVENT_CLUSTER_VERSION, "cluster_deduplication_basis": basis,
+        })
+        result.append(item)
+        groups.setdefault(cluster_id, []).append(item)
+    for members in groups.values():
+        representative = max(members, key=lambda item: (str(item.get("released_at") or ""), str(item.get("event_id") or "")))
+        representative_id = representative.get("event_id")
+        for item in members:
+            item.update({
+                "cluster_size": len(members),
+                "cluster_representative_event_id": representative_id,
+                "decision_cluster_representative": item is representative,
+            })
+            if item is not representative and str(item.get("direction") or "").lower() == "positive":
+                item["decision_eligible"] = False
+    return result
 
 
 def _response_json(response: Any) -> Any:
@@ -361,8 +459,8 @@ def _risk_reward_score(candidate: Mapping[str, Any]) -> float:
     return _bounded_score(ratio, scale=40.0)
 
 
-def _event_scan_priority(candidate: Mapping[str, Any], market_action: str) -> tuple[float, float, float, float, float]:
-    """Rank event-scan candidates without consulting any Shadow probability."""
+def _legacy_event_scan_priority(candidate: Mapping[str, Any], market_action: str) -> tuple[float, float, float, float, float]:
+    """Preserve a small allocation for the existing rule research track."""
 
     legacy = candidate.get("legacy") or {}
     legacy_score = _bounded_score(
@@ -403,6 +501,42 @@ def _event_scan_priority(candidate: Mapping[str, Any], market_action: str) -> tu
     return (priority, float(legacy_complete), legacy_score, v2_score, quality_score)
 
 
+def _event_scan_priority(candidate: Mapping[str, Any], market_action: str) -> tuple[float, float, float, float, float]:
+    """Allocate enrichment to observed momentum, not uncalibrated return bands."""
+
+    chan = candidate.get("chan") or {}
+    metrics = (chan.get("metrics") or {}) if isinstance(chan, Mapping) else {}
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    pct_5d = _finite_float(metrics.get("pct_5d"), default=float("nan"))
+    momentum = _bounded_score(50 + pct_5d * 5) if math.isfinite(pct_5d) else 0.0
+    if math.isfinite(pct_5d) and pct_5d > 20:
+        momentum = max(0.0, momentum - min(50.0, (pct_5d - 20) * 2))
+    ma20 = _finite_float(metrics.get("distance_ma20_pct"), default=float("nan"))
+    ma10 = _finite_float(metrics.get("distance_ma10_pct"), default=float("nan"))
+    trend = (70.0 if ma20 >= 0 else 20.0) if math.isfinite(ma20) else 0.0
+    if math.isfinite(ma10) and -2 <= ma10 <= 8:
+        trend = min(100.0, trend + 30.0)
+    liquidity = (
+        _bounded_score(candidate.get("market_liquidity_percentile"), scale=100)
+        if candidate.get("market_liquidity_percentile") is not None
+        else _bounded_score(math.log1p(max(0.0, _finite_float(candidate.get("amount_yi")))) * 20)
+    )
+    quality = candidate.get("data_quality") or {}
+    quality_score = _bounded_score(quality.get("score") if isinstance(quality, Mapping) else None)
+    v2_score = _v2_percentile(candidate)
+    priority = momentum * 0.35 + trend * 0.20 + v2_score * 0.20 + liquidity * 0.15 + quality_score * 0.10
+    hard_risks = sum(
+        isinstance(item, Mapping) and str(item.get("severity") or "").lower() == "hard"
+        for item in (candidate.get("risk_items") or [])
+    )
+    blocked = str(candidate.get("execution_state") or "").upper() in {"BLOCK", "BLOCKED"} or any(
+        isinstance(gate, Mapping) and str(gate.get("status") or "").upper() == "BLOCK"
+        for gate in (candidate.get("decision_gates") or [])
+    )
+    priority -= hard_risks * 15.0 + (30.0 if blocked else 0.0)
+    return (priority, momentum, v2_score, quality_score, liquidity)
+
+
 def _candidate_symbols(snapshot: Mapping[str, Any], market: str, limit: int) -> list[str]:
     section = ((snapshot.get("markets") or {}).get(market) or {})
     decision = section.get("decision") or {}
@@ -417,9 +551,8 @@ def _candidate_symbols(snapshot: Mapping[str, Any], market: str, limit: int) -> 
         decision_rows.insert(0, production_primary)
     rows = [*(section.get("_candidate_pool") or []), *decision_rows]
     candidates: dict[str, tuple[tuple[float, float, float, float, float], int, Mapping[str, Any]]] = {}
-    mandatory: set[str] = set()
+    mandatory: list[str] = []
     market_action = str(decision.get("action") or "")
-    decision_row_ids = {id(row) for row in decision_rows if isinstance(row, Mapping)}
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             continue
@@ -430,24 +563,36 @@ def _candidate_symbols(snapshot: Mapping[str, Any], market: str, limit: int) -> 
         previous = candidates.get(symbol)
         if previous is None or priority > previous[0]:
             candidates[symbol] = (priority, index, row)
-        if id(row) in decision_row_ids:
-            mandatory.add(symbol)
+    for row in decision_rows:
+        if isinstance(row, Mapping):
+            symbol = _normalized_symbol(row, market)
+            if symbol in candidates and symbol not in mandatory:
+                mandatory.append(symbol)
 
     bounded_limit = max(1, min(30, int(limit)))
-    # The normal decision contract publishes at most primary + blocked + eight
-    # watchlist rows.  Reserve all of them even if their ensemble score is low;
-    # a malformed oversized decision can never push collection above 30.
-    selection_limit = min(30, max(bounded_limit, len(mandatory)))
+    # The network budget is strict even for a malformed oversized decision.
+    # Published rows come first; reserve a quarter (normally four) Legacy slots
+    # in total, then spend the remaining budget on observed opportunities.
+    selection_limit = bounded_limit
     ordered = sorted(
         candidates,
         key=lambda symbol: (
             *candidates[symbol][0],
-            -candidates[symbol][1],
             symbol,
         ),
         reverse=True,
     )
-    selected = set(list(mandatory)[:selection_limit])
+    selected = set(mandatory[:selection_limit])
+    legacy_ordered = sorted(
+        candidates,
+        key=lambda symbol: (*_legacy_event_scan_priority(candidates[symbol][2], market_action), symbol),
+        reverse=True,
+    )
+    legacy_reserve = min(selection_limit, max(1, selection_limit // 4))
+    for symbol in legacy_ordered:
+        if len(selected) >= legacy_reserve:
+            break
+        selected.add(symbol)
     for symbol in ordered:
         if len(selected) >= selection_limit:
             break
@@ -583,7 +728,7 @@ def collect_for_snapshot(
             entry.update({"error_code": type(exc).__name__, "event_count": 0})
         source_manifest.append(entry)
     unique = {item["event_id"]: item for item in items}
-    items = sorted(unique.values(), key=lambda item: str(item.get("released_at") or ""), reverse=True)
+    items = cluster_events(sorted(unique.values(), key=lambda item: (str(item.get("released_at") or ""), item["event_id"]), reverse=True))
     all_success = set(successful_markets) == set(SOURCE_REGISTRY)
     status = "READY_EMPTY" if all_success and not items else "READY" if all_success else "PARTIAL"
     pipeline = {
@@ -599,7 +744,9 @@ def collect_for_snapshot(
         # separately by the decision builder and must not be conflated with
         # this network-intensive filing scan.
         "scan_purpose": "positive_event_enrichment",
-        "selection_policy": "rule_priority_and_published_decision_v1",
+        "selection_policy": "momentum_opportunity_with_legacy_reserve_v2",
+        "legacy_reserve_fraction": 0.25,
+        "cluster_version": EVENT_CLUSTER_VERSION,
         "candidate_limit_per_market": limit,
         "source_manifest": source_manifest,
         "lookback_days": LOOKBACK_DAYS,
@@ -614,6 +761,11 @@ def collect_for_snapshot(
             "positive": sum(item.get("direction") == "positive" for item in items),
             "negative": sum(item.get("direction") == "negative" for item in items),
             "neutral": sum(item.get("direction") == "neutral" for item in items),
+            "event_clusters": len({item.get("event_cluster_id") for item in items}),
+            "positive_catalyst_clusters": len({
+                item.get("event_cluster_id") for item in items
+                if item.get("direction") == "positive" and item.get("decision_eligible") is True
+            }),
         },
     }
 
@@ -711,6 +863,7 @@ def event_is_auditable(
 __all__ = [
     "EventPipelineError",
     "collect_for_snapshot",
+    "cluster_events",
     "event_is_auditable",
     "parse_cninfo_announcements",
     "parse_hkex_titles",

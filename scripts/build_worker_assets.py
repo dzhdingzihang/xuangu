@@ -1046,7 +1046,11 @@ def iter_live_candidates(snapshot: dict):
         if candidate is not None:
             yield str(row["market"]), candidate
     production_decision = snapshot.get("production_decision") or {}
-    rows = [production_decision.get("primary"), *(production_decision.get("qualified_candidates") or [])]
+    rows = [
+        production_decision.get("primary"),
+        *(production_decision.get("qualified_candidates") or []),
+        *((snapshot.get("return_opportunities") or {}).get("candidates") or []),
+    ]
     for row in rows:
         if not isinstance(row, dict) or row.get("market") not in LIVE_MARKETS:
             continue
@@ -1590,6 +1594,10 @@ def _candidate_role_maps(
     if isinstance(global_priority, dict) and global_priority.get("market") in LIVE_MARKETS:
         remember(str(global_priority["market"]), global_priority, "research", "PRIORITY")
 
+    for row in (snapshot.get("return_opportunities") or {}).get("candidates") or []:
+        if isinstance(row, dict) and row.get("market") in LIVE_MARKETS:
+            remember(str(row["market"]), row, "research", "PRIORITY")
+
     production = snapshot.get("production_decision") or {}
     primary = production.get("primary")
     primary_identity = None
@@ -1629,6 +1637,30 @@ def _effective_candidate_role(decision_roles: dict[str, str]) -> str:
     }.get(decision_roles.get("legacy"), "legacy_watchlist")
 
 
+def summarize_return_opportunities(snapshot: dict) -> dict | None:
+    """Keep research ranking visible without shipping full K-lines at startup."""
+    source = snapshot.get("return_opportunities")
+    if not isinstance(source, dict):
+        return None
+    def summary_value(value):
+        if isinstance(value, dict):
+            return {key: summary_value(item) for key, item in value.items() if key != "candidate_snapshot"}
+        if isinstance(value, list):
+            return [summary_value(item) for item in value]
+        return copy.deepcopy(value)
+
+    result = {
+        key: summary_value(value) for key, value in source.items()
+        if key not in {"primary", "candidates", "excluded_candidates"}
+    }
+    result["candidates"] = [
+        summary_value(row)
+        for row in (source.get("candidates") or [])[:12]
+    ]
+    result["primary"] = result["candidates"][0] if result["candidates"] else None
+    return result
+
+
 def build_worker_ui_bootstrap(
     snapshot: dict,
     latest_summary: dict,
@@ -1647,6 +1679,7 @@ def build_worker_ui_bootstrap(
         },
         "global_decision": _global_ui_summary(snapshot),
         "production_decision": _production_ui_summary(snapshot),
+        "return_opportunities": summarize_return_opportunities(snapshot),
         "decision_evidence": _decision_evidence(snapshot),
         "event_stats": _event_stats(snapshot),
         "markets": {market: _compact_ui_market(snapshot, market) for market in LIVE_MARKETS},
