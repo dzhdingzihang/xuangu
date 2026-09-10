@@ -15,6 +15,7 @@ import opportunity_outcome_ledger
 import return_opportunity
 import sector_metadata
 from scripts import build_worker_assets as builder
+from scripts import verify_deployment
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -134,6 +135,39 @@ class OpportunitySummaryCapacityTests(unittest.TestCase):
         self.assertNotIn("limitations", compact["event_scan_policy"])
         for original, row in zip(rows, compact["candidates"]):
             self.assertEqual({**compact["event_scan_policy"], **row["event_coverage"]}, original["event_coverage"])
+
+    def test_compact_projection_keeps_exact_deployment_ranking_and_evidence_checks(self):
+        snapshot, _ = full_coverage_capacity_fixture()
+        spec = verify_deployment.UI_ASSET_SPECS["latest-summary"]
+        payload = {"ok": True, "contract_version": spec["contract_version"],
+                   "latest": {"return_opportunities": builder.summarize_return_opportunities(snapshot)}, "status": {}}
+        # Isolate the board comparison, leaving its real exact projector intact.
+        with (
+            mock.patch.dict(verify_deployment.UI_ASSET_SPECS, {"latest-summary": spec}, clear=True),
+            mock.patch.object(verify_deployment, "_ui_identity_errors", return_value=[]),
+            mock.patch.object(verify_deployment, "_snapshot_use_errors", return_value=[]),
+        ):
+            def errors(published):
+                return verify_deployment.ui_api_contract_errors(snapshot, {"latest-summary": published},
+                    source_snapshot_sha256="a" * 64, source_snapshot_byte_size=1)
+
+            self.assertEqual(errors(payload), [])
+            for change in ("rank", "score", "coverage", "sector_source", "shared_policy"):
+                altered = copy.deepcopy(payload)
+                board = altered["latest"]["return_opportunities"]
+                row = board["candidates"][0]
+                if change == "rank":
+                    row["rank"] += 1
+                elif change == "score":
+                    row["opportunity_score"] += 0.01
+                elif change == "coverage":
+                    row["event_coverage"]["verified"] = False
+                elif change == "sector_source":
+                    row["sector"]["source"] = "TEST_FIXTURE_tampered"
+                else:
+                    board["event_scan_policy"]["limitations"] = []
+                with self.subTest(change=change):
+                    self.assertTrue(any("do not match the frozen research ranking" in error for error in errors(altered)))
 
 
 if __name__ == "__main__":

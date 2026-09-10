@@ -1687,7 +1687,7 @@ def summarize_return_opportunities(snapshot: dict) -> dict | None:
             key: copy.deepcopy(coverage_rows[0][key])
             for key in ("scan_purpose", "scan_scope", "lookback_days", "limitations")
             if key in coverage_rows[0]
-            and all(row.get(key) == coverage_rows[0][key] for row in coverage_rows)
+            and all(key in row and row[key] == coverage_rows[0][key] for row in coverage_rows)
         }
         if common_policy:
             result["event_scan_policy"] = common_policy
