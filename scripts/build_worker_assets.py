@@ -1287,6 +1287,14 @@ def compact_ui_candidate(candidate: dict | None, market: str, *, detail: bool) -
         "candidate_lineage",
     )
     result = {key: copy.deepcopy(candidate[key]) for key in fields if key in candidate}
+    lineage = result.get("candidate_lineage")
+    if isinstance(lineage, dict) and isinstance(lineage.get("recall_routes"), list):
+        for route in lineage["recall_routes"]:
+            if isinstance(route, dict):
+                # Raw recall quote metrics can repeat across several routes.
+                # Startup needs route provenance; candidate details above keep
+                # the full metrics and all frozen qualification evidence.
+                route.pop("metrics", None)
     result.update({
         "market": market,
         "code": code,
@@ -1658,6 +1666,34 @@ def summarize_return_opportunities(snapshot: dict) -> dict | None:
         summary_value(row)
         for row in (source.get("candidates") or [])[:12]
     ]
+    # Market coverage uses counts; repeating each market's full top candidate
+    # can duplicate several KB of sector and official-scan evidence. Keep its
+    # identity and original score while the main shortlist retains full rows.
+    for stats in (result.get("market_summaries") or {}).values():
+        primary = stats.get("primary") if isinstance(stats, dict) else None
+        if isinstance(primary, dict):
+            stats["primary"] = {
+                key: primary[key] for key in (
+                    "market", "code", "name", "rank", "market_rank", "opportunity_score",
+                    "score_version", "score_kind", "calibrated", "production_eligible",
+                ) if key in primary
+            }
+    # These provider-scan scope statements are identical across the published
+    # shortlist. Publish them once without removing per-symbol verification,
+    # sources, retrieval times, errors or the explicit negative-clearance flag.
+    coverage_rows = [row.get("event_coverage") for row in result["candidates"]]
+    if coverage_rows and all(isinstance(row, dict) for row in coverage_rows):
+        common_policy = {
+            key: copy.deepcopy(coverage_rows[0][key])
+            for key in ("scan_purpose", "scan_scope", "lookback_days", "limitations")
+            if key in coverage_rows[0]
+            and all(row.get(key) == coverage_rows[0][key] for row in coverage_rows)
+        }
+        if common_policy:
+            result["event_scan_policy"] = common_policy
+            for row in coverage_rows:
+                for key in common_policy:
+                    row.pop(key, None)
     result["primary"] = result["candidates"][0] if result["candidates"] else None
     return result
 

@@ -1030,21 +1030,17 @@ class WorkerApiContractTests(unittest.TestCase):
             """
         )
 
-    def test_wrangler_uses_primary_and_dst_crons_within_free_limit(self) -> None:
+    def test_wrangler_uses_one_cron_with_runtime_primary_watchdog_and_dst_filtering(self) -> None:
         config = json.loads((ROOT / "wrangler.jsonc").read_text(encoding="utf-8"))
         self.assertEqual(config["vars"]["CLOUDFLARE_SCHEDULER_ENABLED"], "1")
         crons = config["triggers"]["crons"]
         self.assertEqual(
             crons,
             [
-                "17,47 0,2,4,7,8,12 * * MON-FRI",
-                "47 14 * * MON-FRI",
-                "17 15 * * MON-FRI",
-                "17,47 20 * * MON-FRI",
-                "17,47 21 * * MON-FRI",
+                "17,47 0,2,4,7,8,12,14,15,20,21 * * MON-FRI",
             ],
         )
-        self.assertLessEqual(len(crons), 5)
+        self.assertEqual(len(crons), 1)
 
     def test_all_v4_rule_qualified_candidates_are_live_allowlisted_and_summarized(self) -> None:
         run_node(

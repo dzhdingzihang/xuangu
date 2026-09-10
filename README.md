@@ -515,6 +515,7 @@ npm run dev
 - Cloudflare 定时 `workflow_dispatch` 是可选的独立检查点触发路径，仓库配置为 `CLOUDFLARE_SCHEDULER_ENABLED=1`。这只启用代码路径，不代表生产 secret 已配置；必须为仓库 `dzhdingzihang/xuangu` 单独创建只有 `Actions: write` 的 fine-grained token，并以 Wrangler secret `GITHUB_WORKFLOW_DISPATCH_TOKEN` 保存。不得复用 `CLOUDFLARE_API_TOKEN`、任何行情密钥或本地 `gh` 的宽权限凭证。GitHub Actions 原生 `schedule` 主调度与 30 分钟 watchdog 不使用该开关或 token，因此 secret 缺失不会令部署失败，仍由 GitHub 主链路刷新；但数据健康状态必须明确报告 Cloudflare dispatch 未就绪。Worker 只接受白名单表达式，并在运行时跳过不匹配纽约 `16:17` 的 DST 变体。
 - R2 当前未启用，内嵌同代资产是正式生产数据后端。现阶段不得设置 `ENABLE_R2_DATA_PUBLISH=1`；Workflow 会在 alias 切换前失败关闭并主动拒绝该配置。如果未来由 R2 manifest 供应数据，某个 R2 object 的内嵌回退也只接受同 generation 且 key / SHA-256 / 字节数一致的副本，不会把 R2 缺口静默降级为跨代数据。启用前必须补齐 alias 与 Worker Version 的原子切换、联合回滚与线上故障演练。
 - 定时选股不需要 OpenD、Tunnel、Render 或个人设备密钥。
+- Cloudflare 使用一个合并的定时入口，运行时过滤未配置时点及不匹配纽约盘后的夏冬令时变体，实际主检查点与 30 分钟 watchdog 不变。免费配额由整个账号共享；本项目不占满全部定时入口，也不要求升级付费套餐。
 
 ### 部署 Worker
 

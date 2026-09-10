@@ -66,9 +66,14 @@ const WORKER_LIVE_INDEX_BYTE_SIZE_LIMIT = 524_288;
 const MAX_QUALIFIED_SUMMARY_CANDIDATES = 20;
 const GITHUB_WORKFLOW_DISPATCH_URL = "https://api.github.com/repos/dzhdingzihang/xuangu/actions/workflows/deploy-worker.yml/dispatches";
 const CLOUDFLARE_SCHEDULED_CRONS = new Map([
-  // Combined minute sets keep independent primary + 30m recovery invocations
-  // within the free plan's five-trigger allowance. Old expressions stay
-  // recognized while the provider propagates configuration changes.
+  // One configured trigger preserves the account-wide cron quota. Runtime
+  // filtering keeps only the original primary/watchdog slots. Old expressions
+  // remain recognized while the provider propagates configuration changes.
+  ["17,47 0,2,4,7,8,12,14,15,20,21 * * MON-FRI", {
+    minutes: new Set([17, 47]), hours: new Set([0, 2, 4, 7, 8, 12, 14, 15, 20, 21]),
+    weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5",
+    excludedSlots: new Set(["14:17", "15:47"]), postCloseHours: new Set([20, 21]),
+  }],
   ["17,47 0,2,4,7,8,12 * * MON-FRI", { minutes: new Set([17, 47]), hours: new Set([0, 2, 4, 7, 8, 12]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5" }],
   ["17 15 * * MON-FRI", { minute: 17, hours: new Set([15]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5" }],
   ["17,47 20 * * MON-FRI", { minutes: new Set([17, 47]), hours: new Set([20]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5", newYorkHour: 16 }],
@@ -3176,8 +3181,19 @@ function newYorkHour(date) {
 }
 
 export function canonicalGithubCronForScheduled(controller) {
-  const { schedule, minute, hour } = scheduledCronContext(controller);
+  const context = scheduledCronContext(controller);
+  if (inactiveScheduledReason(context)) return null;
+  const { schedule, minute, hour } = context;
   return `${minute} ${hour} * * ${schedule.githubWeekdays}`;
+}
+
+function inactiveScheduledReason({ schedule, minute, hour, scheduledAt }) {
+  if (schedule.excludedSlots?.has(`${hour}:${minute}`)) return "INACTIVE_COMBINED_CRON_SLOT";
+  const expectedNewYorkHour = schedule.postCloseHours?.has(hour) ? 16 : schedule.newYorkHour;
+  if (Number.isInteger(expectedNewYorkHour) && newYorkHour(scheduledAt) !== expectedNewYorkHour) {
+    return "INACTIVE_US_POST_CLOSE_DST_VARIANT";
+  }
+  return null;
 }
 
 export async function dispatchScheduledWorkflow(controller, env, options = {}) {
@@ -3187,12 +3203,8 @@ export async function dispatchScheduledWorkflow(controller, env, options = {}) {
   const token = String(env?.GITHUB_WORKFLOW_DISPATCH_TOKEN || "");
   if (!token) return { dispatched: false, reason: "GITHUB_WORKFLOW_DISPATCH_TOKEN_MISSING" };
   const context = scheduledCronContext(controller);
-  if (
-    Number.isInteger(context.schedule.newYorkHour)
-    && newYorkHour(context.scheduledAt) !== context.schedule.newYorkHour
-  ) {
-    return { dispatched: false, reason: "INACTIVE_US_POST_CLOSE_DST_VARIANT" };
-  }
+  const inactiveReason = inactiveScheduledReason(context);
+  if (inactiveReason) return { dispatched: false, reason: inactiveReason };
   const cron = `${context.minute} ${context.hour} * * ${context.schedule.githubWeekdays}`;
   const scheduledAt = context.scheduledAt;
   const request = {
