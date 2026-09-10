@@ -686,7 +686,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
         )
         self.assertIn("steps.publish_guard.outputs.should_publish == 'true'", workflow)
         self.assertIn("should_publish: ${{ steps.publish_guard.outputs.should_publish }}", workflow)
-        self.assertIn('EVENT_SCAN_CANDIDATES_PER_MARKET: "16"', workflow)
+        self.assertIn('EVENT_SCAN_CANDIDATES_PER_MARKET: "30"', workflow)
         self.assertIn('GENERATION_ATTEMPT="${attempt}" python server.py --once --force', workflow)
         self.assertIn('python server.py --once --force --quiet', workflow)
 
@@ -714,13 +714,13 @@ class WorkflowReliabilityTests(unittest.TestCase):
     def test_workflow_actions_use_node24_runtime_generations(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         expected_counts = {
-            PINNED_ACTIONS["checkout"]: 3,
-            PINNED_ACTIONS["setup-python"]: 3,
+            PINNED_ACTIONS["checkout"]: 4,
+            PINNED_ACTIONS["setup-python"]: 4,
             PINNED_ACTIONS["setup-node"]: 1,
-            PINNED_ACTIONS["cache-restore"]: 3,
-            PINNED_ACTIONS["cache-save"]: 3,
-            PINNED_ACTIONS["upload-artifact"]: 2,
-            PINNED_ACTIONS["download-artifact"]: 2,
+            PINNED_ACTIONS["cache-restore"]: 4,
+            PINNED_ACTIONS["cache-save"]: 4,
+            PINNED_ACTIONS["upload-artifact"]: 3,
+            PINNED_ACTIONS["download-artifact"]: 3,
         }
         for action, count in expected_counts.items():
             with self.subTest(action=action):
@@ -749,7 +749,7 @@ class WorkflowReliabilityTests(unittest.TestCase):
         self.assertIn('archive_add_status="$?"', workflow)
         self.assertIn("Archive staging failed on attempt ${attempt}", workflow)
         self.assertIn("push_archive_with_scoped_token", workflow)
-        self.assertEqual(workflow.count("persist-credentials: false"), 3)
+        self.assertEqual(workflow.count("persist-credentials: false"), 4)
         self.assertIn("Archive failed after 3 bounded attempts", workflow)
         self.assertIn("[skip ci]", workflow)
         self.assertIn("from scripts.snapshot_archive_policy import ARCHIVE_POLICY, archive_reasons", workflow)

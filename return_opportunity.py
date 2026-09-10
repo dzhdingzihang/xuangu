@@ -15,11 +15,12 @@ import statistics
 from collections import Counter, defaultdict
 from typing import Any, Mapping
 
-from event_pipeline import event_is_auditable
+from event_pipeline import candidate_scan_coverage, event_is_auditable
 from market_calendar import expected_quote_session, market_local_date, session_dates
 
 
 CONTRACT_VERSION = "return-opportunities-v1"
+SCORE_VERSION = "return-opportunity-score-v2"
 SCORE_KIND = "RETURN_OPPORTUNITY_RULE_SCORE"
 WEIGHTS = {"momentum": 0.30, "relative_strength": 0.20, "acceleration": 0.15,
            "trend_volume": 0.20, "sector_strength": 0.10, "material_event": 0.05}
@@ -29,7 +30,8 @@ MIN_DAILY_VALUE = {"a_share": 20_000_000, "hk": 2_000_000, "us": 1_000_000}
 LIMITATIONS = [
     "机会分衡量近端收益证据，尚未通过样本外收益预测验证，不代表上涨概率或预期收益。",
     "排名仅覆盖本次召回且数据合格的股票；市场相对强度使用召回池横截面，不代表全市场指数超额收益。",
-    "行业强度使用同市场已知行业候选；标签缺失或同行少于3只时按中性分处理。",
+    "行业强度只使用有来源和时间、未过期的行业分类；近似主题、无来源标签或同行少于3只时按中性分处理。",
+    "公告扫描仅覆盖有限官方标题与申报元数据；未扫描、扫描失败及成功空结果均不代表已排除重大负面事件。",
     "历史波动情景不是预测分位数；仓位示例无法保证止损成交或最大亏损。",
     "成交成本与未来收益尚未校准，因此预期净收益和概率保持为空。",
 ]
@@ -61,16 +63,37 @@ def _code(row: Mapping) -> str:
     return str(row.get("code") or row.get("symbol") or "").upper()
 
 
-def _sector(candidate: Mapping, metadata: Mapping) -> dict:
+def _sector(candidate: Mapping, metadata: Mapping, *, cutoff: dt.datetime | None = None) -> dict:
     # Labels only: never infer an industry from a ticker or award sector-name
     # bonuses. Generic recall roles are not industry evidence.
+    sourced = []
+    for row in (metadata, candidate):
+        provenance = row.get("sector_metadata")
+        if not isinstance(provenance, Mapping) or not str(provenance.get("name") or "").strip():
+            continue
+        record = dict(provenance)
+        retrieved = _aware(record.get("retrieved_at"))
+        future = bool(cutoff and retrieved and retrieved > cutoff)
+        stale = record.get("stale") is True or record.get("status") == "STALE"
+        if cutoff and retrieved and (cutoff - retrieved).total_seconds() > 7 * 86400:
+            stale = True
+        verified = bool(record.get("source") and retrieved and not future and not stale and record.get("status") == "FRESH")
+        record.update({"name": str(record["name"]).strip(), "verified": verified,
+                       "status": "KNOWN" if verified else "STALE" if stale else "UNVERIFIED",
+                       "stale": stale, "evidence_type": "provider_classification"})
+        if verified:
+            return record
+        sourced.append(record)
+    if sourced:
+        return sourced[0]
     for source, row in (("candidate_metadata", candidate), ("universe_metadata", metadata)):
         for key in ("industry", "sector"):
             value = row.get(key)
             if isinstance(value, Mapping):
                 value = value.get("name")
             if isinstance(value, str) and value.strip() not in {"", "未知", "其他", "未分类", "Unknown"}:
-                return {"name": value.strip(), "source": source, "status": "KNOWN"}
+                return {"name": value.strip(), "source": source, "status": "UNVERIFIED",
+                        "verified": False, "evidence_type": "unsourced_classification"}
         description = str(row.get("role") or "")
         generic = any(word in description.lower() for word in ("动态", "召回", "多因子", "市场扫描", "dynamic", "recall", "momentum", "liquid"))
         if generic:
@@ -83,12 +106,14 @@ def _sector(candidate: Mapping, metadata: Mapping) -> dict:
         # provenance stays visible. Roles without metadata remain missing.
         for label in labels:
             if label and label not in {"高股息", "价值", "成长", "出海", "周期", "权重", "高流动性", "科技", "AI", "防御"}:
-                return {"name": label, "source": source + ".themes", "status": "KNOWN"}
+                return {"name": label, "source": source + ".themes", "status": "APPROXIMATE",
+                        "verified": False, "evidence_type": "curated_theme"}
         if source == "universe_metadata" and description:
             label = description.split("/")[0].strip()
             if label:
-                return {"name": label, "source": source + ".role", "status": "KNOWN"}
-    return {"name": "行业待补充", "source": None, "status": "MISSING"}
+                return {"name": label, "source": source + ".role", "status": "APPROXIMATE",
+                        "verified": False, "evidence_type": "curated_role"}
+    return {"name": "行业待补充", "source": None, "status": "MISSING", "verified": False, "evidence_type": None}
 
 
 def _metadata_index(metadata: Any) -> dict:
@@ -228,6 +253,12 @@ def _base_row(snapshot: Mapping, candidate: Mapping, market: str, metadata: Mapp
         if dates[-1] > expected:
             blockers.append("KLINE_FROM_FUTURE")
     positive_events, negative_events = _events(snapshot, market, _code(candidate))
+    event_coverage = candidate_scan_coverage(snapshot, market, _code(candidate))
+    if event_coverage["status"] == "NOT_SCANNED":
+        flags.append("OFFICIAL_EVENT_NOT_SCANNED")
+    elif event_coverage["status"] == "ERROR":
+        flags.append("OFFICIAL_EVENT_SCAN_ERROR")
+    flags.append("NEGATIVE_EVENT_COVERAGE_INCOMPLETE")
     if negative_events:
         blockers.append("MATERIAL_NEGATIVE_EVENT")
     event_score, event_clusters = _event_evidence(positive_events)
@@ -235,12 +266,15 @@ def _base_row(snapshot: Mapping, candidate: Mapping, market: str, metadata: Mapp
         flags.append("CATALYST_MATERIALITY_UNQUANTIFIED")
     result = {
         "market": market, "code": _code(candidate), "name": str(candidate.get("name") or _code(candidate)),
-        "sector": _sector(candidate, metadata), "qualification_blockers": blockers, "risk_flags": flags,
+        "sector": _sector(candidate, metadata, cutoff=generated), "qualification_blockers": blockers, "risk_flags": flags,
+        "event_coverage": event_coverage,
         "reference_quote": {"price": price, "currency": CURRENCIES[market], "source_as_of": realtime.get("source_as_of"),
                             "source": realtime.get("source"), "quote_status": realtime.get("quote_status")},
         "metrics": {"event_cluster_count": len(event_clusters)}, "event_cluster_ids": event_clusters,
         "_event_score": event_score,
     }
+    if result["sector"]["status"] != "KNOWN":
+        flags.append("SECTOR_METADATA_" + result["sector"]["status"])
     if len(valid) < 32:
         return result
     closes = [row[3] for row in valid]
@@ -359,7 +393,7 @@ def build_return_opportunities(snapshot: Mapping, candidate_pools: Mapping,
             scores = row.get("_scores")
             if scores is None:
                 continue
-            peers = sectors.get(row["sector"]["name"], [])
+            peers = sectors.get(row["sector"]["name"], []) if row["sector"]["status"] == "KNOWN" else []
             relative = _percentile(row["_relative_signal"], population) if not row["qualification_blockers"] else 50
             sector_strength = 50.0
             if len(peers) >= 3:
@@ -382,19 +416,21 @@ def build_return_opportunities(snapshot: Mapping, candidate_pools: Mapping,
                 f"近5日量能/此前15日 {row['metrics']['volume_ratio_5d_20d'] or 0:.2f} 倍；每日波动 {row['metrics']['daily_volatility_pct']:.2f}%"]
         all_rows.extend(rows)
         market_stats[market] = {"evaluated_count": len(rows), "data_valid_count": len(peer_rows), "sector_known_count": known_count,
-                               "sector_coverage_pct": round(coverage, 2), "expected_quote_session": expected.isoformat() if expected else None}
+                               "sector_coverage_pct": round(coverage, 2), "expected_quote_session": expected.isoformat() if expected else None,
+                               "event_scanned_count": sum(row["event_coverage"]["verified"] for row in rows),
+                               "event_coverage_status_counts": dict(Counter(row["event_coverage"]["status"] for row in rows))}
     eligible, excluded = [], []
     for row in all_rows:
         row["qualification_blockers"] = sorted(set(row["qualification_blockers"]))
         row["risk_flags"] = sorted(set(row["risk_flags"]))
-        row.update({"score_kind": SCORE_KIND, "calibrated": False, "production_eligible": False,
+        row.update({"score_kind": SCORE_KIND, "score_version": SCORE_VERSION, "calibrated": False, "production_eligible": False,
                     "expected_net_return": None, "probability": None})
         for key in list(row):
             if key.startswith("_"):
                 row.pop(key)
         if row["qualification_blockers"]:
             row["qualification_status"] = "EXCLUDED"
-            excluded.append({key: row.get(key) for key in ("market", "code", "name", "opportunity_score", "qualification_status", "qualification_blockers")})
+            excluded.append({key: row.get(key) for key in ("market", "code", "name", "opportunity_score", "score_version", "qualification_status", "qualification_blockers", "event_coverage", "risk_flags", "sector")})
         else:
             row["qualification_status"] = "RESEARCH_ELIGIBLE"
             eligible.append(row)
@@ -420,17 +456,25 @@ def build_return_opportunities(snapshot: Mapping, candidate_pools: Mapping,
     selected.sort(key=lambda row: row["rank"])
     for row in selected:
         row["candidate_snapshot"] = copy.deepcopy(originals[(row["market"], row["code"])])
+    scan_targets = {}
     for market, stats in market_stats.items():
         local = [row for row in eligible if row["market"] == market]
+        scan_targets[market] = list(dict.fromkeys(
+            [row["code"] for row in selected if row["market"] == market]
+            + [row["code"] for row in local]
+        ))[:24]
         stats.update({"eligible_count": len(local), "excluded_count": stats["evaluated_count"] - len(local),
                       "primary": local[0] if local else None})
     result = {"contract_version": CONTRACT_VERSION, "status": "RESEARCH_READY" if eligible else "NO_OPPORTUNITY",
-        "generated_at": snapshot.get("generated_at"), "horizon_trade_days": 10, "score_kind": SCORE_KIND,
+        "generated_at": snapshot.get("generated_at"), "horizon_trade_days": 10, "score_kind": SCORE_KIND, "score_version": SCORE_VERSION,
         "calibrated": False, "production_eligible": False, "expected_net_return": None, "probability": None,
         "evaluated_count": len(all_rows), "eligible_count": len(eligible), "excluded_count": len(excluded),
         "primary": eligible[0] if eligible else None, "candidates": selected, "excluded_candidates": excluded,
         "market_summaries": market_stats, "weights": dict(WEIGHTS), "limitations": list(LIMITATIONS),
-        "selection_policy": {"minimum_score": 60, "maximum_displayed": 12, "soft_sector_cap": 4,
+        "event_scan_targets_by_market": scan_targets,
+        "selection_policy": {"score_version": SCORE_VERSION, "minimum_score": 60, "maximum_displayed": 12, "soft_sector_cap": 4,
+                             "sector_evidence_policy": "fresh_sourced_classification_only",
+                             "event_coverage_policy": "bounded_enrichment_with_explicit_unknown_negative_risk",
                              "ranking_basis": "observed_return_evidence", "scenario_upside_used_in_ranking": False}}
     return _json_safe(result)
 
@@ -457,6 +501,8 @@ def validate_return_opportunities(contract: Any) -> list[str]:
     for key, expected in fixed.items():
         if key not in contract or contract[key] != expected or (expected is False and contract[key] is not False):
             errors.append(f"{prefix}.{key} is invalid")
+    if contract.get("score_version") not in {None, SCORE_VERSION}:
+        errors.append(prefix + ".score_version is invalid")
     def check_finite(value, path):
         if isinstance(value, float) and not math.isfinite(value):
             errors.append(path + " contains non-finite number")
@@ -467,6 +513,33 @@ def validate_return_opportunities(contract: Any) -> list[str]:
             for index, item in enumerate(value):
                 check_finite(item, path + f"[{index}]")
     check_finite(contract, prefix)
+    if contract.get("score_version") == SCORE_VERSION:
+        for collection in ("candidates", "excluded_candidates"):
+            for index, row in enumerate(contract.get(collection) or []):
+                if not isinstance(row, Mapping):
+                    continue
+                path = prefix + f".{collection}[{index}]"
+                coverage = row.get("event_coverage")
+                if not isinstance(coverage, Mapping):
+                    errors.append(path + ".event_coverage is missing")
+                    continue
+                status = coverage.get("status")
+                if (status not in {"SUCCESS", "ERROR", "NOT_SCANNED"}
+                    or coverage.get("verified") is not (status == "SUCCESS")
+                    or coverage.get("negative_clearance_verified") is not False):
+                    errors.append(path + ".event_coverage is invalid")
+                if coverage.get("market") != row.get("market") or coverage.get("symbol") != row.get("code"):
+                    errors.append(path + ".event_coverage identity mismatch")
+                if status == "SUCCESS" and (coverage.get("requested") is not True or not coverage.get("run_id") or not coverage.get("source_id")):
+                    errors.append(path + ".event_coverage verified evidence is missing")
+                flags = row.get("risk_flags") or []
+                required_flags = ["NEGATIVE_EVENT_COVERAGE_INCOMPLETE"]
+                if status in {"ERROR", "NOT_SCANNED"}:
+                    required_flags.append("OFFICIAL_EVENT_SCAN_ERROR" if status == "ERROR" else "OFFICIAL_EVENT_NOT_SCANNED")
+                if any(flag not in flags for flag in required_flags):
+                    errors.append(path + ".risk_flags omit filing uncertainty")
+                if row.get("score_version") != SCORE_VERSION:
+                    errors.append(path + ".score_version mismatch")
     counts = [contract.get(key) for key in ("evaluated_count", "eligible_count", "excluded_count")]
     if not all(type(count) is int and count >= 0 for count in counts) or counts[0] != counts[1] + counts[2]:
         errors.append(prefix + " counts are inconsistent")

@@ -771,6 +771,22 @@ def _candidate_code(snapshot: dict, market: str) -> str | None:
     return candidates[0][0] if candidates else None
 
 
+def opportunity_history_contract_errors(expected: dict, history_payload: dict) -> list[str]:
+    """Verify the separately published ledger, even without a snapshot change."""
+    if not isinstance(expected, dict) or expected.get("schema_version") != "opportunity-performance-v1" or expected.get("track") != "RETURN_OPPORTUNITY" or expected.get("calibrated") is not False or expected.get("authorizes_production") is not False:
+        return ["local opportunity history contract is invalid"]
+    errors = []
+    for label, container in (
+        ("history", history_payload),
+        ("history.meta", history_payload.get("meta")),
+        ("history.history_evaluation", history_payload.get("history_evaluation")),
+    ):
+        actual = container.get("opportunity_outcome_tracking") if isinstance(container, dict) else None
+        if actual != expected:
+            errors.append(f"{label}.opportunity_outcome_tracking does not match published manifest")
+    return errors
+
+
 def history_contract_errors(local: dict, history_payload: dict) -> list[str]:
     errors: list[str] = []
     if history_payload.get("ok") is not True:
@@ -1523,6 +1539,7 @@ def full_deployment_errors(
     response_fetcher: Callable[[str, bool], ResponsePayload],
     source_snapshot_sha256: str,
     source_snapshot_byte_size: int,
+    opportunity_tracking: dict | None = None,
 ) -> tuple[dict, list[str]]:
     status = json_fetcher(endpoint_url(base_url, "/api/status"))
     errors = status_deployment_errors(
@@ -1568,6 +1585,8 @@ def full_deployment_errors(
 
     history = json_fetcher(endpoint_url(base_url, "/api/history?view=raw&limit=5"))
     errors.extend(history_contract_errors(local, history))
+    if opportunity_tracking is not None:
+        errors.extend(opportunity_history_contract_errors(opportunity_tracking, history))
     errors.extend(static_contract_errors(base_url, response_fetcher))
     errors.extend(ui_static_asset_errors(
         base_url,
@@ -1644,6 +1663,7 @@ def poll_full_deployment(
     json_fetcher: Callable[[str], dict],
     response_fetcher: Callable[[str, bool], ResponsePayload],
     sleeper: Callable[[float], None] = time.sleep,
+    opportunity_tracking: dict | None = None,
 ) -> dict:
     if attempts < 1:
         raise ValueError("attempts must be at least 1")
@@ -1688,6 +1708,7 @@ def poll_full_deployment(
                 response_fetcher=response_fetcher,
                 source_snapshot_sha256=source_snapshot_sha256,
                 source_snapshot_byte_size=source_snapshot_byte_size,
+                **({"opportunity_tracking": opportunity_tracking} if opportunity_tracking is not None else {}),
             )
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             last_errors = [f"request error: {exc}"]
@@ -1743,6 +1764,13 @@ def main() -> None:
     source_content = path.read_bytes()
     local = parse_snapshot_content(source_content)
     source_snapshot_sha256, source_snapshot_byte_size = source_snapshot_identity(source_content)
+    manifest_path = path.parent / "manifest.json"
+    opportunity_tracking = None
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        opportunity_tracking = manifest.get("opportunity_outcome_tracking")
+        if not isinstance(opportunity_tracking, dict):
+            raise ValueError("published manifest is missing opportunity_outcome_tracking")
     latest = poll_full_deployment(
         local,
         base_url=args.base_url,
@@ -1750,6 +1778,7 @@ def main() -> None:
         delay_seconds=args.delay_seconds,
         source_snapshot_sha256=source_snapshot_sha256,
         source_snapshot_byte_size=source_snapshot_byte_size,
+        opportunity_tracking=opportunity_tracking,
         json_fetcher=json_fetcher,
         response_fetcher=lambda url, follow: fetch_response(
             url,

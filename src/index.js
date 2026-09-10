@@ -66,6 +66,13 @@ const WORKER_LIVE_INDEX_BYTE_SIZE_LIMIT = 524_288;
 const MAX_QUALIFIED_SUMMARY_CANDIDATES = 20;
 const GITHUB_WORKFLOW_DISPATCH_URL = "https://api.github.com/repos/dzhdingzihang/xuangu/actions/workflows/deploy-worker.yml/dispatches";
 const CLOUDFLARE_SCHEDULED_CRONS = new Map([
+  // Combined minute sets keep independent primary + 30m recovery invocations
+  // within the free plan's five-trigger allowance. Old expressions stay
+  // recognized while the provider propagates configuration changes.
+  ["17,47 0,2,4,7,8,12 * * MON-FRI", { minutes: new Set([17, 47]), hours: new Set([0, 2, 4, 7, 8, 12]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5" }],
+  ["17 15 * * MON-FRI", { minute: 17, hours: new Set([15]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5" }],
+  ["17,47 20 * * MON-FRI", { minutes: new Set([17, 47]), hours: new Set([20]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5", newYorkHour: 16 }],
+  ["17,47 21 * * MON-FRI", { minutes: new Set([17, 47]), hours: new Set([21]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5", newYorkHour: 16 }],
   ["17 0,2,4,7,8,12 * * MON-FRI", { minute: 17, hours: new Set([0, 2, 4, 7, 8, 12]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5" }],
   ["47 14 * * MON-FRI", { minute: 47, hours: new Set([14]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5" }],
   ["17 20 * * MON-FRI", { minute: 17, hours: new Set([20]), weekdays: new Set([1, 2, 3, 4, 5]), githubWeekdays: "1-5", newYorkHour: 16 }],
@@ -1971,6 +1978,7 @@ function historyMetadata(rows, days, view, returnedCount, evaluation = null) {
     observation_performance: evaluation?.observation_performance && typeof evaluation.observation_performance === "object"
       ? evaluation.observation_performance
       : emptyObservationPerformance(),
+    opportunity_outcome_tracking: evaluation?.opportunity_outcome_tracking || null,
     returned_count: returnedCount,
     has_more: selectedCount > returnedCount,
   };
@@ -2971,6 +2979,7 @@ async function handleApi(request, env) {
         observation_ledger: asset.observation_ledger || null,
         observation_performance: asset.observation_performance || null,
         rule_outcome_tracking: asset.rule_outcome_tracking || null,
+        opportunity_outcome_tracking: asset.opportunity_outcome_tracking || null,
         history: page.rows,
       });
     }
@@ -3006,6 +3015,7 @@ async function handleApi(request, env) {
         has_more: page.has_more,
       },
       history_evaluation: manifest.history_evaluation || null,
+      opportunity_outcome_tracking: manifest.opportunity_outcome_tracking || null,
       history: page.rows,
     });
   }
@@ -3146,7 +3156,7 @@ function scheduledCronContext(controller) {
   const minute = scheduledAt.getUTCMinutes();
   if (
     !schedule.weekdays.has(weekday)
-    || minute !== schedule.minute
+    || !(schedule.minutes ? schedule.minutes.has(minute) : minute === schedule.minute)
     || !schedule.hours.has(hour)
     || scheduledAt.getUTCSeconds() !== 0
     || scheduledAt.getUTCMilliseconds() !== 0
@@ -3170,7 +3180,7 @@ export function canonicalGithubCronForScheduled(controller) {
   return `${minute} ${hour} * * ${schedule.githubWeekdays}`;
 }
 
-async function dispatchScheduledWorkflow(controller, env) {
+export async function dispatchScheduledWorkflow(controller, env, options = {}) {
   if (String(env?.CLOUDFLARE_SCHEDULER_ENABLED || "") !== "1") {
     return { dispatched: false, reason: "SCHEDULER_DISABLED" };
   }
@@ -3185,7 +3195,7 @@ async function dispatchScheduledWorkflow(controller, env) {
   }
   const cron = `${context.minute} ${context.hour} * * ${context.schedule.githubWeekdays}`;
   const scheduledAt = context.scheduledAt;
-  const response = await fetch(GITHUB_WORKFLOW_DISPATCH_URL, {
+  const request = {
     method: "POST",
     headers: {
       accept: "application/vnd.github+json",
@@ -3202,11 +3212,33 @@ async function dispatchScheduledWorkflow(controller, env) {
         scheduled_at: scheduledAt.toISOString(),
       },
     }),
-  });
-  if (!response.ok) {
-    throw new Error(`GitHub workflow dispatch failed with status ${response.status}`);
+  };
+  const fetcher = options.fetcher || fetch;
+  const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  let lastStatus = "NETWORK_OR_TIMEOUT";
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    let response;
+    try {
+      response = await fetcher(GITHUB_WORKFLOW_DISPATCH_URL, {
+        ...request,
+        signal: AbortSignal.timeout(8_000),
+      });
+    } catch {
+      // Never copy provider exceptions/response bodies into logs: they may
+      // contain headers. A lost response can enqueue twice; schedule_gate
+      // deduplicates identical logical checkpoints before costly generation.
+      lastStatus = "NETWORK_OR_TIMEOUT";
+    }
+    if (response?.ok) return { dispatched: true, attempts: attempt };
+    if (response) {
+      lastStatus = response.status;
+      if (![408, 429, 500, 502, 503, 504].includes(response.status)) {
+        throw new Error(`GitHub workflow dispatch failed with status ${response.status}`);
+      }
+    }
+    if (attempt < 3) await sleep(attempt * 1000);
   }
-  return { dispatched: true };
+  throw new Error(`GitHub workflow dispatch failed after 3 attempts: ${lastStatus}`);
 }
 
 export default {

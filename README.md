@@ -12,7 +12,8 @@ XuanGu 是一个面向未来约两周（10 个交易日）的 A 股、港股、�
 - **三市场动态候选池**：A 股动态召回 300 只；港股、美股在每次定时或手动快照生成任务中重新读取公开市场横截面，并分别动态召回 200 / 300 只，不再使用仓库静态名单决定入池成员。
 - **A 股 300 只完整深评**：全部有效行情候选先完成基础评分和技术评分；技术 K 线完整、满足交易性过滤的候选最多 300 只继续运行 Legacy、V2、双低、Chan/CZSC、Serenity、UZI 与评审团深研，不再把第 97–300 只固定挡在深度评分之外。
 - **双层生产输出**：当前 `production_decision` V4 在共享安全门禁后分别运行“事件催化”和“质量趋势”两条规则资格通道，产出 `QUALIFIED_PICK / NO_QUALIFIED_PICK`；`global_decision` 继续负责独立的严格校准概率。V1–V3 只用于读取历史快照。规则资格分不等于上涨概率，Shadow 模型也不会因为规则轨有候选而被授权。
-- **纯云端自动更新**：Cloudflare Cron 在多个市场检查点独立触发 GitHub `workflow_dispatch`；GitHub Actions 原生 `schedule` 在同一检查点提供不依赖 Cloudflare token 的降级触发，30 分钟后的 GitHub watchdog 只在检查点尚未健康发布时补跑。并发锁和线上 `schedule_gate` 会去重，同一检查点不会重复发布。每日末次检查点、规则合格批次或正式可执行批次进入长期归档，不依赖 Render、OpenD 或个人电脑常开。
+- **纯云端自动更新**：GitHub Actions 原生 `schedule` 和 30 分钟 watchdog 无需个人电脑。配置仓库专用令牌后，Cloudflare Cron 提供独立主触发与 30 分钟补发；没有令牌时不宣称这条备用路径已启用。并发锁和线上 `schedule_gate` 会去重，超时及短暂服务故障有界重试；授权错误不循环重试。实际准点率以 24 小时发布台账为准，不以工作流绿色状态代替。
+- **机会榜独立后续验证**：线上发布核验后，冻结当时的最多 12 个研究机会、评分版本与原始排名；第 10 个交易日后用复权行情和费用假设结算净收益、市场基准超额与不利波动，独立于旧规则和概率模型。未到期、缺行情、不足样本均明确展示。
 - **时效失败关闭**：已发布结论与“现在能否使用”分开。快照过期时仍保留历史规则合格记录，但运行合同切换为 `HISTORICAL_RESEARCH_ONLY`、`current_decision_allowed=false`，当前可执行候选强制为 0。
 
 页面提供今日答案、候选池、事件证据、历史检验、模型逻辑和数据健康六个 Tab。首屏只读与快照身份绑定的轻量摘要，候选、事件和历史数据在进入对应 Tab 时才按需加载。所有数字均来自已发布快照；浏览器只展示服务端已经发布且校验一致的结果，不会自行补选或把计划价冒充实时行情。
@@ -58,7 +59,8 @@ XuanGu 是一个面向未来约两周（10 个交易日）的 A 股、港股、�
 | 去重事件催化 | 5% | 核验后的材料性事件；日常回购执行披露不作为新增利好反复加分 |
 
 - 排名覆盖本轮完整技术/深度评分候选，不只复排旧首页的短名单。默认展示最多 12 个研究机会，并在有足够替代项时限制行业集中；不是强行填满 12 个。
-- 行业/主题参考标签只用于归类，不决定动态入池，不复用静态名单中的人工评分。标签缺失或样本不足会明示，不猜测为科技股，也不给“科技”名称固定加分。
+- 评分版本为 `return-opportunity-score-v2`，兼容 `return-opportunities-v1` 数据合同。行业分类读取东方财富批量 `f100` 字段：A/HK 为供应商行业，美股为较宽的板块，不能把两者混成同一种细行业。每条分类保留来源、供应商证券身份、查询地址、采集时间与分类层级；7 天有效缓存、6 小时失败冷却，并发和请求数有上限。旧分类、主题近似或来源缺失仍可展示，但不能据此获得行业强弱加分；同行不足 3 只时同样中性。不会根据名称猜科技股，也不给“科技”固定加分。
+- 每只机会都有 `event_coverage`：`SUCCESS` 仅表示本轮所列官方来源查询成功，`ERROR` 是查询失败，`NOT_SCANNED` 是未完成扫描。三者都不能直接等同于“没有负面风险”；重大负面一经核验仍排除。
 - 无效或陈旧行情、K 线不足、不可交易、已核验重大负面、趋势破坏及极端追涨继续排除。风险预算只是一致化研究示例，高波动通常对应更低示例权重，不是个性化仓位建议或保证止损。
 - `scenario_range` 是历史波动推导的情景范围，不按区间上界给股票排序。`expected_net_return=null`、`probability=null`、`calibrated=false` 始终保留，不能把 80 分解释为 80% 胜率或 80% 收益。
 - 榜单绑定云端快照和行情来源时间；快照过期后隐藏当前榜单，等待 GitHub 云端刷新。GitHub 定时检查点是批次更新，不是交易所逐笔实时行情。
@@ -164,7 +166,7 @@ A / 港 / 美的 Legacy 分布刻度并不相同，质量通道因此使用 64 /
 
 每次 V4 快照还发布 `production_rule_inputs` 冻结账本：它按 `global_decision.evaluated_candidates` 的原始顺序保留规则实际读取的最小字段、来源候选存在性、数据质量与合格候选快照，并绑定 SHA-256、合同版本和行数。Python 生成器、独立快照校验器和浏览器会从该账本复算；发布的 `primary`、`qualified_candidates` 或任一合格明细只要与复算结果不完全一致，就失败关闭。Cloudflare 不在每个 HTTP 请求里重放约 800 行决策，而是只发布由已验证完整快照派生、并与 `snapshot_key`、SHA-256 及原始字节数绑定的轻量运行索引。运行索引缺失或合同不匹配时 API 直接失败关闭，不会回退解析数 MB 的完整快照。
 
-官方正向事件 enrichment 默认每市场深扫 16 只：保留少量已发布决策和 Legacy 名额，其余按真实动量、均线结构、V2、流动性及数据质量分配；不使用情景区间上沿或 Shadow 概率。`momentum_opportunity_with_legacy_reserve_v2` 防止旧稳健偏好占满事件扫描预算。日常回购执行公告保留原文但默认中性；只有文档匹配、已验证的重要性证据才能按明确回购计划归并正向资格，不用披露数量冒充新增催化。快照以 `two-tier-event-coverage-v1` 明确发布两层口径：`risk_screen.scope=full_candidate_pool` 对全部候选执行结构化交易性、必需输入和已核验重大负面门禁；`positive_event_enrichment.scope=bounded_priority_sample` 才表示进入官方公告深扫的重点样本，未深扫不代表“无新闻风险”。事件源按市场隔离；严格 `global_decision` 仍要求三市场事件管线全部完成。浏览器不能把研究机会升级为 `QUALIFIED_PICK`。
+官方事件扫描默认每市场最多 30 只：先做初步机会排序，以将展示的前列股票及最多 24 只/市场的扩展优先序列作为重点，再保留少量原规则名额；不使用情景区间上沿或 Shadow 概率。请求名单、逐股成功和失败名单分别发布，单只证券失败不会抹掉同市场其他证券的成功证据。日常回购执行公告保留原文但默认中性；只有文档匹配、已验证的重要性证据才能按明确回购计划归并正向资格，不用披露数量冒充新增催化。快照以 `two-tier-event-coverage-v1` 明确发布两层口径：`risk_screen.scope=full_candidate_pool` 对全部候选执行结构化交易性、必需输入和已核验重大负面门禁；`positive_event_enrichment.scope=bounded_priority_sample` 才表示进入官方公告扫描的重点样本。扫描是有界官方披露/标题检索，并非对全文、媒体消息和全部历史事件的无遗漏排查。严格 `global_decision` 仍要求三市场事件管线全部完成；研究候选可在明确标示未扫描/失败风险时保留，不能因此获得正式交易资格。
 
 每个规则合格候选还携带服务端冻结的 `ten-day-trade-plan-v2` 复核计划：快照参考价及来源时间、允许复核的参考入场区间、失效价、目标参考、最晚复核交易日和单票 10% 策略安全上限。其 `scenario_range` 必须无损绑定同一候选的 `horizon-range-v1`，核心字段包含 10 交易日上下界、`method_id=realized-vol-drift-shadow-v1`、`calibrated=false` 和源观测数；K 线日期完整时还发布真实的来源窗口起止日，日期证据缺失时省略而不猜测。核心来源字段缺失、窗口只出现单边或任一字段被篡改都会失败关闭。`horizon-range-v1`、失效价和目标价都是未校准的确定性情景，**不是概率置信区间、预期收益或胜率承诺**。计划状态固定为 `REVIEW_REQUIRED`，`is_personalized_advice=false`；这是统一执行纪律，不是实时委托或个性化仓位建议。浏览器只读取该合同，缺值显示未知，不根据当前网页时间自行推算价格。`ten-day-trade-plan-v1` 只作为历史快照兼容合同读取。
 
@@ -256,7 +258,7 @@ authorizes_production=false
 2. 人工核验待入库：可以帮助研究，但在进入自动不可变快照前不能参与买入门禁。
 3. `model_signal`：模型为何关注某只股票的解释，不是外部新闻、公告或事实。
 
-事件管线必须发布“是否已扫描、逐市场来源状态、扫描证券、有效条数和拒绝原因”，不会把无法访问原文、缺发布时间或只有模型描述的内容包装成官方证据。默认每市场预扫 16 只（硬上限 30），用途明确标记为 `positive_event_enrichment`；它用于补强最有希望候选的官方催化证据，而不是把新闻数量直接当成分数，也不是对未入选证券宣称“官方公告无风险”。
+事件管线必须发布“是否已扫描、逐市场/逐股来源状态、成功和失败证券、有效条数和拒绝原因”，不会把无法访问原文、缺发布时间或只有模型描述的内容包装成官方证据。默认每市场扫描上限 30，以初步机会榜优先；它补强重点候选的官方披露证据，而不是把新闻数量直接当成分数，也不是对已扫或未扫证券宣称“官方公告无风险”。
 
 `event-list-v2` / `ui-events-v2` 使决策证据在首屏和分页 API 中可发现：
 
@@ -285,9 +287,11 @@ authorizes_production=false
 
 这套规则已经替代“周一到周五等于交易日”的旧逻辑。
 
-## 五类隔离历史证据与规则资格留痕
+## 六类隔离历史证据与机会榜留痕
 
-历史检验使用五类物理隔离的证据，原始 `data/picks/*.json` 始终保持不可变，任何一类都不能借另一类的结果扩大自己的样本分母：
+历史检验使用六类物理隔离的证据，原始 `data/picks/*.json` 始终保持不可变，任何一类都不能借另一类的结果扩大自己的样本分母：
+
+- **机会榜后续表现**：`track=RETURN_OPPORTUNITY`，独立写入 `data/outcomes/opportunity-settlements`。只在完整线上契约核验成功后，冻结实际发布的 `public/data/picks/latest.json` 中的机会和来源摘要；以核验时间作为保守的“已确认可见”时点，再取严格晚于该时点及特征截止的首个交易所开盘。原始排名、分数、版本、成本、日历与基准不能被后续刷新改写。默认不把当前评分倒套历史，也不自动导入缺乏发布时点证据的旧快照。
 
 - **规则资格结果**：每次 V4 `production_decision` 保存稳定 `qualification_id`、通道、资格分、门禁证据、严格交易复核计划和 10 日窗口。`data/outcomes/rule-settlements/<snapshot>.json` 对当批全部合格候选（含是否 primary）按“下一交易日开盘到第 10 个交易日收盘”登记并结算，同时记录市场注册基准、费用后绝对/超额收益和最大不利波动。它只评估规则，不计算 Brier/ECE，不进入校准概率样本，也不能授权生产。
 - **正式可执行轨**：写入 `data/outcomes/executable/<prediction_id>.json`，`track=EXECUTABLE_MODEL`。只有完整、已校准且通过严格门禁的 `global_decision.primary` 才能登记；`NO_VALID_PICK`、Legacy、V4 规则资格和研究优先项都不会进入正式收益分母。
@@ -295,7 +299,7 @@ authorizes_production=false
 - **完整观察轨**：写入 `data/outcomes/observations/obscohort_<id>.json`，`track=MODEL_OBSERVATION`，并在 `observation-settlements` 中独立结算。cohort/revision 冻结源快照文件名、SHA-256、字节数、生成时点和 `feature_cutoff_at`，再连接源快照里的 `point_in_time_universe` 读取当时特征；它用于诊断原概率模型及净超额排序 V2，明确 `included_in_shadow_research=false`、`included_in_executable_performance=false`、`authorizes_production=false`。
 - **归档短名单回放轨**：写入 `data/backtests/archived-shortlist-replay-v1.json`，`track=ARCHIVED_SHORTLIST_REPLAY`。它只复盘历史快照当时实际保存的首选/观察名单与因子，使用真实交易所日历、调整行情、成本和注册基准生成回顾性结果；明确 `universe_scope=ARCHIVED_SHORTLIST_ONLY`，不冒充完整点时候选池，不进入任何生产晋级分母。
 
-五类证据的结算合同共同遵循：
+各类证据按各自合同结算；新增机会轨的更严格发布时点要求不会反向改写旧轨：
 
 - 入场采用下一交易日开盘，退出采用第 10 个交易日收盘；
 - 合同同时固化交易所日历给出的真实开盘、收盘时刻；不会用 UTC 午夜伪装成交时间；
@@ -303,8 +307,10 @@ authorizes_production=false
 - 成熟后使用同市场日线，按市场记录成本假设，结算为 `SETTLED`；
 - A 股使用前复权日线，港美使用 Yahoo adjusted close 因子调整的开盘与收盘；
 - 价格先按 8 位发布精度固化，再据此计算 gross、net 与正收益标签，避免低价股二次舍入造成合法样本被误删；
-- 同一轨内的稳定 ID 幂等更新，身份冲突会失败关闭；四类证据使用不同目录与明确隔离字段，不会串账或覆盖；
+- 同一轨内的稳定 ID 幂等更新，身份冲突会失败关闭；各类证据使用不同目录与明确隔离字段，不会串账或覆盖；
 - 已经 `SETTLED` 的记录不会因为后续行情变化而重算。
+
+机会轨每次刷新先结算已登记记录，发布成功后再登记本批。登记采用轻量、可独立结算的冻结记录，即使本次完整快照未进入长期 Git 归档，也不会丢失研究机会。历史发布可能比新登记滞后一批；周末也由独立结算工作流继续处理成熟窗口。`PENDING_MATURITY` 不填收益，`PENDING_DATA` 不填 0；费用后收益及超额仅在证券与基准的完整复权 OHLC 窗口都齐备时发布。统计按 `score_version_id` 分开，并报告记录数、独立入场日期和非重叠窗口数；重复刷新与重叠持有期不是独立交易。`COLLECTING/OBSERVING` 始终 `calibrated=false`、`authorizes_production=false`，不会因为出现盈利样本自动晋级。
 
 页面历史 Tab 的正式指标只读取通过完整合同校验的 `EXECUTABLE_MODEL + SETTLED` 样本。统计 cohort 固定为最新发布的 `(model_id, label_version)`，同一 `target_date` 只保留生成时间最晚的一次可执行预测，因此旧模型和同日重复运行不会把可靠样本数虚高；原始账本仍完整保留供审计。页面展示平均净收益、正收益率、Top 10% 命中率、Brier、ECE、历史已选样本 Rank IC、10% Expected Shortfall 和结算序列最大回撤；总体可靠门槛为 20 个独立决策日，Top 10% 与 Expected Shortfall 另按实际尾部样本数展示，至少 5 个尾部观测才标记达标。样本不足时明确标记“早期样本”，不可用时显示空值而不是伪造 0。这里的 Rank IC 是跨历史已选样本的排序相关性，最大回撤是按结算顺序串联的终值序列，不冒充真实持仓组合。
 
@@ -344,6 +350,7 @@ GitHub Actions（定时 / 手动）
   → 构建内容寻址的候选/详情/事件/历史资产与 `data-manifest-v1`
   → Wrangler 部署 Cloudflare Worker
   → 完整线上契约验证
+  → 冻结已核验发布的机会榜，并独立归档轻量后续收益台账
   → 按归档策略将每日检查点、规则合格或正式可执行快照与 ledger 写回 main
 
 Cloudflare Worker（请求时）
@@ -504,7 +511,8 @@ npm run dev
 ### GitHub / Cloudflare Secrets
 
 - `CLOUDFLARE_API_TOKEN`：Worker 部署权限。
-- Cloudflare 定时 `workflow_dispatch` 是独立检查点触发路径，仓库配置为 `CLOUDFLARE_SCHEDULER_ENABLED=1`。这只启用代码路径，不代表生产 secret 已配置；必须为仓库 `dzhdingzihang/xuangu` 单独创建只有 `Actions: write` 的 fine-grained token，并以 Wrangler secret `GITHUB_WORKFLOW_DISPATCH_TOKEN` 保存。不得复用 `CLOUDFLARE_API_TOKEN`、任何行情密钥或本地 `gh` 的宽权限凭证。GitHub Actions 原生 `schedule` 与 30 分钟 watchdog 不使用该开关或 token，因此 secret 缺失不会令部署失败，仍可由降级链路刷新；但数据健康状态必须明确报告 Cloudflare dispatch 未就绪。Worker 只接受白名单表达式，并在运行时跳过不匹配纽约 `16:17` 的 DST 变体。
+- `XUANGU_WORKFLOW_DISPATCH_TOKEN`：可选 GitHub Actions Secret。只选择 `dzhdingzihang/xuangu` 仓库、授予 `Actions: write` 的 fine-grained token；发布工作流通过标准输入写入 Worker 的 `GITHUB_WORKFLOW_DISPATCH_TOKEN`，不输出令牌、不从本机自动发现凭据，也拒绝 OAuth/经典 PAT。缺失时保留 GitHub 原生调度并明确报告独立触发未配置。令牌到期需在仓库 Secret 中替换后重新部署。
+- Cloudflare 定时 `workflow_dispatch` 是可选的独立检查点触发路径，仓库配置为 `CLOUDFLARE_SCHEDULER_ENABLED=1`。这只启用代码路径，不代表生产 secret 已配置；必须为仓库 `dzhdingzihang/xuangu` 单独创建只有 `Actions: write` 的 fine-grained token，并以 Wrangler secret `GITHUB_WORKFLOW_DISPATCH_TOKEN` 保存。不得复用 `CLOUDFLARE_API_TOKEN`、任何行情密钥或本地 `gh` 的宽权限凭证。GitHub Actions 原生 `schedule` 主调度与 30 分钟 watchdog 不使用该开关或 token，因此 secret 缺失不会令部署失败，仍由 GitHub 主链路刷新；但数据健康状态必须明确报告 Cloudflare dispatch 未就绪。Worker 只接受白名单表达式，并在运行时跳过不匹配纽约 `16:17` 的 DST 变体。
 - R2 当前未启用，内嵌同代资产是正式生产数据后端。现阶段不得设置 `ENABLE_R2_DATA_PUBLISH=1`；Workflow 会在 alias 切换前失败关闭并主动拒绝该配置。如果未来由 R2 manifest 供应数据，某个 R2 object 的内嵌回退也只接受同 generation 且 key / SHA-256 / 字节数一致的副本，不会把 R2 缺口静默降级为跨代数据。启用前必须补齐 alias 与 Worker Version 的原子切换、联合回滚与线上故障演练。
 - 定时选股不需要 OpenD、Tunnel、Render 或个人设备密钥。
 
@@ -534,7 +542,7 @@ curl -fsS 'https://xuangu.alixjd.com/api/history?view=daily&limit=5'
 curl -fsSI https://xuangu.alixjd.com/
 ```
 
-验收 `/api/status` 时应确认 `snapshot_generation=github-actions`、`data_mode=scheduled_snapshot`、`device_dependency=false`、`snapshot_as_of`、`active_refresh_mode`、`next_refresh`，以及 `research_decision_ready`、`checkpoint_evidence_ready`、`unattended_refresh_ready`、`calibrated_execution_ready` 四层状态。调度路径应表达为 Cloudflare 独立检查点触发 + GitHub 原生 `schedule` 降级触发 + 30 分钟 watchdog；Cloudflare 开关/token 状态必须独立展示，不能把仅有版本库开关误报为 dispatch 已可用。同时检查 `/api/gate-status` 的 snapshot identity、发布后端、receipt 证据滞后批次和 24 小时 ledger 状态；初始窗口显示 `INITIALIZING` 是预期状态。如果检查 `/api/live` 兼容路由，预期 `provider_class=SCHEDULED_SNAPSHOT` 与 `is_realtime=false`，不应期待 `REALTIME`。
+验收 `/api/status` 时应确认 `snapshot_generation=github-actions`、`data_mode=scheduled_snapshot`、`device_dependency=false`、`snapshot_as_of`、`active_refresh_mode`、`next_refresh`，以及 `research_decision_ready`、`checkpoint_evidence_ready`、`unattended_refresh_ready`、`calibrated_execution_ready` 四层状态。调度路径应表达为 GitHub 原生 `schedule` 主调度 + 30 分钟 watchdog；配置专用凭据后再启用 Cloudflare 独立补充触发。Cloudflare 开关/token 状态必须独立展示，不能把仅有版本库开关误报为 dispatch 已可用。同时检查 `/api/gate-status` 的 snapshot identity、发布后端、receipt 证据滞后批次和 24 小时 ledger 状态；初始窗口显示 `INITIALIZING` 是预期状态。如果检查 `/api/live` 兼容路由，预期 `provider_class=SCHEDULED_SNAPSHOT` 与 `is_realtime=false`，不应期待 `REALTIME`。
 
 `xuangu.alixjd.com` 的生产页面、API 和定时更新均不依赖 Render、OpenD 或个人电脑。
 

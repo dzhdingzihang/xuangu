@@ -1037,10 +1037,11 @@ class WorkerApiContractTests(unittest.TestCase):
         self.assertEqual(
             crons,
             [
-                "17 0,2,4,7,8,12 * * MON-FRI",
+                "17,47 0,2,4,7,8,12 * * MON-FRI",
                 "47 14 * * MON-FRI",
-                "17 20 * * MON-FRI",
-                "17 21 * * MON-FRI",
+                "17 15 * * MON-FRI",
+                "17,47 20 * * MON-FRI",
+                "17,47 21 * * MON-FRI",
             ],
         )
         self.assertLessEqual(len(crons), 5)

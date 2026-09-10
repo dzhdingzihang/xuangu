@@ -64,11 +64,12 @@ jobs:
       snapshot_key: ${{ steps.snapshot_bundle.outputs.snapshot_key }}
       snapshot_sha256: ${{ steps.snapshot_bundle.outputs.snapshot_sha256 }}
       has_checkpoint_receipt: ${{ steps.checkpoint_receipt.outputs.created }}
+      has_opportunity_receipt: ${{ steps.opportunity_receipt.outputs.created == 'true' && steps.opportunity_upload.outcome == 'success' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: main
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Resolve workflow trigger mode
@@ -80,6 +81,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Check scheduled time slot and source health
         id: schedule_gate
@@ -148,6 +150,15 @@ jobs:
           restore-keys: |
             hk-us-d1-v2-
 
+      - name: Restore verified sector metadata cache
+        if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: data/runtime-cache/sector_metadata.json
+          key: sector-metadata-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            sector-metadata-v1-
+
       - name: Generate smart pick snapshot
         if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         env:
@@ -160,7 +171,7 @@ jobs:
           SCHEDULE_GATE_EVALUATED_AT: ${{ steps.schedule_gate.outputs.gate_evaluated_at }}
           EFFECTIVE_CHECKPOINT: ${{ steps.schedule_gate.outputs.effective_checkpoint }}
           SCHEDULE_RECOVERY_MODE: ${{ steps.schedule_gate.outputs.recovery_mode }}
-          EVENT_SCAN_CANDIDATES_PER_MARKET: "16"
+          EVENT_SCAN_CANDIDATES_PER_MARKET: "30"
         run: |
           for attempt in 1 2 3; do
             echo "Snapshot generation attempt ${attempt}/3"
@@ -193,6 +204,9 @@ jobs:
             sleep "$((attempt * 10))"
           done
           python scripts/settle_rule_outcomes.py --max-workers 12 --retries 0
+          # Only settle previously publication-verified opportunity records.
+          # New predictions are frozen after deployed identity verification.
+          python scripts/settle_opportunity_outcomes.py --max-workers 12 --retries 0
 
       - name: Validate published snapshot schema
         if: steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true'
@@ -225,6 +239,13 @@ jobs:
         with:
           path: data/runtime-cache/hk_us_daily.json
           key: hk-us-d1-v2-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save verified sector metadata cache
+        if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: data/runtime-cache/sector_metadata.json
+          key: sector-metadata-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Prepare immutable snapshot recovery bundle
         id: snapshot_bundle
@@ -376,6 +397,13 @@ jobs:
               output.write(f"version_id={version_id}\n")
           PY
 
+      - name: Provision optional repository-scoped scheduler credential
+        if: (steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true') && (steps.trigger_context.outputs.scheduled_like != 'true' || steps.publish_guard.outputs.should_publish == 'true')
+        run: python scripts/configure_scheduler.py
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          XUANGU_WORKFLOW_DISPATCH_TOKEN: ${{ secrets.XUANGU_WORKFLOW_DISPATCH_TOKEN }}
+
       - name: Deploy Worker
         id: deploy_worker
         if: (steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true') && (steps.trigger_context.outputs.scheduled_like != 'true' || steps.publish_guard.outputs.should_publish == 'true')
@@ -457,6 +485,43 @@ jobs:
           else:
               raise SystemExit(f"rollback snapshot identity verification failed: {last_error}")
           PY
+
+      - name: Freeze verified published opportunity shortlist
+        id: opportunity_receipt
+        if: steps.verify_deployment.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python scripts/settle_opportunity_outcomes.py \
+            --register-snapshot public/data/picks/latest.json \
+            --published-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --register-only \
+            --max-workers 12 --retries 0
+          python - <<'PY'
+          import os
+          import pathlib
+          import shutil
+          import opportunity_outcome_ledger
+
+          source = pathlib.Path("data/outcomes/opportunity-settlements")
+          batches = opportunity_outcome_ledger.load_opportunity_outcome_batches(source)
+          target = pathlib.Path(os.environ["RUNNER_TEMP"]) / f"opportunity-ledger-{os.environ['GITHUB_RUN_ID']}" / source
+          if batches:
+              target.mkdir(parents=True, exist_ok=True)
+              for path in source.glob("*.json"):
+                  shutil.copy2(path, target / path.name)
+              with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                  output.write("created=true\n")
+          PY
+
+      - name: Upload independent opportunity ledger
+        id: opportunity_upload
+        if: steps.opportunity_receipt.outputs.created == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: opportunity-ledger-${{ github.run_id }}
+          path: ${{ runner.temp }}/opportunity-ledger-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Create verified scheduler checkpoint receipt
         id: checkpoint_receipt
@@ -646,6 +711,63 @@ jobs:
           done
 
           echo "Archive failed after 3 bounded attempts; marking workflow red." >&2
+          exit 1
+
+  opportunity-ledger:
+    needs: deploy
+    if: always() && needs.deploy.outputs.has_opportunity_receipt == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: opportunity-ledger-${{ github.run_id }}
+          path: ${{ runner.temp }}/opportunity-ledger-payload
+      - name: Archive lightweight opportunity ledger with bounded conflict retries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch --depth=1 origin main
+            attempt_root="$(mktemp -d "${RUNNER_TEMP}/opportunity-archive-XXXXXX")"
+            archive_tree="${attempt_root}/worktree"
+            git worktree add --detach "${archive_tree}" origin/main
+            python scripts/merge_archive_payload.py "${RUNNER_TEMP}/opportunity-ledger-payload" "${archive_tree}"
+            git -C "${archive_tree}" add -- data/outcomes/opportunity-settlements
+            if git -C "${archive_tree}" diff --cached --quiet; then
+              git worktree remove "${archive_tree}"
+              exit 0
+            fi
+            git -C "${archive_tree}" commit -m "Track published opportunity outcomes [skip ci]"
+            auth_header="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
+            if GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}" \
+              git -C "${archive_tree}" push origin HEAD:main; then
+              unset auth_header
+              git worktree remove "${archive_tree}"
+              exit 0
+            fi
+            unset auth_header
+            git worktree remove "${archive_tree}"
+            sleep "$((attempt * 5))"
+          done
+          echo "Opportunity ledger archive failed after three conflict retries." >&2
           exit 1
 
   checkpoint-ledger:

@@ -509,6 +509,7 @@ def yahoo_adjusted_rows(symbol: str, market: str, limit: int = 260) -> list[dict
         quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
         adjclose = ((result.get("indicators") or {}).get("adjclose") or [{}])[0].get("adjclose") or []
         opens = quote.get("open") or []
+        highs = quote.get("high") or []
         lows = quote.get("low") or []
         closes = quote.get("close") or []
         timezone_name = (result.get("meta") or {}).get("exchangeTimezoneName")
@@ -520,6 +521,7 @@ def yahoo_adjusted_rows(symbol: str, market: str, limit: int = 260) -> list[dict
     for index, timestamp in enumerate(timestamps):
         try:
             raw_open = finite_positive(opens[index])
+            raw_high = finite_positive(highs[index]) if index < len(highs) else None
             raw_low = finite_positive(lows[index]) if index < len(lows) else None
             raw_close = finite_positive(closes[index])
             adjusted_close = finite_positive(adjclose[index])
@@ -535,6 +537,8 @@ def yahoo_adjusted_rows(symbol: str, market: str, limit: int = 260) -> list[dict
         }
         if raw_low is not None:
             row["low"] = round(raw_low * factor, 8)
+        if raw_high is not None:
+            row["high"] = round(raw_high * factor, 8)
         rows.append(row)
     return rows[-limit:]
 

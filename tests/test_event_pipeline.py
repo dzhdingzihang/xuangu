@@ -131,29 +131,119 @@ class EventPipelineTests(unittest.TestCase):
         high_vol = {**base, "estimated_10d_range": {"low_pct": -18, "high_pct": 25}}
         self.assertEqual(event_pipeline._event_scan_priority(low_vol, ""), event_pipeline._event_scan_priority(high_vol, ""))
 
-    def test_collection_defaults_to_sixteen_candidates_per_market(self) -> None:
+    def test_collection_defaults_to_thirty_candidates_per_market(self) -> None:
         snap = snapshot()
         with (
             mock.patch.dict("os.environ", {}, clear=True),
             mock.patch.object(event_pipeline, "_candidate_symbols", return_value=[]) as choose,
-            mock.patch.object(event_pipeline, "_collect_a_share", return_value=[]),
-            mock.patch.object(event_pipeline, "_collect_hk", return_value=[]),
-            mock.patch.object(event_pipeline, "_collect_us", return_value=[]),
+            mock.patch.object(event_pipeline, "_collect_a_share", return_value={"items": [], "successful_symbols": [], "failed_symbols": {}}),
+            mock.patch.object(event_pipeline, "_collect_hk", return_value={"items": [], "successful_symbols": [], "failed_symbols": {}}),
+            mock.patch.object(event_pipeline, "_collect_us", return_value={"items": [], "successful_symbols": [], "failed_symbols": {}}),
         ):
             result = event_pipeline.collect_for_snapshot(snap, "run-1", now=NOW)
 
         self.assertEqual(result["pipeline"]["status"], "READY_EMPTY")
         self.assertEqual(result["pipeline"]["scan_purpose"], "positive_event_enrichment")
         self.assertEqual(result["pipeline"]["selection_policy"], "momentum_opportunity_with_legacy_reserve_v2")
-        self.assertEqual(result["pipeline"]["candidate_limit_per_market"], 16)
+        self.assertEqual(result["pipeline"]["candidate_limit_per_market"], 30)
         self.assertEqual(
             choose.call_args_list,
             [
-                mock.call(snap, "a_share", 16),
-                mock.call(snap, "hk", 16),
-                mock.call(snap, "us", 16),
+                mock.call(snap, "a_share", 30),
+                mock.call(snap, "hk", 30),
+                mock.call(snap, "us", 30),
             ],
         )
+
+    def test_preliminary_shortlist_and_overscan_precede_legacy_scan(self) -> None:
+        snap = snapshot()
+        legacy = [{"code": f"OLD{index:02}", "recommendation_degree": 99} for index in range(40)]
+        targets = [f"TOP{index:02}" for index in range(24)]
+        snap["markets"]["us"]["_candidate_pool"] = legacy + [{"code": code} for code in targets]
+        snap["return_opportunities"] = {
+            "candidates": [{"market": "us", "code": code} for code in targets[:12]],
+            "event_scan_targets_by_market": {"us": targets},
+        }
+        selected = event_pipeline._candidate_symbols(snap, "us", 30)
+        self.assertEqual(selected[:24], targets)
+        self.assertEqual(len(selected), 30)
+        self.assertEqual(sum(code.startswith("OLD") for code in selected), 6)
+        snap["markets"]["us"]["_candidate_pool"].reverse()
+        self.assertEqual(event_pipeline._candidate_symbols(snap, "us", 30), selected)
+
+    def test_partial_symbol_failure_retains_successful_events_and_empty_scans(self) -> None:
+        snap = snapshot()
+        snap["markets"]["us"]["_candidate_pool"] = [{"code": code} for code in ("GOOD", "EMPTY", "FAILED")]
+
+        def fetch(method, url, **kwargs):
+            if url.endswith("company_tickers.json"):
+                return {str(index): {"ticker": code, "cik_str": index + 1}
+                        for index, code in enumerate(("GOOD", "EMPTY", "FAILED"))}
+            if "CIK0000000001" in url:
+                return {"filings": {"recent": {
+                    "accessionNumber": ["good-1"], "filingDate": ["2026-08-22"],
+                    "acceptanceDateTime": ["2026-08-22T14:00:00Z"], "form": ["8-K"], "primaryDocument": ["good.htm"],
+                }}}
+            if "CIK0000000002" in url:
+                return {"filings": {"recent": {}}}
+            raise OSError("fixture provider unavailable")
+
+        result = event_pipeline.collect_for_snapshot(snap, "mixed-run", now=NOW, fetcher=fetch)
+        snap["events"] = result
+        pipeline = result["pipeline"]
+        self.assertEqual(pipeline["status"], "PARTIAL")
+        self.assertEqual(set(pipeline["requested_symbols"]["us"]), {"GOOD", "EMPTY", "FAILED"})
+        self.assertEqual(set(pipeline["scanned_symbols"]["us"]), {"GOOD", "EMPTY"})
+        self.assertEqual(pipeline["successful_symbols"], pipeline["scanned_symbols"])
+        self.assertEqual(pipeline["failed_symbols"]["us"], ["FAILED"])
+        self.assertFalse(event_pipeline.pipeline_market_complete(result, "us"))
+        self.assertFalse(event_pipeline.pipeline_complete(result))
+        self.assertEqual(len(result["items"]), 1)
+        self.assertTrue(event_pipeline.event_is_auditable(result["items"][0], snap, "us", "GOOD"))
+        good = event_pipeline.candidate_scan_coverage(snap, "us", "GOOD")
+        empty = event_pipeline.candidate_scan_coverage(snap, "us", "EMPTY")
+        failed = event_pipeline.candidate_scan_coverage(snap, "us", "FAILED")
+        missing = event_pipeline.candidate_scan_coverage(snap, "us", "UNREQUESTED")
+        self.assertEqual((good["status"], empty["status"], failed["status"], missing["status"]),
+                         ("SUCCESS", "SUCCESS", "ERROR", "NOT_SCANNED"))
+        self.assertTrue(good["verified"])
+        self.assertTrue(empty["verified"])
+        self.assertFalse(failed["verified"])
+        self.assertFalse(missing["verified"])
+        self.assertEqual(failed["error_code"], "OSError")
+        self.assertFalse(empty["negative_clearance_verified"])
+        self.assertEqual(empty["event_count"], 0)
+        forged = dict(result["items"][0], symbol="FAILED")
+        self.assertFalse(event_pipeline.event_is_auditable(forged, snap, "us", "FAILED"))
+
+    def test_unrequested_symbol_is_not_verified_without_pipeline(self) -> None:
+        coverage = event_pipeline.candidate_scan_coverage({"events": {"pipeline": {}}}, "us", "EXAMPLE")
+        self.assertFalse(coverage["verified"])
+        self.assertEqual(coverage["status"], "NOT_SCANNED")
+        self.assertFalse(coverage["negative_clearance_verified"])
+
+    def test_malformed_provider_payload_is_error_instead_of_successful_empty_scan(self) -> None:
+        def fetch(method, url, **kwargs):
+            if url.endswith("company_tickers.json"):
+                return {"0": {"ticker": "NVDA", "cik_str": 1045810}}
+            if "submissions" in url:
+                return {"filings": {"recent": {"accessionNumber": ["lost-filing"]}}}
+            raise OSError("other source unavailable")
+        snap = snapshot()
+        snap["events"] = event_pipeline.collect_for_snapshot(snap, "malformed-run", now=NOW, fetcher=fetch)
+        self.assertEqual(snap["events"]["pipeline"]["scanned_symbols"]["us"], [])
+        self.assertEqual(event_pipeline.candidate_scan_coverage(snap, "us", "NVDA")["status"], "ERROR")
+
+    def test_forged_market_success_does_not_override_failed_symbol(self) -> None:
+        snap = snapshot()
+        result = event_pipeline.collect_for_snapshot(snap, "bad-run", now=NOW,
+            fetcher=lambda *args, **kwargs: (_ for _ in ()).throw(OSError("offline")))
+        result["pipeline"]["markets"] = list(event_pipeline.SOURCE_REGISTRY)
+        result["pipeline"]["status"] = "READY"
+        for row in result["pipeline"]["source_manifest"]:
+            row["status"] = "SUCCESS"
+        self.assertFalse(event_pipeline.pipeline_complete(result))
+        self.assertFalse(event_pipeline.pipeline_market_complete(result, "us"))
 
     def test_cninfo_parser_keeps_official_direction_and_release_time(self) -> None:
         payload = {

@@ -20,6 +20,7 @@ import history_evaluation
 import model_observation_ledger
 import observation_outcome_ledger
 import rule_outcome_ledger
+import opportunity_outcome_ledger
 from scripts import scheduler_checkpoint_ledger
 
 
@@ -1651,13 +1652,26 @@ def summarize_return_opportunities(snapshot: dict) -> dict | None:
 
     result = {
         key: summary_value(value) for key, value in source.items()
-        if key not in {"primary", "candidates", "excluded_candidates"}
+        if key not in {"primary", "candidates", "excluded_candidates", "event_scan_targets_by_market"}
     }
     result["candidates"] = [
         summary_value(row)
         for row in (source.get("candidates") or [])[:12]
     ]
     result["primary"] = result["candidates"][0] if result["candidates"] else None
+    return result
+
+
+def compact_opportunity_tracking(tracking: dict | None) -> dict:
+    """Keep startup bounded; the history asset retains complete version metrics."""
+    result = copy.deepcopy(tracking or opportunity_outcome_ledger.evaluate_opportunity_performance({}))
+    versions = result.get("by_version") or []
+    recent = result.get("recent_outcomes") or []
+    result["version_count"] = len(versions)
+    result["by_version_truncated"] = len(versions) > 4
+    result["by_version"] = [{k: v for k, v in row.items() if k != "score_identity"} for row in versions[:4]]
+    result["recent_outcomes_available_count"] = len(recent)
+    result["recent_outcomes"] = recent[:3]
     return result
 
 
@@ -1680,6 +1694,8 @@ def build_worker_ui_bootstrap(
         "global_decision": _global_ui_summary(snapshot),
         "production_decision": _production_ui_summary(snapshot),
         "return_opportunities": summarize_return_opportunities(snapshot),
+        "sector_metadata_coverage": copy.deepcopy(snapshot.get("sector_metadata_coverage") or {}),
+        "opportunity_outcome_tracking": compact_opportunity_tracking(snapshot.get("opportunity_outcome_tracking")),
         "decision_evidence": _decision_evidence(snapshot),
         "event_stats": _event_stats(snapshot),
         "markets": {market: _compact_ui_market(snapshot, market) for market in LIVE_MARKETS},
@@ -2185,6 +2201,7 @@ def build_data_manifest_assets(
     }
 
     summary_payload = copy.deepcopy(ui_assets["ui-bootstrap.json"])
+    summary_payload["opportunity_outcome_tracking"] = compact_opportunity_tracking(history_manifest.get("opportunity_outcome_tracking"))
     runtime_payload = json.loads((data_root / "picks" / "runtime.json").read_text(encoding="utf-8"))
     live_index_payload = json.loads((data_root / "picks" / "live-index.json").read_text(encoding="utf-8"))
     candidate_source = ui_assets["ui-candidates.json"]
@@ -2245,6 +2262,7 @@ def build_data_manifest_assets(
         "observation_ledger": copy.deepcopy(history_manifest.get("observation_ledger") or {}),
         "observation_performance": copy.deepcopy(history_manifest.get("observation_performance") or {}),
         "rule_outcome_tracking": copy.deepcopy(history_manifest.get("rule_outcome_tracking") or {}),
+        "opportunity_outcome_tracking": copy.deepcopy(history_manifest.get("opportunity_outcome_tracking") or opportunity_outcome_ledger.evaluate_opportunity_performance({})),
     }
     for index, row in enumerate(history_payload["history"]):
         byte_size = len(_stable_json_bytes(row))
@@ -2538,6 +2556,9 @@ def main() -> None:
     rule_outcome_batches = rule_outcome_ledger.load_rule_outcome_batches(
         outcome_root / "rule-settlements"
     )
+    opportunity_tracking = opportunity_outcome_ledger.evaluate_opportunity_performance(
+        opportunity_outcome_ledger.load_opportunity_outcome_batches(outcome_root / "opportunity-settlements")
+    )
     summaries = []
     snapshots = {}
     for path in sorted(PICKS.glob("*.json")):
@@ -2623,6 +2644,7 @@ def main() -> None:
     )
     evaluation["observation_ledger"] = observation_summary
     evaluation["observation_performance"] = observation_performance
+    evaluation["opportunity_outcome_tracking"] = opportunity_tracking
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "schema_version": latest_summary.get("schema_version"),
@@ -2641,6 +2663,7 @@ def main() -> None:
         "observation_ledger": observation_summary,
         "observation_performance": observation_performance,
         "rule_outcome_tracking": evaluation.get("rule_outcome_tracking") or {},
+        "opportunity_outcome_tracking": opportunity_tracking,
         "scheduler_checkpoint_ledger": scheduler_checkpoint_ledger.aggregate_receipts(
             scheduler_checkpoint_ledger.load_receipts()
         ),
@@ -2654,6 +2677,10 @@ def main() -> None:
             name: json.loads((public_picks / name).read_text(encoding="utf-8"))
             for name in ("ui-bootstrap.json", "ui-candidates.json", "ui-events.json")
         }
+        ui_assets["ui-bootstrap.json"]["opportunity_outcome_tracking"] = compact_opportunity_tracking(opportunity_tracking)
+        (public_picks / "ui-bootstrap.json").write_text(
+            json.dumps(ui_assets["ui-bootstrap.json"], ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
+        )
         build_data_manifest_assets(
             public_latest_snapshot,
             source_snapshot_bytes,

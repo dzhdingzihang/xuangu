@@ -79,6 +79,7 @@ jobs:
           import model_observation_ledger
           import observation_outcome_ledger
           import rule_outcome_ledger
+          import opportunity_outcome_ledger
 
           cohorts = model_observation_ledger.load_observation_cohorts()
           batches = observation_outcome_ledger.load_outcome_batches()
@@ -104,6 +105,8 @@ jobs:
           for batch in rule_batches.values():
               rule_outcome_ledger.validate_rule_outcome_batch(batch)
           print(f"Validated rule settlements: snapshots={len(rule_batches)}")
+          opportunity_batches = opportunity_outcome_ledger.load_opportunity_outcome_batches()
+          print(f"Validated independent opportunity settlements: snapshots={len(opportunity_batches)}")
           PY
             )
           }
@@ -115,6 +118,7 @@ jobs:
               cd "${settlement_tree}"
               python scripts/settle_observations.py --max-workers 12 --retries 0
               python scripts/settle_rule_outcomes.py --max-workers 12 --retries 0
+              python scripts/settle_opportunity_outcomes.py --max-workers 12 --retries 0
               validate_only "${settlement_tree}"
             )
           }
@@ -201,6 +205,7 @@ jobs:
           import json
           import time
           import urllib.request
+          from scripts.verify_deployment import opportunity_history_contract_errors
 
           expected = json.load(open("public/data/picks/manifest.json", encoding="utf-8"))
           expected_untracked = int(
@@ -227,10 +232,13 @@ jobs:
                       ((live.get("history_evaluation") or {}).get("observation_performance") or {}).get("untracked_count")
                       or 0
                   )
-                  if live.get("ok") is True and actual == expected_untracked == 0:
-                      print("History settlement publication reached untracked_count=0.")
+                  opportunity_errors = opportunity_history_contract_errors(
+                      expected.get("opportunity_outcome_tracking"), live
+                  )
+                  if live.get("ok") is True and actual == expected_untracked == 0 and not opportunity_errors:
+                      print("History settlement publication reached untracked_count=0; opportunity ledger also verified.")
                       break
-                  last_error = f"untracked_count expected={expected_untracked} actual={actual}"
+                  last_error = f"untracked_count expected={expected_untracked} actual={actual}; opportunity={opportunity_errors}"
               except (OSError, ValueError, TypeError) as exc:
                   last_error = str(exc)
               if attempt < 12:
@@ -275,6 +283,8 @@ jobs:
                 -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null
               find "${settlement_tree}/data/outcomes/rule-settlements" \
                 -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null
+              find "${settlement_tree}/data/outcomes/opportunity-settlements" \
+                -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null
             )
             if ((${#settlement_files[@]})); then
               git -C "${settlement_tree}" add -- "${settlement_files[@]}"
@@ -284,6 +294,7 @@ jobs:
               case "${staged_path}" in
                 data/outcomes/observation-settlements/*.json) ;;
                 data/outcomes/rule-settlements/*.json) ;;
+                data/outcomes/opportunity-settlements/*.json) ;;
                 *)
                   echo "Refusing to commit non-observation JSON: ${staged_path}" >&2
                   git worktree remove --force "${settlement_tree}"

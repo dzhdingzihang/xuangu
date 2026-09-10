@@ -149,7 +149,11 @@ assert any('return_opportunities' in error for error in errors), errors
         snapshot = runtime_snapshot_fixture()
         snapshot["events"] = {"items": []}
         candidates = [opportunity_candidate(f"R{index:03d}") for index in range(21)]
-        metadata = {candidate["code"]: {"industry": "Semiconductors" if index < 15 else "Banking"}
+        metadata = {candidate["code"]: {"sector_metadata": {
+                        "name": "Semiconductors" if index < 15 else "Banking",
+                        "source": "verified-fixture-classification", "status": "FRESH",
+                        "retrieved_at": "2026-08-25T16:00:00-04:00", "stale": False,
+                    }}
                     for index, candidate in enumerate(candidates)}
         snapshot["return_opportunities"] = return_opportunity.build_return_opportunities(
             snapshot, {"us": candidates}, metadata_by_market={"us": metadata},

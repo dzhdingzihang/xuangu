@@ -65,6 +65,12 @@ NEGATIVE_TERMS = (
 )
 MATERIAL_FORMS = {"8-K", "10-K", "10-Q", "20-F", "6-K", "DEF 14A", "SC 13D", "SC 13D/A"}
 EVENT_CLUSTER_VERSION = "event-catalyst-clusters-v1"
+EVENT_COVERAGE_VERSION = "official-event-coverage-v2"
+SCAN_LIMITATIONS = [
+    "Bounded recent official title/filing metadata enrichment; full document content is not reviewed.",
+    "Provider response limits, pagination and filing-type filters can omit disclosures.",
+    "A successful scan does not verify the absence of material negative events.",
+]
 
 
 class EventPipelineError(RuntimeError):
@@ -588,6 +594,29 @@ def _candidate_symbols(snapshot: Mapping[str, Any], market: str, limit: int) -> 
         key=lambda symbol: (*_legacy_event_scan_priority(candidates[symbol][2], market_action), symbol),
         reverse=True,
     )
+    preliminary = snapshot.get("return_opportunities") or {}
+    if isinstance(preliminary, Mapping):
+        displayed = [row for row in preliminary.get("candidates") or []
+                     if isinstance(row, Mapping) and row.get("market") == market]
+        target_map = preliminary.get("event_scan_targets_by_market") or {}
+        targets = target_map.get(market) or [] if isinstance(target_map, Mapping) else []
+        shortlist = list(dict.fromkeys(
+            [_normalized_symbol(row, market) for row in displayed]
+            + [_normalized_symbol({"code": code}, market) for code in targets if isinstance(code, str)]
+        ))
+        shortlist = [symbol for symbol in shortlist if symbol in candidates]
+        if shortlist:
+            # Top published opportunities plus rank overscan get four fifths
+            # of the budget; a bounded reserve retains the legacy audit track.
+            reserve = min(bounded_limit, max(1, bounded_limit // 5)) if bounded_limit > 1 else 0
+            priority_symbols = shortlist[:bounded_limit - reserve]
+            legacy_slots = list(dict.fromkeys(mandatory + legacy_ordered))
+            for symbol in legacy_slots:
+                if len(priority_symbols) >= bounded_limit:
+                    break
+                if symbol not in priority_symbols:
+                    priority_symbols.append(symbol)
+            return priority_symbols
     legacy_reserve = min(selection_limit, max(1, selection_limit // 4))
     for symbol in legacy_ordered:
         if len(selected) >= legacy_reserve:
@@ -600,7 +629,9 @@ def _candidate_symbols(snapshot: Mapping[str, Any], market: str, limit: int) -> 
     return [symbol for symbol in ordered if symbol in selected][:selection_limit]
 
 
-def _collect_a_share(symbols: list[str], run_id: str, now: dt.datetime, fetch: Callable[..., Any]) -> list[dict]:
+def _collect_a_share(symbols: list[str], run_id: str, now: dt.datetime, fetch: Callable[..., Any]) -> dict:
+    if not symbols:
+        return _parallel_collect([], lambda symbol: [])
     stock_payload = _response_json(fetch("GET", "https://static.cninfo.com.cn/new/data/szse_stock.json"))
     rows = stock_payload.get("stockList") or stock_payload.get("stock_list") or []
     mapping = {str(row.get("code") or row.get("secCode")): str(row.get("orgId") or "") for row in rows if isinstance(row, Mapping)}
@@ -630,11 +661,13 @@ def _collect_a_share(symbols: list[str], run_id: str, now: dt.datetime, fetch: C
                 headers={"Referer": "https://www.cninfo.com.cn/"},
             )
         )
+        if not isinstance(payload, Mapping) or "announcements" not in payload or payload.get("announcements") is not None and not isinstance(payload["announcements"], list):
+            raise EventPipelineError("CNINFO announcement response is malformed")
         return parse_cninfo_announcements(payload, code, run_id, now=now)
     return _parallel_collect(symbols, collect_symbol)
 
 
-def _collect_hk(symbols: list[str], run_id: str, now: dt.datetime, fetch: Callable[..., Any]) -> list[dict]:
+def _collect_hk(symbols: list[str], run_id: str, now: dt.datetime, fetch: Callable[..., Any]) -> dict:
     def collect_symbol(symbol: str) -> list[dict]:
         code = symbol.replace(".HK", "").lstrip("0") or "0"
         prefix = _response_text(
@@ -656,11 +689,15 @@ def _collect_hk(symbols: list[str], run_id: str, now: dt.datetime, fetch: Callab
                 headers=_hkex_headers(),
             )
         )
+        if not re.search(r"<table\b|No records|No matching records|No record found", page, re.I):
+            raise EventPipelineError("HKEX title response is not a results page")
         return parse_hkex_titles(page, symbol, run_id, now=now)
     return _parallel_collect(symbols, collect_symbol)
 
 
-def _collect_us(symbols: list[str], run_id: str, now: dt.datetime, fetch: Callable[..., Any]) -> list[dict]:
+def _collect_us(symbols: list[str], run_id: str, now: dt.datetime, fetch: Callable[..., Any]) -> dict:
+    if not symbols:
+        return _parallel_collect([], lambda symbol: [])
     tickers = _response_json(fetch("GET", "https://www.sec.gov/files/company_tickers.json", headers=_sec_headers()))
     mapping = {
         str(row.get("ticker") or "").upper(): int(row.get("cik_str"))
@@ -675,19 +712,36 @@ def _collect_us(symbols: list[str], run_id: str, now: dt.datetime, fetch: Callab
         payload = _response_json(
             fetch("GET", f"https://data.sec.gov/submissions/CIK{cik:010d}.json", headers=_sec_headers())
         )
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("filings"), Mapping) or not isinstance(payload["filings"].get("recent"), Mapping):
+            raise EventPipelineError("SEC submissions response is malformed")
+        recent = payload["filings"]["recent"]
+        fields = ("accessionNumber", "filingDate", "acceptanceDateTime", "form", "primaryDocument")
+        if recent and (any(not isinstance(recent.get(field), list) for field in fields)
+                       or len({len(recent[field]) for field in fields}) != 1):
+            raise EventPipelineError("SEC recent filing arrays are incomplete")
         return parse_sec_submissions(payload, ticker, cik, run_id, now=now)
     return _parallel_collect(symbols, collect_symbol)
 
 
-def _parallel_collect(symbols: list[str], collector: Callable[[str], list[dict]]) -> list[dict]:
+def _parallel_collect(symbols: list[str], collector: Callable[[str], list[dict]]) -> dict:
     if not symbols:
-        return []
+        return {"items": [], "successful_symbols": [], "failed_symbols": {}}
     events: list[dict] = []
+    successful, failed = [], {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(symbols))) as executor:
         futures = {executor.submit(collector, symbol): symbol for symbol in symbols}
         for future in concurrent.futures.as_completed(futures):
-            events.extend(future.result())
-    return events
+            symbol = futures[future]
+            try:
+                collected = future.result()
+                if not isinstance(collected, list):
+                    raise EventPipelineError("Collector result must be a list")
+                events.extend(collected)
+                successful.append(symbol)
+            except Exception as exc:
+                failed[symbol] = type(exc).__name__
+    return {"items": events, "successful_symbols": sorted(successful),
+            "failed_symbols": dict(sorted(failed.items()))}
 
 
 def collect_for_snapshot(
@@ -701,18 +755,20 @@ def collect_for_snapshot(
         raise EventPipelineError("run_id is required")
     now = (now or dt.datetime.now(CN_TZ)).astimezone(CN_TZ)
     fetch = fetcher or _default_fetcher
-    limit = max(1, min(30, int(os.environ.get("EVENT_SCAN_CANDIDATES_PER_MARKET", "16"))))
+    limit = max(1, min(30, int(os.environ.get("EVENT_SCAN_CANDIDATES_PER_MARKET", "30"))))
     symbols = {market: _candidate_symbols(snapshot, market, limit) for market in SOURCE_REGISTRY}
     collectors = {"a_share": _collect_a_share, "hk": _collect_hk, "us": _collect_us}
     items: list[dict] = []
     source_manifest = []
     successful_markets = []
+    successful_symbols, failed_symbols = {}, {}
     for market, collector in collectors.items():
         entry = {
             "market": market,
             "source_id": SOURCE_REGISTRY[market]["source_id"],
             "source": SOURCE_REGISTRY[market]["source"],
             "requested_symbol_count": len(symbols[market]),
+            "requested_symbols": symbols[market],
             "scanned_symbol_count": 0,
             "official_hosts": list(SOURCE_REGISTRY[market]["hosts"]),
             "retrieved_at": now.isoformat(timespec="seconds"),
@@ -721,11 +777,27 @@ def collect_for_snapshot(
         }
         try:
             collected = collector(symbols[market], run_id, now, fetch)
-            items.extend(collected)
-            entry.update({"status": "SUCCESS", "event_count": len(collected), "scanned_symbol_count": len(symbols[market])})
-            successful_markets.append(market)
         except Exception as exc:  # Fail closed per source while preserving the other audits.
-            entry.update({"error_code": type(exc).__name__, "event_count": 0})
+            collected = {"items": [], "successful_symbols": [],
+                         "failed_symbols": {symbol: type(exc).__name__ for symbol in symbols[market]}}
+        events = collected["items"]
+        successful = collected["successful_symbols"]
+        failed = collected["failed_symbols"]
+        items.extend(events)
+        successful_symbols[market], failed_symbols[market] = successful, sorted(failed)
+        complete = len(successful) == len(symbols[market]) and not failed
+        entry.update({"status": "SUCCESS" if complete else "PARTIAL" if successful else "ERROR",
+                      "event_count": len(events), "scanned_symbol_count": len(successful),
+                      "successful_symbols": successful, "failed_symbols": sorted(failed),
+                      "error_code": next(iter(failed.values()), None),
+                      "symbol_results": {
+                          symbol: {"status": "ERROR" if symbol in failed else "SUCCESS",
+                                   "error_code": failed.get(symbol),
+                                   "event_count": sum(_normalized_symbol({"code": event.get("symbol")}, market) == symbol for event in events)}
+                          for symbol in symbols[market]
+                      }})
+        if complete:
+            successful_markets.append(market)
         source_manifest.append(entry)
     unique = {item["event_id"]: item for item in items}
     items = cluster_events(sorted(unique.values(), key=lambda item: (str(item.get("released_at") or ""), item["event_id"]), reverse=True))
@@ -733,19 +805,26 @@ def collect_for_snapshot(
     status = "READY_EMPTY" if all_success and not items else "READY" if all_success else "PARTIAL"
     pipeline = {
         "contract_version": "official-event-pipeline-v1",
+        "coverage_version": EVENT_COVERAGE_VERSION,
         "run_id": run_id,
         "status": status,
         "scanned_at": now.isoformat(timespec="seconds"),
         "markets": successful_markets,
         "markets_attempted": list(SOURCE_REGISTRY),
-        "scanned_symbols": symbols,
+        "requested_symbols": symbols,
+        "successful_symbols": successful_symbols,
+        "scanned_symbols": successful_symbols,
+        "failed_symbols": failed_symbols,
         # This official-source pass is a bounded positive-catalyst enrichment
         # sample. Full-pool execution/data/material-risk checks are published
         # separately by the decision builder and must not be conflated with
         # this network-intensive filing scan.
         "scan_purpose": "positive_event_enrichment",
-        "selection_policy": "momentum_opportunity_with_legacy_reserve_v2",
-        "legacy_reserve_fraction": 0.25,
+        "selection_policy": "preliminary_opportunity_shortlist_with_legacy_reserve_v3" if snapshot.get("return_opportunities") else "momentum_opportunity_with_legacy_reserve_v2",
+        "legacy_reserve_fraction": 0.20 if snapshot.get("return_opportunities") else 0.25,
+        "negative_clearance_verified": False,
+        "scan_scope": "bounded_official_titles_and_filing_metadata",
+        "limitations": list(SCAN_LIMITATIONS),
         "cluster_version": EVENT_CLUSTER_VERSION,
         "candidate_limit_per_market": limit,
         "source_manifest": source_manifest,
@@ -770,6 +849,34 @@ def collect_for_snapshot(
     }
 
 
+def _coverage_consistent(pipeline: Mapping, market: str, manifest: Mapping) -> bool:
+    """Check the new per-symbol ledger independently of its market status."""
+    values = []
+    for key in ("requested_symbols", "scanned_symbols", "successful_symbols", "failed_symbols"):
+        mapping = pipeline.get(key)
+        rows = mapping.get(market) if isinstance(mapping, Mapping) else None
+        if not isinstance(rows, list) or any(not isinstance(symbol, str) or not symbol for symbol in rows):
+            return False
+        normalized = [_normalized_symbol({"code": symbol}, market) for symbol in rows]
+        if len(set(normalized)) != len(normalized):
+            return False
+        values.append(set(normalized))
+    requested, scanned, successful, failed = values
+    results = manifest.get("symbol_results")
+    if not isinstance(results, Mapping):
+        return False
+    return bool(
+        scanned == successful and not successful.intersection(failed)
+        and requested == successful.union(failed)
+        and set(results) == requested
+        and manifest.get("requested_symbol_count") == len(requested)
+        and manifest.get("scanned_symbol_count") == len(scanned)
+        and all(isinstance(results[symbol], Mapping)
+                and results[symbol].get("status") == ("SUCCESS" if symbol in successful else "ERROR")
+                for symbol in requested)
+    )
+
+
 def pipeline_complete(value: Mapping[str, Any]) -> bool:
     pipeline = ((value.get("events") or {}).get("pipeline") or value.get("pipeline") or value)
     if not isinstance(pipeline, Mapping):
@@ -786,6 +893,7 @@ def pipeline_complete(value: Mapping[str, Any]) -> bool:
         and isinstance(manifest, list)
         and len(manifest) == 3
         and all(isinstance(row, Mapping) and row.get("status") == "SUCCESS" for row in manifest)
+        and all(pipeline_market_complete(pipeline, market) for market in SOURCE_REGISTRY)
     )
 
 
@@ -815,9 +923,59 @@ def pipeline_market_complete(value: Mapping[str, Any], market: str) -> bool:
             isinstance(row, Mapping)
             and row.get("source_id") == source_id
             and row.get("status") == "SUCCESS"
+            and (not pipeline.get("coverage_version") or (
+                pipeline.get("coverage_version") == EVENT_COVERAGE_VERSION
+                and _coverage_consistent(pipeline, market, row)
+                and not (pipeline.get("failed_symbols") or {}).get(market)
+            ))
             for row in manifest
         )
     )
+
+
+def candidate_scan_coverage(snapshot: Mapping[str, Any], market: str, symbol: str) -> dict[str, Any]:
+    """Return verified retrieval coverage, never a negative-event clearance.
+
+    Legacy snapshots remain readable only when their market manifest completed.
+    A new partial market can retain independently evidenced symbol successes.
+    """
+    pipeline = ((snapshot.get("events") or {}).get("pipeline") or snapshot.get("pipeline") or {})
+    pipeline = pipeline if isinstance(pipeline, Mapping) else {}
+    registry = SOURCE_REGISTRY.get(market) or {}
+    normalized = _normalized_symbol({"code": symbol}, market)
+    source = next((row for row in pipeline.get("source_manifest") or []
+                   if isinstance(row, Mapping) and row.get("source_id") == registry.get("source_id")), {})
+    requested_map, scanned_map = pipeline.get("requested_symbols") or {}, pipeline.get("scanned_symbols") or {}
+    requested = requested_map.get(market) or [] if isinstance(requested_map, Mapping) else []
+    scanned = scanned_map.get(market) or [] if isinstance(scanned_map, Mapping) else []
+    requested = [_normalized_symbol({"code": code}, market) for code in requested if isinstance(code, str)] if isinstance(requested, list) else []
+    scanned = [_normalized_symbol({"code": code}, market) for code in scanned if isinstance(code, str)] if isinstance(scanned, list) else []
+    was_requested = normalized in requested or normalized in scanned
+    result_map = source.get("symbol_results") or {}
+    symbol_result = result_map.get(normalized) or {} if isinstance(result_map, Mapping) else {}
+    symbol_result = symbol_result if isinstance(symbol_result, Mapping) else {}
+    valid_run = bool(registry and pipeline.get("contract_version") == "official-event-pipeline-v1"
+                     and isinstance(pipeline.get("run_id"), str) and pipeline.get("run_id")
+                     and pipeline.get("status") in {"READY", "READY_EMPTY", "PARTIAL"})
+    if pipeline.get("coverage_version"):
+        verified = bool(valid_run and pipeline.get("coverage_version") == EVENT_COVERAGE_VERSION
+                        and source.get("status") in {"SUCCESS", "PARTIAL"}
+                        and _coverage_consistent(pipeline, market, source)
+                        and normalized in scanned and symbol_result.get("status") == "SUCCESS")
+    else:
+        verified = bool(valid_run and pipeline_market_complete(snapshot, market) and normalized in scanned)
+    status = "SUCCESS" if verified else "ERROR" if was_requested else "NOT_SCANNED"
+    return {
+        "status": status, "verified": verified, "requested": was_requested,
+        "market": market, "symbol": normalized,
+        "source_id": registry.get("source_id"), "source": registry.get("source"),
+        "run_id": pipeline.get("run_id"), "retrieved_at": source.get("retrieved_at") or pipeline.get("scanned_at"),
+        "event_count": symbol_result.get("event_count") if verified else None,
+        "error_code": symbol_result.get("error_code") or source.get("error_code") or "SCAN_EVIDENCE_INVALID" if status == "ERROR" else None,
+        "scan_purpose": "positive_event_enrichment", "scan_scope": "bounded_official_titles_and_filing_metadata",
+        "lookback_days": pipeline.get("lookback_days", LOOKBACK_DAYS),
+        "negative_clearance_verified": False, "limitations": list(SCAN_LIMITATIONS),
+    }
 
 
 def event_is_auditable(
@@ -830,14 +988,14 @@ def event_is_auditable(
     event_market = str(item.get("market") or "")
     event_symbol = str(item.get("symbol") or "")
     registry = SOURCE_REGISTRY.get(event_market)
-    if not registry or not pipeline_market_complete(snapshot, event_market):
+    if not registry or not candidate_scan_coverage(snapshot, event_market, event_symbol)["verified"]:
         return False
     host = (urllib.parse.urlparse(str(item.get("url") or "")).hostname or "").lower()
     if not any(host == allowed or host.endswith(f".{allowed}") for allowed in registry["hosts"]):
         return False
     scanned = (pipeline.get("scanned_symbols") or {}).get(event_market) or []
     source_ok = any(
-        row.get("source_id") == item.get("source_id") and row.get("status") == "SUCCESS"
+        row.get("source_id") == item.get("source_id") == registry["source_id"] and row.get("status") in {"SUCCESS", "PARTIAL"}
         for row in (pipeline.get("source_manifest") or [])
         if isinstance(row, Mapping)
     )
@@ -856,13 +1014,14 @@ def event_is_auditable(
         and (market is None or event_market == market)
         and (symbol is None or event_symbol.lower() == str(symbol).lower())
         and generated - dt.timedelta(days=LOOKBACK_DAYS) <= released <= generated
-        and generated - dt.timedelta(days=LOOKBACK_DAYS) <= effective
+        and generated - dt.timedelta(days=LOOKBACK_DAYS) <= effective <= generated
     )
 
 
 __all__ = [
     "EventPipelineError",
     "collect_for_snapshot",
+    "candidate_scan_coverage",
     "cluster_events",
     "event_is_auditable",
     "parse_cninfo_announcements",

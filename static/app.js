@@ -1984,7 +1984,23 @@ async function applyBootstrapPayload(payload) {
     || snapshot.generated_at !== state.snapshot?.generated_at
     || snapshot.source_snapshot?.sha256 !== state.snapshot?.source_snapshot?.sha256
     || Number(snapshot.source_snapshot?.byte_size) !== Number(state.snapshot?.source_snapshot?.byte_size);
-  if (snapshotChanged) resetLazyTabData();
+  const opportunityHistoryChanged = JSON.stringify(snapshot.opportunity_outcome_tracking || null)
+    !== JSON.stringify(state.snapshot?.opportunity_outcome_tracking || null);
+  if (snapshotChanged) {
+    resetLazyTabData();
+  } else if (opportunityHistoryChanged) {
+    // A history-only publication keeps the original snapshot identity. Its
+    // updated summary must invalidate history without discarding other tabs.
+    // Changing the request id also prevents an older in-flight history response
+    // from restoring stale results after the new publication was observed.
+    state.tabData.history = {
+      status: "idle", snapshotKey: null, queryKey: "", requestId: 0, error: "",
+    };
+    state.history = [];
+    state.historyMeta = {};
+    state.historyError = "";
+    state.pagination.history = { page: 1, hasMore: false, total: 0, loading: false };
+  }
   state.bootstrap = payload;
   state.snapshot = snapshot;
   if (snapshotChanged || !state.status) {
@@ -2382,6 +2398,10 @@ async function loadTabResource(resource, { signal = null, requestId = ++tabReque
       observation_performance: responseMeta.observation_performance
         || historyEvaluation.observation_performance
         || null,
+      opportunity_outcome_tracking: payload.opportunity_outcome_tracking
+        || responseMeta.opportunity_outcome_tracking
+        || historyEvaluation.opportunity_outcome_tracking
+        || null,
     };
     state.historyError = "";
   }
@@ -2610,7 +2630,12 @@ function updateTopbar() {
   const freshnessState = state.snapshot && state.status?.ok !== false
     ? state.status?.freshness_state || "unknown"
     : "unknown";
-  const freshness = FRESHNESS_META[freshnessState] || FRESHNESS_META.unknown;
+  const sameGateSnapshot = state.schedulerGate?.snapshot_key === state.snapshot?.snapshot_key;
+  const latePublication = freshnessState === "fresh" && sameGateSnapshot
+    && state.schedulerGate?.publication_within_slo === false;
+  const freshness = latePublication
+    ? { label: "已补发 · 本批次曾延迟", icon: "ph-clock-countdown", className: "is-delayed" }
+    : FRESHNESS_META[freshnessState] || FRESHNESS_META.unknown;
   health.className = `health-badge ${freshness.className}`;
   health.innerHTML = `${icon(freshness.icon)}${freshness.label}`;
   const checkpoint = state.status?.expected_checkpoint ? dateTime(state.status.expected_checkpoint) : "--";
@@ -3246,6 +3271,12 @@ const RETURN_OPPORTUNITY_RISK_LABELS = {
   EXTENDED_PRICE_REQUIRES_PATIENCE: "价格偏离均线较远，需核验追高风险",
   SECTOR_METADATA_MISSING: "行业元数据缺失，行业强度暂不能可靠比较",
   SECTOR_PEER_SAMPLE_INSUFFICIENT: "同行样本不足，行业强度证据有限",
+  SECTOR_METADATA_STALE: "行业分类缓存已过期，本轮不据此判断行业强弱",
+  SECTOR_METADATA_APPROXIMATE: "当前只有主题近似标签，不等于供应商正式行业分类",
+  SECTOR_METADATA_UNVERIFIED: "行业分类来源未核验，本轮不据此判断行业强弱",
+  OFFICIAL_EVENT_NOT_SCANNED: "本轮尚未扫描该股官方披露，不能视为没有负面公告",
+  OFFICIAL_EVENT_SCAN_ERROR: "本轮官方披露查询失败，需补充检查",
+  NEGATIVE_EVENT_COVERAGE_INCOMPLETE: "官方标题扫描不能排除全部负面事件及正文风险",
   CATALYST_MATERIALITY_UNQUANTIFIED: "事件的重要性尚未量化，需核对影响规模",
 };
 
@@ -3309,6 +3340,27 @@ function opportunitySector(row) {
     ? sector.name : "行业未识别";
 }
 
+function opportunityEventCoverage(row) {
+  const coverage = row?.event_coverage;
+  if (coverage?.status === "SUCCESS" && coverage?.verified === true) {
+    return { label: "官方披露已扫描", tone: "primary", detail: "已完成所列官方来源的有界扫描，不等于已排除全部负面风险。" };
+  }
+  if (coverage?.status === "ERROR") {
+    return { label: "公告扫描失败", tone: "warning", detail: "来源查询失败，当前没有充分的公告排雷证据。" };
+  }
+  return { label: "公告尚未扫描", tone: "warning", detail: "本轮未完成该股官方来源扫描；缺少事件不能当成确认无负面。" };
+}
+
+function renderOpportunityEvidence(row, expanded = false) {
+  const event = opportunityEventCoverage(row);
+  const sector = row?.sector || {};
+  const source = typeof sector.source === "string" ? sector.source : "来源待补充";
+  const observedAt = sector.retrieved_at ? ` · ${dateTime(sector.retrieved_at)}` : "";
+  const sectorState = { KNOWN: "供应商分类", STALE: "分类已过期", APPROXIMATE: "主题近似", UNVERIFIED: "分类未核验", MISSING: "分类缺失" }[sector.status] || "分类未核验";
+  const sectorTone = sector.status === "KNOWN" ? "" : "warning";
+  return `<div class="opportunity-evidence"><span class="${sectorTone}" title="${esc(source + observedAt)}">${icon("ph-factory")} ${esc(opportunitySector(row))} · ${esc(sectorState)}</span><span class="${event.tone}" title="${esc(event.detail)}">${icon("ph-file-magnifying-glass")} ${esc(event.label)}</span>${expanded ? `<p>行业来源：${esc(source + observedAt)}；${esc(sectorState)}。${esc(event.detail)}</p>` : ""}</div>`;
+}
+
 function renderReturnOpportunityCard(row) {
   const quote = row.reference_quote || {};
   const metrics = row.metrics || {};
@@ -3322,6 +3374,7 @@ function renderReturnOpportunityCard(row) {
     <header><span class="return-rank">${row.rank === 1 ? icon("ph-trend-up") : `0${row.rank}`}<b>${row.rank === 1 ? "本轮研究首位" : `机会 #${row.rank}`}</b></span>${marketBadge(row.market)}<small>${esc(MARKET_META[row.market].label)} #${row.market_rank}</small></header>
     <div class="return-opportunity-identity"><div><h3>${esc(row.name || row.code)}</h3><p>${esc(row.code)} <span>${esc(opportunitySector(row))}</span></p></div><div class="return-opportunity-score"><strong>${fmt(row.opportunity_score, 1)}</strong><small>机会分 / 100</small></div></div>
     <div class="return-opportunity-quote"><strong>${quoteValid ? `${price(quote.price)} ${esc(quote.currency || MARKET_META[row.market].currency)}` : "参考行情待核验"}</strong><span>${quoteValid ? `${esc(dateTime(quote.source_as_of))} · ${esc(quote.source)}` : "价格、来源、时间不完整"}</span></div>
+    ${renderOpportunityEvidence(row)}
     <dl class="return-opportunity-metrics"><div><dt>10 日历史波动情景</dt><dd>${esc(opportunityScenario(row))}</dd></div><div><dt>已实现 20 日涨跌</dt><dd>${finiteRuleNumber(metrics.return_20d_pct) ? pct(metrics.return_20d_pct, 1) : "未提供"}</dd></div></dl>
     <p class="return-scenario-note">${range ? `近 ${range.source_observations} 个观测 · ` : ""}未校准，情景上下沿不是预期收益</p>
     ${reasons.length ? `<ul class="return-opportunity-reasons">${reasons.map((reason) => `<li>${icon("ph-check")}<span>${esc(reason)}</span></li>`).join("")}</ul>` : `<div class="return-component-list">${components.map(([name, value]) => `<span>${esc(RETURN_OPPORTUNITY_COMPONENT_LABELS[name] || name)} <b>${fmt(value.score, 1)}</b></span>`).join("") || "分项依据待发布"}</div>`}
@@ -3373,7 +3426,7 @@ function renderReturnOpportunityDetail(candidate, market) {
   const row = view.rows.find((item) => candidateId(item, item.market) === candidateId(candidate, market));
   if (!row) return "";
   const components = Object.entries(row.components || {}).filter(([, value]) => finiteRuleNumber(value?.score));
-  return `<section class="return-opportunity-detail"><header><div><small>两周收益机会 · 云端 #${row.rank}</small><h3>机会分 ${fmt(row.opportunity_score, 1)} <span>/ 100</span></h3></div>${badge("规则研究 · 非概率", "primary")}</header><p>${esc(opportunitySector(row))} · ${esc(opportunityScenario(row))} · 历史情景未校准</p><dl>${components.map(([name, part]) => `<div><dt>${esc(RETURN_OPPORTUNITY_COMPONENT_LABELS[name] || name)}</dt><dd>${fmt(part.score, 1)}<small>权重 ${opportunityMetric(finiteRuleNumber(part.weight) ? part.weight * 100 : null, "%", 0)}</small></dd></div>`).join("")}</dl><footer>云端按相同研究口径排序；这份分数不表示预期获利或交易资格。</footer></section>`;
+  return `<section class="return-opportunity-detail"><header><div><small>两周收益机会 · 云端 #${row.rank}</small><h3>机会分 ${fmt(row.opportunity_score, 1)} <span>/ 100</span></h3></div>${badge("规则研究 · 非概率", "primary")}</header><p>${esc(opportunitySector(row))} · ${esc(opportunityScenario(row))} · 历史情景未校准</p>${renderOpportunityEvidence(row, true)}<dl>${components.map(([name, part]) => `<div><dt>${esc(RETURN_OPPORTUNITY_COMPONENT_LABELS[name] || name)}</dt><dd>${fmt(part.score, 1)}<small>权重 ${opportunityMetric(finiteRuleNumber(part.weight) ? part.weight * 100 : null, "%", 0)}</small></dd></div>`).join("")}</dl><footer>云端按相同研究口径排序；这份分数不表示预期获利或交易资格。</footer></section>`;
 }
 
 function renderDecision() {
@@ -4450,6 +4503,28 @@ function renderObservationLedgerPanel(observationLedger, observationPerformance)
   return `<section class="panel shadow-evaluation-panel"><header class="panel-header"><div><h3 class="panel-title">模型观察轨</h3><p class="panel-subtitle">每天 22:47 固化全部点时预测，并以独立观察合同跟踪成熟、数据缺口与结算结果</p></div><span class="status-pill ${tone}" title="${esc(authorizationStatus)}">${esc(status)}</span></header><div class="shadow-ledger-grid"><div><small>cohort / 预测</small><strong>${contractPublished ? `${fmt(cohortCount, 0)} / ${fmt(predictionCount, 0)}` : "—"}</strong><span>${esc(ledgerCopy)}</span></div><div><small>PENDING_MATURITY</small><strong>${countValue("pending_maturity_count")}</strong><span>尚未走满预测窗口</span></div><div><small>PENDING_DATA</small><strong>${countValue("pending_data_count")}</strong><span>已到期但结算证据不完整</span></div><div><small>SETTLED</small><strong>${countValue("settled_count")}</strong><span>${esc(diagnosticCopy)}</span></div></div><footer>${icon("ph-database")}<span><b>${esc(authorizationStatus)}</b> · ${esc(statusCopy)} ${esc(isolationCopy)}</span></footer></section>`;
 }
 
+function renderOpportunityOutcomeHistory(summary) {
+  const valid = isRecord(summary) && summary.schema_version === "opportunity-performance-v1"
+    && summary.track === "RETURN_OPPORTUNITY" && summary.authorizes_production === false
+    && summary.calibrated === false && Array.isArray(summary.by_version);
+  if (!valid) {
+    return `<section class="opportunity-outcome-history"><header><div><small>独立研究轨</small><h2>机会榜 · 10 日真实后续表现</h2></div>${badge("等待登记", "warning")}</header><p>等待云端发布独立跟踪台账。不会用旧 V4、双低或影子模型的收益替代新机会榜成绩。</p></section>`;
+  }
+  const rows = Array.isArray(summary.recent_outcomes) ? summary.recent_outcomes.slice(0, 12) : [];
+  const versions = summary.by_version;
+  const returnText = (value) => finiteRuleNumber(value) ? pct(value * 100, 2) : "—";
+  const labels = { PENDING_MATURITY: "未到期", PENDING_DATA: "待补行情", SETTLED: "已结算" };
+  const count = (value) => Number.isInteger(value) && value >= 0 ? fmt(value, 0) : "—";
+  return `<section class="opportunity-outcome-history" aria-labelledby="opportunityOutcomeTitle">
+    <header><div><small>独立研究轨 · 不混入旧策略成绩</small><h2 id="opportunityOutcomeTitle">机会榜 · 10 日真实后续表现</h2></div>${badge(summary.settled_count > 0 ? "持续观察 · 未验证盈利能力" : "积累中 · 尚无到期结果", "primary")}</header>
+    <p>冻结当时发布的排名与评分，按核验发布后第一个交易日开盘至第 10 日收盘跟踪，扣除统一费用假设并对比市场基准。这是可复核的跟踪测算，不是账户实盘收益。</p>
+    <div class="opportunity-tracking-kpis"><div><small>已登记机会</small><b>${count(summary.prediction_count)}</b></div><div><small>等待到期</small><b>${count(summary.pending_maturity_count)}</b></div><div><small>待补价格证据</small><b>${count(summary.pending_data_count)}</b></div><div><small>已结算</small><b>${count(summary.settled_count)}</b></div><div><small>独立入场日期</small><b>${count(summary.independent_entry_date_count)}</b></div><div><small>首批到期</small><b>${esc(summary.first_maturity_date || "尚未登记")}</b></div></div>
+    <p class="opportunity-history-note">同一天的多次刷新、相同股票和重叠持有期并不是独立交易样本。不同评分版本分开观察；刚登记的批次可能在下一次历史发布后出现。</p>
+    ${versions.length ? `<div class="opportunity-history-table"><table><thead><tr><th>评分版本</th><th>记录 / 已结算</th><th>独立日期</th><th>平均净收益</th><th>平均超额</th><th>正收益比例</th></tr></thead><tbody>${versions.map((row) => `<tr><td title="${esc(row.score_version_id || "")}">${esc(row.score_version || row.model_id || row.score_version_id || "未知版本")}</td><td>${count(row.prediction_count)} / ${count(row.settled_count)}</td><td>${count(row.independent_entry_date_count)}</td><td>${returnText(row.mean_net_return)}</td><td>${returnText(row.mean_excess_return)}</td><td>${returnText(row.win_rate)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${rows.length ? `<details class="opportunity-history-records" open><summary>最近登记的 ${rows.length} 条记录 · 保留原始排名</summary><div class="opportunity-history-table"><table><thead><tr><th>股票 / 市场</th><th>当时排名 / 分数</th><th>跟踪窗口</th><th>状态</th><th>净收益</th><th>超额收益</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${esc(row.name || row.code)}<small>${esc(row.code)} · ${esc(MARKET_META[row.market]?.label || row.market)}</small></td><td>#${count(row.rank)} / ${opportunityMetric(row.opportunity_score)}</td><td>${esc(row.entry_trade_date || "—")}<small>至 ${esc(row.forecast_end_trade_date || "—")}</small></td><td>${badge(labels[row.status] || "待核验", row.status === "SETTLED" ? "primary" : "warning")}</td><td>${row.status === "SETTLED" ? returnText(row.net_total_return) : "—"}</td><td>${row.status === "SETTLED" ? returnText(row.net_excess_return) : "—"}</td></tr>`).join("")}</tbody></table></div></details>` : `<p>尚无登记记录；发布核验成功后自动登记，不追溯生成历史赢家。</p>`}
+  </section>`;
+}
+
 function renderHistory() {
   const root = $("#historyView");
   const currentArchive = $("details.history-archive");
@@ -4522,6 +4597,7 @@ function renderHistory() {
   const latestRuleItem = state.history.find((item) => item.production_decision?.action === "QUALIFIED_PICK" && item.production_decision?.primary);
   const latestRulePrimary = latestRuleItem?.production_decision?.primary;
   root.innerHTML = `
+    ${renderOpportunityOutcomeHistory(meta.opportunity_outcome_tracking)}
     <div class="principle-strip"><span><b>评估原则</b> 校准可执行绩效、规则资格历史与 Shadow 研究轨三者分开；所有绩效指标只读取后端发布的合法结算合同。</span><small class="${performanceState.tone}">${esc(performance.schema_version || "PERFORMANCE_CONTRACT_MISSING")}</small></div>
     <section class="evaluation-not-ready is-${esc(sampleStatus.toLowerCase())}">
       <div><span class="status-pill ${performanceState.tone}">${esc(performanceState.label)}</span>${sampleStatus === "EARLY_SAMPLE" ? `<span class="status-pill warning early-sample-badge">早期样本</span>` : ""}<h2>${esc(performanceState.title)}</h2><p>${esc(coverageSentence)}</p><strong>${esc(cohortCopy)}</strong></div>
@@ -4854,9 +4930,9 @@ function schedulerHealthPresentation() {
     ? status.cloudflare_dispatch_enabled
     : gateOnlyFallback ? gate.cloudflare_dispatch_enabled : null;
   const cloudflareDispatchLabel = cloudflareDispatchEnabled === true
-    ? "可选 dispatch 已启用"
+    ? "独立触发凭据已配置（实际准点率以台账为准）"
     : cloudflareDispatchEnabled === false
-      ? "可选 dispatch 未启用（不影响主调度）"
+      ? "独立触发未启用 · 仅依赖 GitHub 定时与补发"
       : "可选 dispatch 状态未知";
   const hasBatchPublicationEvidence = Boolean(
     v2ContractReady
@@ -4915,6 +4991,18 @@ function schedulerHealthPresentation() {
   };
 }
 
+function renderOpportunityCoverage() {
+  const board = state.snapshot?.return_opportunities;
+  if (!board?.market_summaries) return "";
+  const metadata = state.snapshot?.sector_metadata_coverage?.markets || {};
+  const visible = Array.isArray(board.candidates) ? board.candidates : [];
+  const scanned = visible.filter((row) => row.event_coverage?.status === "SUCCESS" && row.event_coverage?.verified === true).length;
+  const displayCount = (value) => Number.isInteger(value) && value >= 0 ? fmt(value, 0) : "—";
+  return `<section class="opportunity-outcome-history"><header><div><small>机会榜证据覆盖 · 本次快照</small><h2>行业分类与公告扫描</h2></div>${badge(`展示机会已扫官方源 ${scanned} / ${visible.length}`, scanned === visible.length && visible.length ? "primary" : "warning")}</header>
+    <div class="opportunity-history-table"><table><thead><tr><th>市场</th><th>本轮评估</th><th>新鲜供应商分类</th><th>有效量价比较池</th><th>该池已识别行业</th><th>官方来源已扫描</th></tr></thead><tbody>${MARKET_ORDER.map((market) => { const stats = board.market_summaries[market] || {}; const coverage = metadata[market] || {}; return `<tr><td>${esc(MARKET_META[market].label)}</td><td>${displayCount(stats.evaluated_count)}</td><td>${displayCount(coverage.fresh_count)} / ${displayCount(coverage.candidate_count)}</td><td>${displayCount(stats.data_valid_count)}</td><td>${displayCount(stats.sector_known_count)}</td><td>${displayCount(stats.event_scanned_count)} / ${displayCount(stats.evaluated_count)}</td></tr>`; }).join("")}</tbody></table></div>
+    <p>分类来自供应商实际字段；A/港股为行业，美股为较宽的板块。过期或近似标签不参与行业强弱计分。官方扫描优先覆盖机会榜，但不等于已排除所有负面消息；未扫描与查询失败会逐股提示。</p></section>`;
+}
+
 function renderHealth() {
   const root = $("#healthView");
   const truth = globalDecisionTruth();
@@ -4963,6 +5051,7 @@ function renderHealth() {
   const eventStats = publishedEventStats();
   root.innerHTML = `
     <div class="principle-strip"><span><b>判断原则</b> 任务运行成功、行情覆盖完整、本轮有界扫描完整和两条决策轨可用是不同的事。</span><small class="${ruleUsable || usable ? "positive" : "negative"}">当前：规则轨 ${esc(production.action)} · 校准轨 ${esc(truth.action)}</small></div>
+    ${renderOpportunityCoverage()}
     <div class="callout ${ruleUsable ? "info" : historicalOnly ? "warning" : usable ? "" : "negative"} health-alert">${icon(ruleUsable || usable ? "ph-check-circle" : "ph-warning-octagon")}<div><strong>${ruleUsable ? `规则资格轨已通过：${esc(production.primary.name || production.primary.code)}` : historicalOnly ? "快照已过期：当前合格候选强制为 0" : usable ? "校准跨市场候选契约完整" : "两条决策轨当前均未放行候选"}</strong><br>${ruleUsable ? `资格分 ${fmt(production.qualificationScore, 1)}（非概率）；校准轨仍为 ${esc(truth.action)}，原因：${esc(blockers.slice(0, 4).join("；") || "未发布校准候选")}。` : historicalOnly ? `历史发布合格 ${fmt(production.historicalQualifiedCount, 0)} 只，只供研究；暂停执行并等待 fresh 新快照。` : usable ? "概率、净效用、成本、尾部风险、市场覆盖和官方证据均已通过契约校验。" : esc(blockers.slice(0, 5).join("；") || production.blockerCodes.join("；") || "没有候选通过门禁。")}</div></div>
     ${renderKpis([
       { icon: "ph-seal-check", label: "当前规则合格", value: fmt(production.currentQualifiedCount, 0), tone: ruleUsable ? "positive" : historicalOnly ? "warning" : "negative", meta: `历史发布合格 ${fmt(production.historicalQualifiedCount, 0)} 只 · 非概率` },

@@ -463,7 +463,7 @@ AbortSignal.any = savedAny;
         self.assertIn('getJson("/api/gate-status", { signal })', self.js)
         self.assertIn("GitHub Actions 主调度", self.js)
         self.assertIn("Cloudflare dispatch（可选）", self.js)
-        self.assertIn("可选 dispatch 未启用（不影响主调度）", self.js)
+        self.assertIn("独立触发未启用 · 仅依赖 GitHub 定时与补发", self.js)
         self.assertIn("watchdog 状态未知", self.js)
         self.assertIn("30 分钟 watchdog 已配置", self.js)
         self.assertIn("github_actions_primary_with_30m_watchdog", self.js)
@@ -580,7 +580,7 @@ assert.equal(validActiveRefreshStatus({
 let view = schedulerHealthPresentation();
 assert.equal(view.primaryState, "ENABLED");
 assert.equal(view.primaryLabel, "GitHub Actions 主调度已启用");
-assert.equal(view.cloudflareDispatchLabel, "可选 dispatch 未启用（不影响主调度）");
+assert.equal(view.cloudflareDispatchLabel, "独立触发未启用 · 仅依赖 GitHub 定时与补发");
 assert.equal(view.contractLabel, "scheduler-health-v2");
 assert.equal(view.schedulerGapLabel, "无");
 assert.equal(view.gapLabel, "scheduler-health-v2 · 调度缺口：无");

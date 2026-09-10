@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 import model_observation_ledger
 import observation_outcome_ledger
+import opportunity_outcome_ledger
 
 
 def read_json(path: pathlib.Path) -> dict[str, Any]:
@@ -349,6 +350,24 @@ def merge_payload(payload_root: pathlib.Path, archive_tree: pathlib.Path) -> dic
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError(f"unsafe payload path: {relative}")
         target = archive_data / relative
+        if relative.parts[:2] == ("outcomes", "opportunity-settlements"):
+            if len(relative.parts) != 3 or source.suffix != ".json":
+                raise ValueError(f"unsafe opportunity batch path: {relative}")
+            incoming = opportunity_outcome_ledger.validate_opportunity_outcome_batch(read_json(source))
+            if incoming["snapshot_key"] != source.name:
+                raise ValueError("opportunity filename identity mismatch")
+            if target.exists():
+                existing = opportunity_outcome_ledger.validate_opportunity_outcome_batch(read_json(target))
+                merged = opportunity_outcome_ledger.merge_opportunity_batches(existing, incoming)
+                if merged == existing:
+                    counters["unchanged" if incoming == existing else "preserved_newer"] += 1
+                else:
+                    _write_json(target, merged)
+                    counters["updated"] += 1
+            else:
+                _write_json(target, incoming)
+                counters["copied"] += 1
+            continue
         if relative == pathlib.Path("picks/latest.json"):
             if preserve_latest:
                 counters["preserved_newer"] += 1

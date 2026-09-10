@@ -37,6 +37,8 @@ import model_observation_ledger
 import observation_outcome_ledger
 import production_rule_model
 import return_opportunity
+import sector_metadata
+import opportunity_outcome_ledger
 import rule_outcome_ledger
 
 try:
@@ -908,6 +910,29 @@ def opportunity_reference_metadata() -> dict:
             for row in market_universe(market_key)
         }
     return result
+
+
+def prepare_opportunity_evidence(snapshot: dict, *, moment: dt.datetime | None = None) -> None:
+    """Enrich a new generation only; historical reads never call providers.
+
+    The preliminary ranking is a scan target, not a published answer. Final
+    scoring runs after the official-source pass and sees its per-symbol state.
+    """
+    moment = moment or now_cn()
+    pools = {
+        market: _section_candidate_pool(section)
+        for market, section in (snapshot.get("markets") or {}).items()
+    }
+    metadata, diagnostics = sector_metadata.enrich_sector_metadata(
+        opportunity_reference_metadata(), pools, now=moment,
+        cache_path=CACHE / "runtime-cache" / "sector_metadata.json",
+    )
+    snapshot["opportunity_metadata"] = metadata
+    snapshot["sector_metadata_coverage"] = diagnostics
+    snapshot["feature_cutoff_at"] = now_cn().isoformat(timespec="microseconds")
+    snapshot["return_opportunities"] = return_opportunity.build_return_opportunities(
+        snapshot, pools, metadata_by_market=metadata,
+    )
 
 
 def _dynamic_neutral_lens(market_key: str) -> dict:
@@ -2651,6 +2676,13 @@ def history_payload(limit: int = 30, view: str = "daily") -> dict:
     meta["observation_ledger"] = observation_summary
     meta["observation_performance"] = observation_performance
     meta["rule_outcome_tracking"] = evaluation["rule_outcome_tracking"]
+    opportunity_tracking = opportunity_outcome_ledger.evaluate_opportunity_performance(
+        opportunity_outcome_ledger.load_opportunity_outcome_batches(
+            OUTCOMES / "opportunity-settlements"
+        )
+    )
+    meta["opportunity_outcome_tracking"] = opportunity_tracking
+    evaluation["opportunity_outcome_tracking"] = opportunity_tracking
     return {
         "ok": True,
         "time": now_cn().isoformat(timespec="seconds"),
@@ -5078,7 +5110,7 @@ def enrich_snapshot_v2(snapshot: dict) -> dict:
         snapshot["return_opportunities"] = return_opportunity.build_return_opportunities(
             snapshot,
             {market: _section_candidate_pool(section) for market, section in markets.items()},
-            metadata_by_market=opportunity_reference_metadata(),
+            metadata_by_market=snapshot.get("opportunity_metadata") or opportunity_reference_metadata(),
         )
     for section in markets.values():
         if isinstance(section, dict):
@@ -8932,6 +8964,7 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
             "us": us_scored["candidates"],
         },
     )
+    prepare_opportunity_evidence(result)
     run_id = str((result.get("automation") or {}).get("run_id") or "")
     if event_pipeline is not None:
         try:
