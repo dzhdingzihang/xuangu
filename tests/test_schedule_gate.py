@@ -346,6 +346,90 @@ class ScheduleGateTests(unittest.TestCase):
         )
         self.assertIsNone(source)
 
+    def test_source_recovery_consumes_only_its_published_logical_invocation(self) -> None:
+        checkpoint = dt.datetime.fromisoformat("2026-09-10T20:17:00+08:00")
+        primary = checkpoint
+        watchdog = checkpoint.replace(minute=47)
+        now = checkpoint.replace(hour=21, minute=0)
+        degraded = healthy_snapshot("2026-09-10T20:55:00+08:00")
+        degraded["markets"]["us"]["pool_health"] = {
+            "status": "degraded", "reason_codes": ["DYNAMIC_DISCOVERY_PARTIAL"],
+        }
+        degraded["automation"] = {
+            "trigger": "schedule",
+            "run_id": "34479391622:1",
+            "scheduled_slot": checkpoint.isoformat(),
+            "scheduled_invocation_slot": watchdog.isoformat(),
+        }
+
+        def check(snapshot, invocation, slot=checkpoint):
+            return self.module.published_checkpoint_source(
+                slot, status_url="https://example.test/api/latest",
+                invocation=invocation, now=now, url_loader=lambda _url: snapshot,
+            )
+
+        for invocation in (primary, watchdog):
+            with self.subTest(duplicate_invocation=invocation):
+                self.assertEqual(check(degraded, invocation), "live_recovery_invocation_consumed")
+        self.assertIn("DYNAMIC_DISCOVERY_PARTIAL", self.module.snapshot_data_source_recovery_reasons(degraded))
+
+        primary_published = copy.deepcopy(degraded)
+        primary_published["automation"]["scheduled_invocation_slot"] = primary.isoformat()
+        self.assertIsNone(check(primary_published, watchdog), "A new watchdog may recover a degraded primary")
+        new_checkpoint = checkpoint.replace(hour=22, minute=47)
+        self.assertIsNone(check(degraded, new_checkpoint, new_checkpoint))
+        # An old invocation completing very late must not consume the new
+        # checkpoint's budget merely because generated_at is newer.
+        late_old = {**degraded, "generated_at": "2026-09-10T23:00:00+08:00"}
+        self.assertIsNone(self.module.published_checkpoint_source(
+            new_checkpoint, status_url="https://example.test/api/latest",
+            invocation=new_checkpoint, now=new_checkpoint.replace(hour=23, minute=30),
+            url_loader=lambda _url: late_old,
+        ))
+
+        # Healthy data from a manual or another scheduled invocation still
+        # suppresses an unnecessary repeat using source health, not this budget.
+        self.assertEqual(check(healthy_snapshot("2026-09-10T20:55:00+08:00"), watchdog), "live")
+
+    def test_unknown_or_inconsistent_recovery_chronology_does_not_consume_budget(self) -> None:
+        checkpoint = dt.datetime.fromisoformat("2026-09-10T20:17:00+08:00")
+        degraded = healthy_snapshot("2026-09-10T20:55:00+08:00")
+        degraded["markets"]["us"]["pool_health"]["reason_codes"] = ["DYNAMIC_DISCOVERY_PARTIAL"]
+        automation = {
+            "trigger": "schedule", "run_id": "34479391622:1",
+            "scheduled_slot": checkpoint.isoformat(),
+            "scheduled_invocation_slot": "2026-09-10T20:47:00+08:00",
+        }
+        cases = [
+            {}, {**automation, "trigger": "workflow_dispatch"},
+            {**automation, "run_id": ""},
+            {**automation, "scheduled_slot": "2026-09-10T16:17:00+08:00"},
+            {**automation, "scheduled_invocation_slot": "2026-09-10T22:47:00+08:00"},
+            {**automation, "scheduled_invocation_slot": "2026-09-10T20:47:00"},
+        ]
+        for value in cases:
+            with self.subTest(automation=value):
+                snapshot = {**degraded, "automation": value}
+                self.assertIsNone(self.module.published_checkpoint_source(
+                    checkpoint, status_url="https://example.test/api/latest",
+                    invocation=checkpoint, now=checkpoint.replace(hour=21, minute=0),
+                    url_loader=lambda _url: snapshot,
+                ))
+        future_snapshot = {**degraded, "automation": automation, "generated_at": "2026-09-11T20:55:00+08:00"}
+        self.assertIsNone(self.module.published_checkpoint_source(
+            checkpoint, status_url="https://example.test/api/latest", invocation=checkpoint,
+            now=checkpoint.replace(hour=21, minute=0), url_loader=lambda _url: future_snapshot,
+        ))
+
+    def test_consumed_recovery_skip_does_not_claim_healthy_publication(self) -> None:
+        output = self._run_main(
+            "2026-09-10T20:59:00+08:00",
+            published_source="live_recovery_invocation_consumed", cron="47 12 * * 1-5",
+        )
+        self.assertIn("should_run=false", output)
+        self.assertIn("reason=source_recovery_already_attempted", output)
+        self.assertNotIn("reason=slot_already_published", output)
+
     def test_stale_or_degraded_live_state_never_suppresses_recovery(self) -> None:
         slot = dt.datetime.fromisoformat("2026-08-21T08:17:00+08:00")
         cases = {

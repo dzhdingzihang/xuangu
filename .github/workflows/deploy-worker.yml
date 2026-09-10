@@ -100,6 +100,11 @@ jobs:
           node-version: "22"
           cache: npm
 
+      - name: Install Node dependencies
+        if: steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true'
+        # Fail an incompatible lockfile before the expensive provider pass.
+        run: npm ci
+
       - name: Install Python dependencies
         if: steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true'
         run: pip install -r requirements.txt
@@ -160,6 +165,9 @@ jobs:
             sector-metadata-v1-
 
       - name: Generate smart pick snapshot
+        # The three attempts share one budget, leaving room for validation,
+        # publication, exact rollback, and independent ledger artifacts.
+        timeout-minutes: 20
         if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         env:
           AUTOMATION_TRIGGER: ${{ steps.trigger_context.outputs.scheduled_like == 'true' && 'schedule' || github.event_name }}
@@ -188,6 +196,7 @@ jobs:
           done
 
       - name: Update isolated outcome ledgers
+        timeout-minutes: 5
         if: (github.event_name == 'workflow_dispatch' && steps.trigger_context.outputs.scheduled_like != 'true') || steps.schedule_gate.outputs.should_run == 'true'
         run: |
           # Run after generation so eligible formal and research predictions are
@@ -327,10 +336,6 @@ jobs:
           path: ${{ runner.temp }}/snapshot-recovery-${{ github.run_id }}
           if-no-files-found: error
           retention-days: 30
-
-      - name: Install Node dependencies
-        if: (steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true') && (steps.trigger_context.outputs.scheduled_like != 'true' || steps.publish_guard.outputs.should_publish == 'true')
-        run: npm ci
 
       - name: Build Worker assets
         if: (steps.trigger_context.outputs.scheduled_like != 'true' || steps.schedule_gate.outputs.should_run == 'true') && (steps.trigger_context.outputs.scheduled_like != 'true' || steps.publish_guard.outputs.should_publish == 'true')

@@ -1694,7 +1694,23 @@ def summarize_return_opportunities(snapshot: dict) -> dict | None:
             for row in coverage_rows:
                 for key in common_policy:
                     row.pop(key, None)
-    result["primary"] = result["candidates"][0] if result["candidates"] else None
+    # The full primary is already present at rank 1. Keep an explicit, checked
+    # reference instead of duplicating every source/evidence block at startup.
+    result["primary_projection"] = "rank-one-identity-v1"
+    result["primary"] = {
+        key: result["candidates"][0][key]
+        for key in ("market", "code", "rank", "opportunity_score")
+    } if result["candidates"] else None
+    sectors = [row.get("sector") for row in result["candidates"]]
+    if sectors and all(isinstance(row, dict) for row in sectors):
+        common = {key: copy.deepcopy(sectors[0][key])
+                  for key in ("source", "source_field", "granularity", "retrieved_at", "status", "stale", "age_days", "refresh_status", "verified", "evidence_type")
+                  if key in sectors[0] and all(row.get(key) == sectors[0][key] and key in row for row in sectors)}
+        if common:
+            result["sector_policy"] = common
+            for row in sectors:
+                for key in common:
+                    row.pop(key, None)
     return result
 
 
@@ -1705,7 +1721,11 @@ def compact_opportunity_tracking(tracking: dict | None) -> dict:
     recent = result.get("recent_outcomes") or []
     result["version_count"] = len(versions)
     result["by_version_truncated"] = len(versions) > 4
-    result["by_version"] = [{k: v for k, v in row.items() if k != "score_identity"} for row in versions[:4]]
+    result["ranking_evaluation_preview"] = bool(result.pop("ranking_evaluation", None)) or any(
+        row.get("ranking_evaluation") for row in versions
+    )
+    version_fields = {"score_version_id", "score_version", "prediction_count", "settled_count", "pending_maturity_count", "pending_data_count", "independent_entry_date_count", "mean_net_return", "mean_excess_return", "win_rate"}
+    result["by_version"] = [{k: v for k, v in row.items() if k in version_fields} for row in versions[:4]]
     result["recent_outcomes_available_count"] = len(recent)
     result["recent_outcomes"] = recent[:3]
     return result

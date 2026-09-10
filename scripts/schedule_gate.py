@@ -593,18 +593,27 @@ def published_checkpoint_source(
     slot: dt.datetime,
     *,
     status_url: str | None,
+    invocation: dt.datetime | None = None,
+    now: dt.datetime | None = None,
     url_loader: Callable[[str], dict] = load_json_url,
 ) -> str | None:
-    """Return live only when production proves a healthy slot is published.
+    """Suppress healthy slots or an already-published recovery invocation.
 
     A checked-out latest file only proves that data reached the repository. It
     does not prove that the corresponding deployment succeeded, so local data
-    must never suppress a scheduled recovery run.
+    must never suppress a scheduled recovery run. Degraded publication consumes
+    only its logical invocation: a later watchdog or a new checkpoint still
+    gets its own attempt. This bounds late-cron/dual-dispatch duplication without
+    relabeling degraded data healthy or erasing historical misses.
     """
     if status_url:
         try:
             live_snapshot = url_loader(status_url)
             if snapshot_covers_checkpoint(live_snapshot, slot):
+                generated = dt.datetime.fromisoformat(str(live_snapshot["generated_at"]))
+                if now is not None and as_cn_time(generated) > as_cn_time(now):
+                    print("Live checkpoint has a future generation timestamp; recovery remains eligible")
+                    return None
                 reasons = snapshot_data_source_recovery_reasons(live_snapshot)
                 if not reasons:
                     return "live"
@@ -612,9 +621,46 @@ def published_checkpoint_source(
                     "Live snapshot covers the checkpoint but needs source recovery: "
                     + ",".join(reasons)
                 )
+                if invocation is not None and now is not None and snapshot_consumed_invocation(
+                    live_snapshot, slot, invocation, now=now
+                ):
+                    print(
+                        "::warning::Source recovery budget consumed for this logical invocation; "
+                        "source degradation remains unresolved. The next watchdog/checkpoint may retry."
+                    )
+                    return "live_recovery_invocation_consumed"
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             print(f"Live checkpoint check unavailable: {exc}")
     return None
+
+
+def snapshot_consumed_invocation(
+    snapshot: dict, slot: dt.datetime, invocation: dt.datetime, *, now: dt.datetime
+) -> bool:
+    """Require explicit, internally consistent published automation evidence."""
+    automation = snapshot.get("automation")
+    if not isinstance(automation, dict) or automation.get("trigger") != "schedule":
+        return False
+    if not isinstance(automation.get("run_id"), str) or not automation["run_id"].strip():
+        return False
+    try:
+        recorded_slot, recorded_invocation, generated = [
+            dt.datetime.fromisoformat(str(value))
+            for value in (
+                automation.get("scheduled_slot"),
+                automation.get("scheduled_invocation_slot"),
+                snapshot.get("generated_at"),
+            )
+        ]
+    except (TypeError, ValueError):
+        return False
+    if any(value.tzinfo is None for value in (recorded_slot, recorded_invocation, generated)):
+        return False
+    return (
+        recorded_slot == slot
+        and checkpoint_for_invocation(recorded_invocation) == slot
+        and invocation <= recorded_invocation <= generated <= now
+    )
 
 
 def write_output(**values: str) -> None:
@@ -725,11 +771,17 @@ def main() -> int:
         published_source = published_checkpoint_source(
             nearest,
             status_url=status_url,
+            invocation=invocation,
+            now=now,
         )
         if published_source:
             write_output(
                 should_run="false",
-                reason="slot_already_published",
+                reason=(
+                    "source_recovery_already_attempted"
+                    if published_source == "live_recovery_invocation_consumed"
+                    else "slot_already_published"
+                ),
                 published_source=published_source,
                 **output_metadata,
             )

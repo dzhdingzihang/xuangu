@@ -487,6 +487,18 @@ body { font-size: 14px; line-height: 1.6; }
 .return-opportunity-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; }
 .return-opportunity-card { display: flex; flex-direction: column; min-width: 0; padding: 17px; border: 1px solid var(--line); border-top: 3px solid #a7b8da; border-radius: 10px; background: #fff; box-shadow: 0 4px 15px #17274b05; }
 .return-opportunity-card.is-primary { border-color: #bdccf0; border-top-color: var(--blue-600); box-shadow: 0 5px 18px #1643a80c; }
+.opportunity-entry { margin: 10px 0 12px; padding: 11px 12px; border: 1px solid #c8d9ef; border-left: 3px solid #4268a4; border-radius: 6px; background: #f5f8fd; color: #274775; }
+.opportunity-entry strong { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.opportunity-entry p { margin: 6px 0 0; font-size: 11px; line-height: 1.7; }
+.opportunity-entry.caution { background: #fff9ed; border-color: #e9c790; border-left-color: #a9660d; color: #80500d; }
+.opportunity-entry.wait { background: #fff3ef; border-color: #eac4b7; border-left-color: #a54327; color: #8b351f; }
+.opportunity-entry.unknown { background: #f7f8fa; border-color: #d4dae5; color: #596574; }
+.opportunity-entry-math { margin-top: 7px; font: 11px var(--mono); line-height: 1.7; overflow-wrap: anywhere; }
+.opportunity-entry-policy { display: flex; gap: 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px; color: #4c5e7a; background: #fff; font-size: 12px; line-height: 1.8; }
+.opportunity-entry-policy > i { flex-shrink: 0; margin-top: 4px; }
+.opportunity-rank-comparison { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); }
+.opportunity-rank-comparison h3 { margin: 0 0 7px; font-size: 15px; color: var(--navy); }
+.opportunity-rank-comparison > p { margin: 7px 0; font-size: 12px; line-height: 1.8; color: #53627b; }
 .return-opportunity-card > header { display: flex; align-items: center; gap: 6px; }
 .return-rank { display: inline-flex; align-items: center; gap: 7px; margin-right: auto; color: var(--blue-700); font-family: var(--mono); font-size: 12px; }.return-rank i { font-size: 18px; }.return-rank b { font-family: "Noto Sans SC",sans-serif; font-size: 11px; }
 .return-opportunity-card > header > small { color: var(--muted); font-family: var(--mono); font-size: 10px; }

@@ -48,6 +48,11 @@ jobs:
       - name: Install settlement dependencies
         run: pip install -r requirements.txt
 
+      - name: Preflight history publication dependencies
+        # Detect lockfile/build-tool installation failures before provider work.
+        # Each publication worktree still installs its own exact revision below.
+        run: npm ci
+
       - name: Settle, validate, and publish observation outcomes
         env:
           ENABLE_R2_DATA_PUBLISH: ${{ vars.ENABLE_R2_DATA_PUBLISH }}
@@ -270,9 +275,11 @@ jobs:
             settlement_status="$?"
             if ((settlement_status != 0)); then
               echo "Observation settlement or validation failed on attempt ${attempt}" >&2
+              # Provider errors are persisted as pending by the batch runners.
+              # A nonzero exit is a contract/IO failure, not a reason to refetch
+              # the entire market pool three times. Preserve the red run.
               git worktree remove --force "${settlement_tree}"
-              sleep "$((attempt * 5))"
-              continue
+              exit "${settlement_status}"
             fi
 
             settlement_files=()

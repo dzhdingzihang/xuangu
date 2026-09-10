@@ -1730,7 +1730,12 @@ class SelectorV2Tests(unittest.TestCase):
             for call in patched.call_args_list
         ]
         self.assertEqual(len(hk_us_anchors), 6)
-        self.assertTrue(all(anchor is hk_us_anchors[0] for anchor in hk_us_anchors))
+        # Live fetches evaluate their actual completion clocks; only the two
+        # final health checks share the post-collection observation cutoff.
+        self.assertEqual(hk_us_anchors[:4], [None, None, None, None])
+        self.assertIs(hk_us_anchors[4], hk_us_anchors[5])
+        self.assertIsNotNone(hk_us_anchors[4].tzinfo)
+        self.assertGreaterEqual(dt.datetime.fromisoformat(snapshot["feature_cutoff_at"]), hk_us_anchors[4])
 
     def test_zero_broad_pool_forces_degraded_no_trade(self) -> None:
         health = server.a_share_pool_health(

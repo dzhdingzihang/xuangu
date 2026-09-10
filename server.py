@@ -38,6 +38,7 @@ import observation_outcome_ledger
 import production_rule_model
 import return_opportunity
 import sector_metadata
+import security_identity
 import opportunity_outcome_ledger
 import rule_outcome_ledger
 
@@ -1261,37 +1262,72 @@ def _dynamic_source_time_coverage(
 
 
 def _blocked_dynamic_security_name(name: str, market_key: str) -> bool:
-    text = str(name or "").strip()
-    upper = text.upper()
-    if market_key == "hk":
-        blocked = ("ETF", "基金", "债", "权证", "牛证", "熊证", "认购", "认沽", "优先股")
-        return any(token in upper for token in blocked)
-    if any(token in text for token in ("空白支票", "交易所交易基金")):
-        return True
-    if re.search(r"\b(?:ETF|ETN|SPAC)\b", upper):
-        return True
-    if re.search(r"\b(?:WARRANTS?|RIGHTS?|UNITS?|PREFERRED|PFD|FUND)\b", upper):
-        return True
-    fund_sponsors = (
-        "ISHARES",
-        "PROSHARES",
-        "DIREXION",
-        "SPDR",
-        "VANECK",
-        "GRAYSCALE",
-        "GLOBAL X ",
-        "WISDOMTREE",
-        "GUGGENHEIM STRATEGIC OPPORTUNITIES",
-    )
-    crypto_trust = "TRUST" in upper and any(
-        token in upper for token in ("BITCOIN", "ETHEREUM", "ETHER", "CRYPTO")
-    )
-    return (
-        "ACQUISITION CORP" in upper
-        or "ACQUISITION CO" in upper
-        or any(token in upper for token in fund_sponsors)
-        or crypto_trust
-    )
+    return security_identity.blocked_security_name(name, market_key)
+
+
+@functools.lru_cache(maxsize=2)
+def _us_security_directory(day: str) -> dict[str, list[dict]]:
+    """One exchange directory request per generation day; failure stays unknown."""
+    session = requests.Session()
+    session.trust_env = False
+    response = None
+    try:
+        deadline = time.monotonic() + 15
+        response = session.get(
+            security_identity.DIRECTORY_URL, headers={"User-Agent": UA},
+            timeout=(3, 6), stream=True,
+        )
+        response.raise_for_status()
+        body = bytearray()
+        while len(body) < 3_000_000:
+            if time.monotonic() > deadline:
+                return {}
+            chunk = response.raw.read(min(65536, 3_000_000 - len(body)), decode_content=True)
+            if not chunk:
+                break
+            body.extend(chunk)
+        if len(body) >= 3_000_000:
+            return {}
+        text = body.decode("utf-8")
+        if "File Creation Time:" not in text:
+            return {}
+        return security_identity.parse_nasdaq_directory(
+            text, retrieved_at=now_cn().isoformat(timespec="seconds")
+        )
+    except Exception:
+        return {}
+    finally:
+        if response is not None:
+            response.close()
+        session.close()
+
+
+def _attach_security_directory(rows: list[dict], directory: dict) -> list[dict]:
+    for row in rows:
+        symbol = str(row.get("symbol") or "").upper()
+        if symbol in directory:
+            row["security_type_evidence"] = list(directory[symbol])
+        row["security_classification"] = security_identity.assess_security(row, "us")
+    return rows
+
+
+def _listing_history_eligibility(candidate: dict, market_key: str) -> dict:
+    """Use the provider's explicit listing date, not response length, for IPO age."""
+    metrics = candidate.get("recall_metrics") or {}
+    raw = str(metrics.get("listing_date") or "")
+    observed = candidate.get("observed_at")
+    result = {"status": "UNKNOWN", "listing_date": None, "available_sessions": None, "minimum_sessions": 32}
+    try:
+        listing = dt.datetime.strptime(raw, "%Y%m%d").date() if re.fullmatch(r"\d{8}", raw) else dt.date.fromisoformat(raw)
+        anchor = dt.datetime.fromisoformat(str(observed))
+        if anchor.tzinfo is None:
+            return result
+        expected = expected_quote_session(market_key, anchor)
+        # Old listings need no expensive multi-decade calendar enumeration.
+        count = len(session_dates(market_key, listing, expected)) if 0 <= (expected - listing).days <= 120 else 32 if listing < expected else 0
+        return {**result, "status": "INSUFFICIENT_HISTORY" if count < 32 else "ELIGIBLE", "listing_date": listing.isoformat(), "available_sessions": count, "source": metrics.get("listing_date_source") or candidate.get("source"), "source_field": "f26", "source_url": "https://push2delay.eastmoney.com/api/qt/clist/get"}
+    except (ValueError, TypeError, OverflowError):
+        return result
 
 
 def _dynamic_hk_candidate(item: dict, query_route: str, observed_at: str) -> tuple[dict | None, str | None]:
@@ -1437,6 +1473,10 @@ def _dynamic_us_candidate(item: dict, query_route: str, observed_at: str) -> tup
         "market_cap": round(market_cap, 2),
         "pe": nullable_float(item.get("pe")),
         "exchange": market,
+        "source_ticktime": item.get("ticktime") or item.get("trade_time") or None,
+        "source_timestamp": _parse_dynamic_source_timestamp(
+            item.get("ticktime") or item.get("trade_time") or item.get("datetime"), "us"
+        ),
     }
     return {
         "symbol": symbol,
@@ -1627,7 +1667,7 @@ def _eastmoney_dynamic_candidate(
     item: dict, route: str, market_key: str, observed_at: str
 ) -> tuple[dict | None, str | None, int | None]:
     """Normalize one Eastmoney cross-section row without losing its source clock."""
-
+    observed_at = item.get("_retrieved_at") or observed_at
     raw_timestamp = nullable_float(item.get("f124"))
     if raw_timestamp is None:
         return None, "invalid_source_timestamp", None
@@ -1681,6 +1721,7 @@ def _eastmoney_dynamic_candidate(
                 "pb": nullable_float(item.get("f23")),
                 "medium_return_pct": nullable_float(item.get("f24")),
                 "listing_date": item.get("f26") or None,
+                "listing_date_source": "eastmoney_delay_market" if item.get("f26") else None,
                 "main_net_flow": nullable_float(item.get("f62")),
                 "source_timestamp": timestamp,
             }
@@ -1725,6 +1766,7 @@ def _fetch_eastmoney_dynamic_rows(market_key: str) -> tuple[list[dict], dict]:
     jobs = [(route, field, order, page) for route, field, order in routes for page in (1, 2)]
     observed_at = now_cn().isoformat(timespec="seconds")
     fields = "f2,f3,f5,f6,f8,f9,f10,f12,f13,f14,f20,f21,f23,f24,f25,f26,f62,f115,f124"
+    discovery_deadline = time.monotonic() + 75
     raw_rows: list[tuple[dict, str]] = []
     completed = 0
     reported_totals: list[int] = []
@@ -1732,6 +1774,9 @@ def _fetch_eastmoney_dynamic_rows(market_key: str) -> tuple[list[dict], dict]:
 
     def fetch(job: tuple[str, str, str, int]) -> tuple[str, int, dict]:
         route, field, order, page = job
+        remaining = discovery_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("bounded discovery deadline exhausted")
         response = market_data_get_with_retry(
             "https://push2delay.eastmoney.com/api/qt/clist/get",
             params={
@@ -1746,7 +1791,8 @@ def _fetch_eastmoney_dynamic_rows(market_key: str) -> tuple[list[dict], dict]:
                 "fields": fields,
             },
             headers={"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"},
-            timeout=15,
+            timeout=(min(3, remaining), min(6, remaining)),
+            retry_attempts=1,
         )
         payload = response.json()
         if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
@@ -1754,46 +1800,67 @@ def _fetch_eastmoney_dynamic_rows(market_key: str) -> tuple[list[dict], dict]:
         diff = payload["data"].get("diff")
         if not isinstance(diff, list) or len(diff) < 100:
             raise ValueError("Eastmoney market page is unexpectedly short")
+        completed_at = now_cn().isoformat(timespec="seconds")
+        payload["data"]["diff"] = [{**row, "_retrieved_at": completed_at} if isinstance(row, dict) else row for row in diff]
         return route, page, payload["data"]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch, job): job for job in jobs}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                route, page, data = future.result()
-            except Exception:
-                continue
-            completed += 1
-            try:
-                reported_totals.append(int(data.get("total")))
-            except (TypeError, ValueError):
-                pass
-            page_rows = [item for item in (data.get("diff") or []) if isinstance(item, dict)]
-            page_signatures.setdefault(route, {})[page] = tuple(
-                str(item.get("f12") or "") for item in page_rows
-            )
-            raw_rows.extend((item, route) for item in page_rows)
+    pending_jobs = list(jobs)
+    retried_pages = 0
+    # Retry failed/invalid route pages once; successful pages remain frozen.
+    for recovery_pass in range(2):
+        if not pending_jobs:
+            break
+        failed_jobs = []
+        if recovery_pass:
+            retried_pages += len(pending_jobs)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5 if not recovery_pass else 2) as executor:
+            futures = {executor.submit(fetch, job): job for job in pending_jobs}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    route, page, data = future.result()
+                except Exception:
+                    failed_jobs.append(futures[future])
+                    continue
+                completed += 1
+                try:
+                    reported_totals.append(int(data.get("total")))
+                except (TypeError, ValueError):
+                    pass
+                page_rows = [item for item in (data.get("diff") or []) if isinstance(item, dict)]
+                page_signatures.setdefault(route, {})[page] = tuple(
+                    str(item.get("f12") or "") for item in page_rows
+                )
+                raw_rows.extend((item, route) for item in page_rows)
+        pending_jobs = failed_jobs
 
     base_requested_pages = len(jobs)
     base_completed_pages = completed
     adaptive_requested_pages = 0
     adaptive_completed_pages = 0
-    adaptive_stop_reason = "not_applicable" if market_key != "hk" else "not_required"
+    adaptive_stop_reason = "not_required"
 
     def eligible_symbol_count() -> int:
-        symbols: set[str] = set()
+        valid = {}
         for item, route in raw_rows:
             candidate, _reason, _timestamp = _eastmoney_dynamic_candidate(
                 item, route, market_key, observed_at
             )
-            if candidate and candidate.get("symbol"):
-                symbols.add(str(candidate["symbol"]))
-        return len(symbols)
+            if candidate and candidate.get("symbol") and _listing_history_eligibility(candidate, market_key)["status"] != "INSUFFICIENT_HISTORY":
+                valid[str(candidate["symbol"])] = candidate
+        # New liquidity pages must add usable source observations, not old
+        # timestamps that happen to make the cardinality look sufficient.
+        chronology = _dynamic_source_time_coverage(list(valid.values()), market_key, as_of=now_cn())
+        return chronology["selected_source_fresh_count"]
 
     adaptive_trigger_eligible_size = eligible_symbol_count()
-    if market_key == "hk" and adaptive_trigger_eligible_size < DYNAMIC_MARKET_MIN_ELIGIBLE["hk"]:
+    adaptive_minimum = DYNAMIC_MARKET_MIN_ELIGIBLE[market_key] + (35 if market_key == "us" else 0)
+    if adaptive_trigger_eligible_size < adaptive_minimum:
         adaptive_stop_reason = "max_pages_reached"
-        for page in range(3, HK_ADAPTIVE_LIQUIDITY_MAX_PAGE + 1):
+        maximum_page = HK_ADAPTIVE_LIQUIDITY_MAX_PAGE if market_key == "hk" else 8
+        for page in range(3, maximum_page + 1):
+            if time.monotonic() >= discovery_deadline:
+                adaptive_stop_reason = "discovery_time_budget_exhausted"
+                break
             adaptive_requested_pages += 1
             try:
                 route, fetched_page, data = fetch(("liquidity", "f6", "1", page))
@@ -1810,7 +1877,7 @@ def _fetch_eastmoney_dynamic_rows(market_key: str) -> tuple[list[dict], dict]:
                 str(item.get("f12") or "") for item in page_rows
             )
             raw_rows.extend((item, route) for item in page_rows)
-            if eligible_symbol_count() >= DYNAMIC_MARKET_MIN_ELIGIBLE["hk"]:
+            if eligible_symbol_count() >= adaptive_minimum:
                 adaptive_stop_reason = "minimum_eligible_met"
                 break
 
@@ -1848,10 +1915,17 @@ def _fetch_eastmoney_dynamic_rows(market_key: str) -> tuple[list[dict], dict]:
         "discovery_completed_pages": completed,
         "discovery_base_requested_pages": base_requested_pages,
         "discovery_base_completed_pages": base_completed_pages,
+        "discovery_retried_pages": retried_pages,
+        "discovery_failed_base_pages": [{"route": job[0], "page": job[3]} for job in pending_jobs],
+        "discovery_budget_seconds": 75,
+        "discovery_budget_exhausted": time.monotonic() >= discovery_deadline,
         "discovery_adaptive_requested_pages": adaptive_requested_pages,
         "discovery_adaptive_completed_pages": adaptive_completed_pages,
         "discovery_adaptive_trigger_eligible_size": adaptive_trigger_eligible_size,
         "discovery_adaptive_stop_reason": adaptive_stop_reason,
+        "discovery_scan_scope": "bounded_route_pages",
+        "discovery_full_exchange_scan": False,
+        "discovery_page_scope": {route: sorted(pages) for route, pages in page_signatures.items()},
         "discovery_pagination_complete": bool(
             completed == requested_pages
             and _dynamic_page_signatures_are_unique(page_signatures)
@@ -1884,6 +1958,14 @@ def _merge_dynamic_market_rows(rows: list[dict], market_key: str) -> list[dict]:
             merged[symbol] = candidate
             continue
         current = merged[symbol]
+        # Never discard an exchange ETF flag just because a translated name
+        # or a lower-priority quote provider was merged first.
+        current["security_type_evidence"] = [
+            *(current.get("security_type_evidence") or []),
+            *(candidate.get("security_type_evidence") or []),
+        ]
+        if candidate.get("english_name") and not current.get("english_name"):
+            current["english_name"] = candidate["english_name"]
         current["sources"] = list(
             dict.fromkeys([*(current.get("sources") or []), *(candidate.get("sources") or [])])
         )
@@ -1891,11 +1973,31 @@ def _merge_dynamic_market_rows(rows: list[dict], market_key: str) -> list[dict]:
             dict.fromkeys([*(current.get("recall_routes") or []), *(candidate.get("recall_routes") or [])])
         )
         current_metrics = current.setdefault("recall_metrics", {})
+        current_stamp = _parse_dynamic_source_timestamp(current_metrics.get("source_timestamp"), market_key)
+        candidate_stamp = _parse_dynamic_source_timestamp((candidate.get("recall_metrics") or {}).get("source_timestamp"), market_key)
+        if candidate_stamp and (not current_stamp or candidate_stamp > current_stamp):
+            # Price/change/amount/clock belong to one provider observation.
+            # Do not graft a newer clock onto a different provider's values.
+            prior_listing_date = current_metrics.get("listing_date")
+            prior_listing_source = current_metrics.get("listing_date_source")
+            current["recall_metrics"] = dict(candidate.get("recall_metrics") or {})
+            if prior_listing_date and not current["recall_metrics"].get("listing_date"):
+                current["recall_metrics"]["listing_date"] = prior_listing_date
+                current["recall_metrics"]["listing_date_source"] = prior_listing_source
+            current["source"] = candidate.get("source")
+            current["observed_at"] = candidate.get("observed_at")
+            current_metrics = current["recall_metrics"]
         for key, value in (candidate.get("recall_metrics") or {}).items():
             if current_metrics.get(key) in (None, "", 0) and value not in (None, "", 0):
                 current_metrics[key] = value
     result = list(merged.values())
     for candidate in result:
+        unique_evidence = []
+        for evidence in candidate.get("security_type_evidence") or []:
+            if evidence not in unique_evidence:
+                unique_evidence.append(evidence)
+        if unique_evidence:
+            candidate["security_type_evidence"] = unique_evidence
         ensure_candidate_lineage(candidate, market_key)
     return result
 
@@ -1948,6 +2050,8 @@ def _dynamic_recall_manifest(selected: list[dict], market_key: str) -> list[dict
                 "primary_route": candidate.get("selection_route") or lineage.get("primary_route"),
                 "recall_routes": [item.get("route") for item in lineage.get("recall_routes") or []],
                 "source": candidate.get("source"),
+                "security_classification": candidate.get("security_classification"),
+                "listing_history_eligibility": candidate.get("listing_history_eligibility"),
                 "sources": list(
                     candidate.get("sources")
                     or ([candidate.get("source")] if candidate.get("source") else [])
@@ -2064,7 +2168,19 @@ def select_dynamic_market_pool(
     if market_key not in {"hk", "us"}:
         raise ValueError(f"unsupported dynamic market: {market_key}")
     target = int(target or {"hk": HK_RECALL_TARGET, "us": US_RECALL_TARGET}[market_key])
-    candidates = _merge_dynamic_market_rows(rows, market_key)
+    merged_candidates = _merge_dynamic_market_rows(rows, market_key)
+    candidates = []
+    admission_exclusions = []
+    for candidate in merged_candidates:
+        classification = security_identity.assess_security(candidate, market_key)
+        listing = _listing_history_eligibility(candidate, market_key)
+        candidate["security_classification"] = classification
+        candidate["listing_history_eligibility"] = listing
+        candidate["role"] = "动态市场股票" if classification["verified"] else "动态市场研究证券（类型未核验）"
+        if not classification["eligible"] or listing["status"] == "INSUFFICIENT_HISTORY":
+            admission_exclusions.append({"symbol": candidate["symbol"], "name": candidate.get("name"), "reason": "SECURITY_TYPE_EXCLUDED" if not classification["eligible"] else "INSUFFICIENT_LISTED_HISTORY", "listing_history": listing, "security_classification": classification})
+            continue
+        candidates.append(candidate)
     maxima = {
         key: max((math.log1p(max(0.0, safe_float((row.get("recall_metrics") or {}).get(key)))) for row in candidates), default=1.0)
         for key in ("amount", "market_cap", "volume")
@@ -2120,6 +2236,9 @@ def select_dynamic_market_pool(
         "universe_origin": DYNAMIC_MARKET_ORIGIN,
         "universe_scope": "provider_bounded_common_equity_cross_section",
         "coverage_claim": "bounded_dynamic_scan",
+        "admission_policy_version": "verified-products-and-listed-history-v1",
+        "admission_excluded_count": len(admission_exclusions),
+        "admission_exclusions": admission_exclusions,
         "eligible_discovery_size": len(candidates),
         "min_eligible_discovery_size": DYNAMIC_MARKET_MIN_ELIGIBLE[market_key],
         "recall_target": target,
@@ -2155,6 +2274,8 @@ def _load_dynamic_market_cache(
     except (OSError, ValueError, TypeError):
         return None
     cached_rows = [dict(row) for row in rows if isinstance(row, dict)]
+    if any(not security_identity.assess_security(row, market_key)["eligible"] or _listing_history_eligibility(row, market_key)["status"] == "INSUFFICIENT_HISTORY" for row in cached_rows):
+        return None
     for row in cached_rows:
         lineage = dict(row.get("candidate_lineage") or {})
         lineage["universe_origin"] = DYNAMIC_MARKET_CACHE_ORIGIN
@@ -2219,16 +2340,35 @@ def _dynamic_market_discovery_is_live_complete(coverage: dict, market_key: str) 
     )
 
 
+def _select_fresh_dynamic_pool(rows: list[dict], market_key: str, *, as_of=None) -> tuple[list[dict], dict]:
+    merged = _merge_dynamic_market_rows(rows, market_key)
+    chronology = _dynamic_source_time_coverage(merged, market_key, as_of=as_of)
+    stale = set(chronology["selected_source_stale_symbols"])
+    fresh_rows = [row for row in merged if row["symbol"] not in stale]
+    fresh_selected, fresh_coverage = select_dynamic_market_pool(fresh_rows, market_key)
+    if fresh_coverage["eligible_discovery_size"] >= DYNAMIC_MARKET_MIN_ELIGIBLE[market_key] and fresh_coverage["recall_shortfall"] == 0:
+        fresh_coverage["discovery_stale_excluded_count"] = len(stale)
+        fresh_coverage["discovery_stale_excluded_symbols"] = sorted(stale)
+        return fresh_selected, fresh_coverage
+    # Never call an undersized scan healthy: retain evidence of the fallback.
+    return select_dynamic_market_pool(merged, market_key)
+
+
 def load_dynamic_market_pool(
     market_key: str, *, as_of: dt.datetime | None = None
 ) -> tuple[list[dict], dict]:
     if market_key not in {"hk", "us"}:
         raise ValueError(f"unsupported dynamic market: {market_key}")
 
+    directory = _us_security_directory((as_of or now_cn()).date().isoformat()) if market_key == "us" else {}
     attempts: list[tuple[list[dict], dict]] = []
-    attempts.append(_fetch_eastmoney_dynamic_rows(market_key))
+    primary_rows, primary_discovery = _fetch_eastmoney_dynamic_rows(market_key)
+    if market_key == "us":
+        _attach_security_directory(primary_rows, directory)
+        primary_discovery["security_directory_status"] = "AVAILABLE" if directory else "UNAVAILABLE_NAME_SCREEN_ONLY"
+    attempts.append((primary_rows, primary_discovery))
     for rows, discovery in attempts:
-        selected, coverage = select_dynamic_market_pool(rows, market_key)
+        selected, coverage = _select_fresh_dynamic_pool(rows, market_key, as_of=as_of)
         coverage = _complete_dynamic_market_coverage(
             selected, coverage, discovery, market_key, as_of=as_of
         )
@@ -2240,7 +2380,9 @@ def load_dynamic_market_pool(
     sina_rows, sina_discovery = (
         _fetch_sina_hk_dynamic_rows() if market_key == "hk" else _fetch_sina_us_dynamic_rows()
     )
-    selected, coverage = select_dynamic_market_pool(sina_rows, market_key)
+    if market_key == "us":
+        _attach_security_directory(sina_rows, directory)
+    selected, coverage = _select_fresh_dynamic_pool(sina_rows, market_key, as_of=as_of)
     coverage = _complete_dynamic_market_coverage(
         selected, coverage, sina_discovery, market_key, as_of=as_of
     )
@@ -2251,7 +2393,7 @@ def load_dynamic_market_pool(
 
     primary_rows, primary_discovery = attempts[0]
     combined_rows = [*primary_rows, *sina_rows]
-    selected, coverage = select_dynamic_market_pool(combined_rows, market_key)
+    selected, coverage = _select_fresh_dynamic_pool(combined_rows, market_key, as_of=as_of)
     coverage.update(
         {
             "discovery_source": "Eastmoney delayed + Sina Finance partial fallback",
@@ -4688,8 +4830,20 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 if _automatic_event_decision_eligible(item, snapshot, market_key=market_key, symbol=code)
             ]
             positive_event = bool(positive_events)
-            candidate_event_scanned = bool(
-                market_pipeline_scanned and _candidate_event_scan_complete(pipeline, market_key, code)
+            # A bounded market scan may fail for one symbol while preserving
+            # independently auditable successes for others. Keep market-level
+            # completeness strict below; do not mislabel these successes as
+            # source failures in the per-candidate evidence summary.
+            scan_coverage = (
+                event_pipeline.candidate_scan_coverage(snapshot, market_key, code)
+                if event_pipeline is not None
+                and pipeline.get("coverage_version") == event_pipeline.EVENT_COVERAGE_VERSION
+                else None
+            )
+            candidate_event_scanned = (
+                scan_coverage.get("verified") is True
+                if scan_coverage is not None
+                else bool(market_pipeline_scanned and _candidate_event_scan_complete(pipeline, market_key, code))
             )
             material_negative = any(
                 _material_negative_event(item, snapshot, market_key=market_key, symbol=code) for item in events
@@ -4713,13 +4867,13 @@ def build_global_ten_day_decision(snapshot: dict) -> dict:
                 else "PASS"
             )
             positive_enrichment_status = (
-                "SOURCE_UNAVAILABLE"
-                if not market_pipeline_scanned
+                ("SCANNED_WITH_POSITIVE" if positive_events else "SCANNED_NO_POSITIVE")
+                if candidate_event_scanned
                 else "NOT_SELECTED"
-                if not candidate_event_scanned
-                else "SCANNED_WITH_POSITIVE"
-                if positive_events
-                else "SCANNED_NO_POSITIVE"
+                if (scan_coverage is not None and scan_coverage.get("status") == "NOT_SCANNED"
+                    and pipeline.get("status") in {"READY", "READY_EMPTY", "PARTIAL"})
+                or (scan_coverage is None and market_pipeline_scanned)
+                else "SOURCE_UNAVAILABLE"
             )
             prediction = _candidate_prediction(model, market_key, code) if model_ready else None
             shadow_prediction = _candidate_shadow_prediction(model, market_key, code)
@@ -5185,8 +5339,9 @@ def market_data_get_with_retry(url: str, **kwargs):
     generation behavior aligned while retaining the same bounded retries.
     """
 
+    attempts = max(1, min(NETWORK_RETRY_ATTEMPTS, int(kwargs.pop("retry_attempts", NETWORK_RETRY_ATTEMPTS))))
     last_error: Exception | None = None
-    for attempt in range(NETWORK_RETRY_ATTEMPTS):
+    for attempt in range(attempts):
         session = requests.Session()
         session.trust_env = False
         try:
@@ -5195,7 +5350,7 @@ def market_data_get_with_retry(url: str, **kwargs):
             return response
         except (requests.RequestException, OSError) as exc:
             last_error = exc
-            if attempt + 1 < NETWORK_RETRY_ATTEMPTS:
+            if attempt + 1 < attempts:
                 time.sleep(_retry_delay(attempt))
         finally:
             session.close()
@@ -6629,7 +6784,8 @@ def yahoo_kline_map(
             return False
         if market_key not in {"hk", "us"}:
             return True
-        return _hk_us_cached_kline_is_usable(rows, market_key, expected_session)
+        reference_session = expected_quote_session(market_key, as_of or now_cn())
+        return _hk_us_cached_kline_is_usable(rows, market_key, reference_session)
 
     workers = min(16, max(1, len(unique)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -6660,6 +6816,21 @@ def yahoo_kline_map(
                 if usable(rows):
                     result[symbol] = rows
     if market_key in {"hk", "us"}:
+        expected_session = expected_quote_session(market_key, as_of or now_cn())
+        if market_key == "hk":
+            # Independent provider only for the bounded residual misses. A
+            # recent IPO cannot be recovered by manufacturing missing bars.
+            missing = [symbol for symbol in unique if symbol not in result][:24]
+            if missing:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(missing))) as executor:
+                    futures = {executor.submit(hk_independent_daily_kline, symbol, limit, expected_session=expected_session): symbol for symbol in missing}
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            rows = future.result()
+                        except Exception:
+                            rows = []
+                        if usable(rows):
+                            result[futures[future]] = rows
         for symbol in unique:
             if symbol in result:
                 continue
@@ -6678,6 +6849,60 @@ def yahoo_kline_map(
     return result
 
 
+def _validated_provider_daily_rows(parts_rows: list, *, adjustment: str, source: str, limit: int) -> list[dict]:
+    rows = []
+    previous_date = None
+    for parts in parts_rows:
+        try:
+            date = dt.date.fromisoformat(str(parts[0]))
+            open_, close, high, low, volume = map(float, parts[1:6])
+            if not all(math.isfinite(value) for value in (open_, close, high, low, volume)):
+                return []
+            if min(open_, close, high, low) <= 0 or volume < 0 or low > min(open_, close) or high < max(open_, close) or low > high or (previous_date and date <= previous_date):
+                return []
+        except (ValueError, TypeError, IndexError):
+            return []
+        previous_close = rows[-1]["close"] if rows else close
+        rows.append({"date": date.isoformat(), "open": open_, "close": close, "high": high, "low": low, "volume": volume, "volume_unit": "share", "amount": 0, "amplitude": pct_change(high, low), "change_pct": pct_change(close, previous_close), "turnover": 0, "price_adjustment": adjustment, "source": source})
+        previous_date = date
+    return rows[-limit:]
+
+
+def _parse_tencent_hk_daily(payload: dict, symbol: str, limit: int) -> list[dict]:
+    normalized = canonical_dynamic_market_symbol(symbol, "hk")
+    if not normalized:
+        return []
+    key = "hk" + normalized.split(".")[0].zfill(5)
+    data = (payload.get("data") or {}).get(key) or {}
+    # A raw `day` response does not certify an adjusted series.
+    return _validated_provider_daily_rows(data.get("qfqday") or [], adjustment="tencent_hk_qfqday", source="Tencent HK adjusted daily", limit=limit)
+
+
+def hk_independent_daily_kline(symbol: str, limit: int = MODEL_KLINE_HISTORY_LIMIT, *, expected_session: dt.date | None = None) -> list[dict]:
+    normalized = canonical_dynamic_market_symbol(symbol, "hk")
+    if not normalized:
+        return []
+    code = normalized.split(".")[0].zfill(5)
+    try:
+        response = market_data_get_with_retry("https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get", params={"param": f"hk{code},day,,,{limit},qfq"}, headers={"User-Agent": UA, "Referer": "https://gu.qq.com/"}, timeout=6)
+        rows = _parse_tencent_hk_daily(response.json(), normalized, limit)
+        if len(rows) >= 32 and (expected_session is None or rows[-1]["date"] == expected_session.isoformat()):
+            return rows
+    except Exception:
+        pass
+    try:
+        response = market_data_get_with_retry("https://push2his.eastmoney.com/api/qt/stock/kline/get", params={"secid": f"116.{code}", "klt": 101, "fqt": 1, "lmt": limit, "beg": 0, "end": "20500101", "fields1": "f1,f2,f3,f4,f5,f6", "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"}, headers={"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"}, timeout=6)
+        data = response.json().get("data") or {}
+        if str(data.get("code") or "").zfill(5) != code:
+            return []
+        rows = _validated_provider_daily_rows([row.split(",") for row in data.get("klines") or []], adjustment="eastmoney_hk_fqt1", source="Eastmoney HK adjusted daily", limit=limit)
+        if expected_session is not None and (not rows or rows[-1]["date"] != expected_session.isoformat()):
+            return []
+        return rows
+    except Exception:
+        return []
+
+
 def yahoo_realtime_quote(symbol: str, timeout: int = 6) -> dict:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}"
     params = {"range": "1d", "interval": "1m", "includePrePost": "true"}
@@ -6692,6 +6917,8 @@ def yahoo_realtime_quote(symbol: str, timeout: int = 6) -> dict:
         if not result:
             return {}
         meta = result.get("meta") or {}
+        if meta.get("symbol") and str(meta["symbol"]).upper() != symbol.upper():
+            return {}
         quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
         closes = quote.get("close") or []
         volumes = quote.get("volume") or []
@@ -6741,6 +6968,7 @@ def yahoo_realtime_quote(symbol: str, timeout: int = 6) -> dict:
         "source_as_of": source_as_of,
         "fetched_at": fetched_at,
         "updated_at": source_as_of or fetched_at,
+        "security_type_evidence": [{"symbol": symbol.upper(), "source": "yahoo_chart_meta", "source_url": url, "field": "instrumentType", "raw_value": meta["instrumentType"], "retrieved_at": fetched_at}] if meta.get("instrumentType") and meta.get("symbol") else [],
     }
 
 
@@ -7635,6 +7863,17 @@ def score_serenity_candidates(
     as_of: dt.datetime | None = None,
 ) -> dict:
     policy = SERENITY_MARKET_POLICY.get(market_key, SERENITY_MARKET_POLICY["hk"])
+    input_count = len(candidates)
+    security_excluded_symbols = []
+    accepted = []
+    for candidate in candidates:
+        classification = security_identity.assess_security(candidate, market_key)
+        candidate["security_classification"] = classification
+        if not classification["eligible"]:
+            security_excluded_symbols.append(candidate["symbol"])
+        else:
+            accepted.append(candidate)
+    candidates = accepted
     freshness_as_of = as_of or now_cn()
     if market_key in {"hk", "us"}:
         attach_dynamic_market_percentiles(candidates)
@@ -7650,13 +7889,18 @@ def score_serenity_candidates(
                 symbols,
                 MODEL_KLINE_HISTORY_LIMIT,
                 market_key,
-                as_of=freshness_as_of,
+                as_of=as_of,
             )
             realtime_map = realtime_future.result()
             kline_map = kline_future.result()
     else:
         realtime_map = {}
         kline_map = {}
+    # An explicit historical/as-of evaluation stays immutable. Live reads use
+    # the completion clock, since bounded retries may outlast the old start
+    # clock's future-skew allowance. Provider clocks are never rewritten.
+    if as_of is None:
+        freshness_as_of = now_cn()
     freshness_by_symbol = {
         symbol: yahoo_quote_freshness(
             market_key,
@@ -7671,8 +7915,17 @@ def score_serenity_candidates(
         else None
     )
     final = []
+    input_failures = []
     for candidate in candidates:
         symbol = candidate["symbol"]
+        source_evidence = (realtime_map.get(symbol) or {}).get("security_type_evidence") or []
+        if source_evidence:
+            candidate["security_type_evidence"] = [*(candidate.get("security_type_evidence") or []), *source_evidence]
+        classification = security_identity.assess_security(candidate, market_key)
+        candidate["security_classification"] = classification
+        if not classification["eligible"]:
+            security_excluded_symbols.append(symbol)
+            continue
         if market_key == "a_share":
             kline = stock_kline(symbol)
         else:
@@ -7689,6 +7942,7 @@ def score_serenity_candidates(
                     else []
                 )
         if len(kline) < 32:
+            input_failures.append({"symbol": symbol, "reason": "DAILY_HISTORY_INCOMPLETE_OR_STALE", "required_bars": 32, "valid_bar_count": len(kline), "expected_session": str(expected_kline_session), "retained_source_quote": realtime_map.get(symbol) or {}, "listing_history": _listing_history_eligibility(candidate, market_key)})
             continue
         quote = quote_from_kline(kline)
         if not quote or quote["price"] <= 0:
@@ -7736,6 +7990,8 @@ def score_serenity_candidates(
         lens_score, lens_reasons, lens_risks, alpha_profile = serenity_lens_score(candidate)
         setup_flags = metrics.get("setup_flags") or []
         risk_flags = list(lens_risks) + chan["warnings"] + czsc["warnings"]
+        if not classification["verified"]:
+            risk_flags.append("证券类型缺少新鲜供应商证据，仅通过名称排除筛查")
         uzi = uzi_risk_score(candidate, {**live_quote, "amount_yi": 0}, risk_flags, market_key)
         uzi_panel = uzi_panel_score(candidate, {**live_quote, "amount_yi": 0}, chan, czsc, risk_flags, market_key)
         risk_flags.extend(uzi_panel["warnings"])
@@ -7790,6 +8046,9 @@ def score_serenity_candidates(
                 "name": candidate["name"],
                 "market_key": market_key,
                 "role": candidate.get("role", ""),
+                "english_name": candidate.get("english_name"),
+                "security_type_evidence": candidate.get("security_type_evidence") or [],
+                "security_classification": classification,
                 "price": round(entry_price, 3),
                 "entry_price": round(entry_price, 3),
                 "signal_price": round(quote["price"], 3),
@@ -7853,7 +8112,7 @@ def score_serenity_candidates(
     final.sort(key=lambda item: (item.get("hard_risk_count", 0), -item["confidence"], -item["score"]))
     for legacy_rank, candidate in enumerate(final, 1):
         candidate["legacy_rank"] = legacy_rank
-    requested_count = len(candidates)
+    requested_count = input_count
     quote_count = len(final)
     realtime_count = sum(1 for symbol in symbols if (freshness_by_symbol.get(symbol) or {}).get("fresh"))
     stale_realtime_symbols = [
@@ -7911,6 +8170,9 @@ def score_serenity_candidates(
             "freshness_reference_session": freshness_reference_session,
             "reason_codes": reason_codes,
             "warning_codes": warning_codes,
+            "security_excluded_symbols": security_excluded_symbols,
+            "missing_input_symbols": [item["symbol"] for item in input_failures],
+            "input_failures": input_failures,
         },
     }
 
@@ -8741,11 +9003,15 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         recall_coverage=recall_coverage,
     )
     decision = make_decision(scored["candidates"], market, pool_health=pool_health)
-    hk_us_as_of = now_cn()
-    hk_universe, hk_recall = load_dynamic_market_pool("hk", as_of=hk_us_as_of)
-    us_universe, us_recall = load_dynamic_market_pool("us", as_of=hk_us_as_of)
-    hk_scored = score_serenity_candidates("hk", hk_universe, as_of=hk_us_as_of)
-    us_scored = score_serenity_candidates("us", us_universe, as_of=hk_us_as_of)
+    # Do not reuse the pre-HK clock for later US observations. The run identity
+    # remains generated_at; feature_cutoff_at below freezes completed evidence.
+    hk_universe, hk_recall = load_dynamic_market_pool("hk")
+    us_universe, us_recall = load_dynamic_market_pool("us")
+    hk_scored = score_serenity_candidates("hk", hk_universe)
+    us_scored = score_serenity_candidates("us", us_universe)
+    market_observation_cutoff = now_cn()
+    hk_recall.update(_dynamic_source_time_coverage(hk_universe, "hk", as_of=market_observation_cutoff))
+    us_recall.update(_dynamic_source_time_coverage(us_universe, "us", as_of=market_observation_cutoff))
     hk_market_context = market_context_from_benchmark("hk")
     us_market_context = market_context_from_benchmark("us")
     enrich_market_candidates(hk_scored["candidates"], "hk", hk_market_context)
@@ -8777,14 +9043,14 @@ def run_selector(date_text: str | None = None, force: bool = False) -> dict:
         hk_recall,
         hk_quote_health,
         scored_count=hk_scored["scored_size"],
-        as_of=hk_us_as_of,
+        as_of=market_observation_cutoff,
     )
     us_pool_health = dynamic_market_pool_health(
         "us",
         us_recall,
         us_quote_health,
         scored_count=us_scored["scored_size"],
-        as_of=hk_us_as_of,
+        as_of=market_observation_cutoff,
     )
     hk_decision = make_serenity_decision(
         hk_scored["candidates"], "hk", quote_health=hk_quote_health, pool_health=hk_pool_health

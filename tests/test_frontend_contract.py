@@ -126,7 +126,7 @@ const makeRow = (code, score, rank) => ({
   probability: null, expected_net_return: null, calibrated: false, production_eligible: false,
   sector: { name: "半导体", status: "KNOWN", source: "provider" },
   components: { momentum: { score: 75, weight: 0.28, contribution: 21 } },
-  metrics: { return_20d_pct: 12.3 },
+  metrics: { return_10d_pct: 8.2, return_20d_pct: 12.3 },
   reasons: ["量价结构改善"], risk_flags: [],
   scenario_range: {
     horizon_trade_days: 10,
@@ -156,13 +156,14 @@ assert.ok(html.indexOf("英伟达") < html.indexOf("微软"));
 assert.match(html, /<strong>80<\/strong>/);
 assert.match(html, /125\.00 USD/);
 assert.match(html, /09-09 22:00/);
-assert.match(html, /已实现 20 日涨跌/);
+assert.match(html, /过去 10 日已涨跌/);
 assert.match(html, /非上涨概率/);
 assert.match(html, /未校准，情景上下沿不是预期收益/);
 assert.match(html, /data-action="open-opportunity" data-key="us:NVDA"/);
 assert.match(renderReturnOpportunityDetail(rows[0], "us"), /趋势动量/);
 assert.match(renderReturnOpportunityDetail(rows[0], "us"), /权重 28%/);
-assert.doesNotMatch(html, /买入|上涨概率 [0-9]/);
+assert.doesNotMatch(html, /立即买入|推荐买入|上涨概率 [0-9]/);
+assert.match(html, /不能直接按快照价买入/);
 for (const bad of [
   { calibrated: true }, { production_eligible: true }, { probability: 0.9 },
   { expected_net_return: 0.2 }, { primary: rows[1] }, { eligible_count: 0 },
@@ -194,7 +195,7 @@ let html = renderReturnOpportunities();
 assert.match(html, /参考行情待核验/);
 assert.match(html, /历史情景待发布/);
 assert.match(html, /行业未识别/);
-assert.match(html, /已实现 20 日涨跌<\/dt><dd>未提供/);
+assert.match(html, /过去 10 日已涨跌<\/dt><dd>未提供/);
 assert.doesNotMatch(html, /600\.00|\+0\.0%|\+12\.0%/);
 for (const freshness_state of ["stale", "updating", "unknown"]) {
   state.status = { ok: true, freshness_state };

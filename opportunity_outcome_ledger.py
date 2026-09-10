@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import json
+import math
 import pathlib
 import re
 import tempfile
@@ -92,7 +93,13 @@ def _score_identity(board):
     weights = board.get("weights")
     if not isinstance(weights, dict) or not weights or any(type(v) not in (int, float) for v in weights.values()) or abs(sum(_number(v) for v in weights.values()) - 1) > 1e-8 or any(v < 0 for v in weights.values()):
         raise OpportunityOutcomeContractError("score weights are invalid")
-    return {"contract_version": board["contract_version"], "score_version": board.get("score_version") or "return-opportunity-score-v1", "score_kind": board["score_kind"], "weights": copy.deepcopy(weights), "selection_policy": copy.deepcopy(board.get("selection_policy") or {})}
+    identity = {"contract_version": board["contract_version"], "score_version": board.get("score_version") or "return-opportunity-score-v1", "score_kind": board["score_kind"], "weights": copy.deepcopy(weights), "selection_policy": copy.deepcopy(board.get("selection_policy") or {})}
+    if identity["score_version"] == "return-opportunity-score-v3":
+        from return_opportunity import ENTRY_POLICY
+        if board.get("entry_policy") != ENTRY_POLICY or any((board.get("entry_policy") or {}).get(key) is not False for key in ("execution_ready", "automatic_execution")):
+            raise OpportunityOutcomeContractError("entry review policy is invalid")
+        identity["entry_policy"] = copy.deepcopy(board["entry_policy"])
+    return identity
 
 
 def _registration_evidence(snapshot, source_snapshot=None):
@@ -113,6 +120,11 @@ def build_opportunity_predictions(snapshot, source_snapshot=None, *, published_a
     board = snapshot.get("return_opportunities")
     if not isinstance(board, dict) or board.get("contract_version") not in {"return-opportunities-v1", "return-opportunities-v2"} or board.get("score_kind") != "RETURN_OPPORTUNITY_RULE_SCORE" or board.get("horizon_trade_days") != 10 or board.get("calibrated") is not False or board.get("production_eligible") is not False:
         raise OpportunityOutcomeContractError("published opportunity contract is invalid")
+    entry_version = board.get("score_version") == "return-opportunity-score-v3"
+    if entry_version:
+        from return_opportunity import validate_return_opportunities
+        if validate_return_opportunities(board):
+            raise OpportunityOutcomeContractError("published entry priority contract is invalid")
     rows = board.get("candidates")
     if not isinstance(rows, list) or len(rows) > 12:
         raise OpportunityOutcomeContractError("published candidates must contain at most twelve rows")
@@ -132,7 +144,7 @@ def build_opportunity_predictions(snapshot, source_snapshot=None, *, published_a
     for row in rows:
         market, code = row.get("market"), row.get("code")
         rank, score = row.get("rank"), _number(row.get("opportunity_score"))
-        if market not in REGISTERED_BENCHMARKS or not isinstance(code, str) or not code or (market, code) in seen or type(rank) is not int or rank <= previous_rank or not 60 <= score <= previous_score:
+        if market not in REGISTERED_BENCHMARKS or not isinstance(code, str) or not code or (market, code) in seen or type(rank) is not int or rank <= previous_rank or not (0 if entry_version else 60) <= score <= previous_score:
             raise OpportunityOutcomeContractError("published candidate identity, rank or score is invalid")
         if row.get("qualification_status") != "RESEARCH_ELIGIBLE" or row.get("qualification_blockers") != [] or row.get("score_kind") != board["score_kind"] or row.get("calibrated") is not False or row.get("production_eligible") is not False:
             raise OpportunityOutcomeContractError("published candidate research boundary is invalid")
@@ -153,6 +165,10 @@ def build_opportunity_predictions(snapshot, source_snapshot=None, *, published_a
             "benchmark_code": REGISTERED_BENCHMARKS[market],
             "benchmark_transaction_cost": TRANSACTION_COSTS[market], "benchmark_transaction_cost_version": COST_VERSION,
             "calibrated": False, "authorizes_production": False}
+        if entry_version:
+            prediction.update(evidence_score=row["evidence_score"],
+                entry_assessment=copy.deepcopy(row["entry_assessment"]),
+                entry_metrics={field: row["metrics"][field] for field in ("return_5d_pct", "return_10d_pct", "distance_ma20_pct")})
         prediction["prediction_id"] = prediction_id(prediction)
         prediction["prediction_sha256"] = prediction_sha256(prediction)
         predictions.append(prediction)
@@ -168,7 +184,8 @@ def validate_prediction_sequence(rows):
             raise OpportunityOutcomeConflictError("prediction hash or isolation identity invalid")
         market, code, rank = row.get("market"), row.get("code"), row.get("rank")
         score = _number(row.get("opportunity_score"))
-        if market not in REGISTERED_BENCHMARKS or not isinstance(code, str) or not code or (market, code) in seen or type(rank) is not int or rank <= previous_rank or not 60 <= score <= previous_score:
+        entry_version = row.get("score_version") == "return-opportunity-score-v3"
+        if market not in REGISTERED_BENCHMARKS or not isinstance(code, str) or not code or (market, code) in seen or type(rank) is not int or rank <= previous_rank or not (0 if entry_version else 60) <= score <= previous_score:
             raise OpportunityOutcomeConflictError("frozen candidate order or identity invalid")
         seen.add((market, code))
         previous_rank, previous_score = rank, score
@@ -179,6 +196,15 @@ def validate_prediction_sequence(rows):
         if identity.get("contract_version") not in {"return-opportunities-v1", "return-opportunities-v2"} or identity.get("score_kind") != "RETURN_OPPORTUNITY_RULE_SCORE" or row.get("score_version_id") != "oppscore_" + _digest(identity)[:24] or row.get("score_version") != identity.get("score_version"):
             raise OpportunityOutcomeConflictError("score version identity invalid")
         _score_identity(identity)
+        if entry_version:
+            from return_opportunity import entry_assessment
+            try:
+                expected_entry = entry_assessment(row.get("entry_metrics") or {})
+                evidence = _number(row.get("evidence_score"))
+                if row.get("entry_assessment") != expected_entry or row["entry_assessment"].get("execution_ready") is not False or not 60 <= evidence <= 100 or score != round(max(0, evidence - expected_entry["penalty_points"]), 2):
+                    raise ValueError("frozen entry assessment changed")
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise OpportunityOutcomeConflictError("frozen entry assessment changed") from exc
         cutoff = max(_aware(row.get(k)) for k in ("feature_cutoff_at", "generated_at", "published_at")).isoformat()
         if row.get("information_cutoff_at") != cutoff:
             raise OpportunityOutcomeConflictError("information cutoff changed")
@@ -481,17 +507,105 @@ def _metrics(rows):
         "maximum_drawdown": min((r["maximum_drawdown"] for r in observations), default=None)}
 
 
+def _ranking_evaluation(batches):
+    """Compare frozen global Top N; never pick later successful publications.
+
+    Use one first verified board per scoring identity and Beijing publication
+    date, selected BEFORE looking at outcome status. All board members must be
+    settled, including non-Top-N members, so absent losers cannot inflate Top N.
+    Later publications are still retained in the underlying ledger.
+    """
+    first = {}
+    source_count = 0
+    for batch in sorted(batches, key=lambda item: (item["published_at"], item["snapshot_key"])):
+        rows = batch["outcomes"]
+        if not rows:
+            continue
+        source_count += 1
+        publication_day = _aware(batch["published_at"]).astimezone(dt.timezone(dt.timedelta(hours=8))).date().isoformat()
+        first.setdefault((rows[0]["score_version_id"], publication_day), rows)
+    cohorts = list(first.values())
+    groups = {}
+    for name, size in (("top1", 1), ("top3", 3), ("board", None)):
+        complete, insufficient, pending_count, pending_data = [], 0, 0, 0
+        entry_windows = set()
+        duplicate_windows = 0
+        for rows in cohorts:
+            selected = [row for row in rows if size is None or row["rank"] <= size]
+            if size is not None and (len(selected) != size or {row["rank"] for row in selected} != set(range(1, size + 1))):
+                insufficient += 1
+                continue
+            # Weekend refreshes or later publication dates can still refer to
+            # the same tradable open. Freeze the first Top-N selection for that
+            # market-entry window BEFORE checking whether prices are present.
+            entry_window = tuple(sorted({(row["market"], row["entry_trade_date"]) for row in selected}))
+            if entry_window in entry_windows:
+                duplicate_windows += 1
+                continue
+            entry_windows.add(entry_window)
+            if any(row["status"] != "SETTLED" for row in rows):
+                pending_count += 1
+                pending_data += any(row["status"] == "PENDING_DATA" for row in rows)
+                continue
+            complete.append({
+                "net": sum(row["net_total_return"] for row in selected) / len(selected),
+                "excess": sum(row["net_excess_return"] for row in selected) / len(selected),
+                "selected": selected,
+                "entry": min(_aware(row["entry_session_open_at"]) for row in rows),
+                "exit": max(_aware(row["forecast_end_session_close_at"]) for row in rows),
+            })
+        net_returns = sorted(cohort["net"] for cohort in complete)
+        tail_count = math.ceil(len(net_returns) * .1)
+        non_overlapping, last_exit = 0, None
+        for cohort in sorted(complete, key=lambda item: (item["entry"], item["exit"])):
+            if last_exit is None or cohort["entry"] > last_exit:
+                non_overlapping += 1
+                last_exit = cohort["exit"]
+        count = len(complete)
+        groups[name] = {
+            "status": "PARTIAL_DATA" if pending_data else "OBSERVING" if count >= 20 and non_overlapping >= 5 else "EARLY_SAMPLE" if count else "COLLECTING",
+            "cohort_count": len(cohorts) - duplicate_windows, "complete_cohort_count": count,
+            "pending_cohort_count": pending_count, "pending_data_cohort_count": pending_data,
+            "insufficient_member_cohort_count": insufficient,
+            "duplicate_publication_count": source_count - len(cohorts) + duplicate_windows,
+            "non_overlapping_cohort_count": non_overlapping,
+            "settled_security_count": sum(len(cohort["selected"]) for cohort in complete),
+            "mean_net_return": round(sum(cohort["net"] for cohort in complete) / count, 8) if count else None,
+            "mean_net_excess_return": round(sum(cohort["excess"] for cohort in complete) / count, 8) if count else None,
+            "positive_return_rate": round(sum(value > 0 for value in net_returns) / count, 8) if count else None,
+            "worst_cohort_net_return": round(net_returns[0], 8) if count else None,
+            "expected_shortfall_10pct": round(sum(net_returns[:tail_count]) / tail_count, 8) if tail_count >= 5 else None,
+            "tail_sample_count": tail_count, "minimum_tail_sample_count": 5,
+            "maximum_adverse_excursion": min((row["maximum_adverse_excursion"] for cohort in complete for row in cohort["selected"]), default=None),
+        }
+    return {"contract_version": "opportunity-ranking-performance-v1",
+            "status": "OBSERVING" if groups["board"]["complete_cohort_count"] else "COLLECTING",
+            "primary_metric": "mean_net_return", "secondary_metric": "mean_net_excess_return",
+            "cohort_policy": "first_verified_board_per_score_version_beijing_publication_date",
+            "entry_window_policy": "first_selection_per_group_market_entry_window_before_outcomes",
+            "rank_basis": "FROZEN_GLOBAL_RANK", "completion_policy": "ENTIRE_BOARD_SETTLED",
+            "weighting": "equal_board_date_equal_selected_security", "calibrated": False,
+            "authorizes_production": False, "groups": groups}
+
+
 def evaluate_opportunity_performance(batches):
     validated = [validate_opportunity_outcome_batch(b) for b in batches.values()]
     rows = [row for batch in validated for row in batch["outcomes"]]
     by_version = defaultdict(list)
     for row in rows:
         by_version[row["score_version_id"]].append(row)
+    batches_by_version = defaultdict(list)
+    for batch in validated:
+        if batch["predictions"]:
+            batches_by_version[batch["predictions"][0]["score_version_id"]].append(batch)
     metrics = _metrics(rows)
     # Mixing different ranking policies is not an estimate of either model.
     if len(by_version) > 1:
         for key in ("mean_net_return", "mean_excess_return", "mean_net_excess_return", "win_rate"):
             metrics[key] = None
+    ranking_evaluation = _ranking_evaluation(validated if len(by_version) <= 1 else [])
+    if len(by_version) > 1:
+        ranking_evaluation["status"] = "BY_VERSION_ONLY"
     recent_fields = ("prediction_id", "snapshot_key", "score_version_id", "score_version", "published_at", "information_cutoff_at", "name", "market", "code", "rank", "opportunity_score", "entry_trade_date", "forecast_end_trade_date", "status", "reason_code", "net_total_return", "net_excess_return", "maximum_adverse_excursion", "maximum_drawdown")
     return {"schema_version": "opportunity-performance-v1", "track": TRACK,
         "status": "OBSERVING" if metrics["settled_count"] else "COLLECTING", **metrics,
@@ -499,5 +613,7 @@ def evaluate_opportunity_performance(batches):
         "first_maturity_date": min((r["forecast_end_trade_date"] for r in rows), default=None),
         "metric_weighting": "equal_complete_market_entry_session_after_first_publication_security_entry_deduplication",
         "sampling_warning": "同日重复榜单不是独立交易；不同入场日的10日窗口仍可能重叠，日期数不代表统计独立样本。收益为研究观察，未经校准。",
-        "by_version": [{"score_version_id": version, "score_version": group[0]["score_version"], "score_identity": group[0]["score_identity"], **_metrics(group)} for version, group in sorted(by_version.items())],
+        "ranking_evaluation": ranking_evaluation,
+        "by_version": [{"score_version_id": version, "score_version": group[0]["score_version"], "score_identity": group[0]["score_identity"], **_metrics(group),
+                        "ranking_evaluation": _ranking_evaluation(batches_by_version[version])} for version, group in sorted(by_version.items())],
         "recent_outcomes": [{k: row.get(k) for k in recent_fields} for row in sorted(rows, key=lambda r: (r["published_at"], -r["rank"]), reverse=True)[:60]]}

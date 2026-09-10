@@ -409,6 +409,32 @@ def ui_delivery_fixtures(
 
 
 class WorkflowReliabilityTests(unittest.TestCase):
+    def test_node_lock_preflight_happens_before_expensive_provider_work(self) -> None:
+        deploy = WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(deploy.count("run: npm ci"), 1)
+        self.assertLess(deploy.index("run: npm ci"), deploy.index("Generate smart pick snapshot"))
+        preflight = deploy.split("- name: Install Node dependencies", 1)[1].split("- name:", 1)[0]
+        self.assertNotIn("publish_guard", preflight)
+        settlement = OBSERVATION_WORKFLOW.read_text(encoding="utf-8")
+        self.assertLess(settlement.index("run: npm ci"), settlement.index("Settle, validate, and publish observation outcomes"))
+
+    def test_compute_steps_reserve_time_inside_forty_minute_publication_budget(self) -> None:
+        deploy = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("timeout-minutes: 40", deploy)
+        generation = deploy.split("- name: Generate smart pick snapshot", 1)[1].split("- name:", 1)[0]
+        settlement = deploy.split("- name: Update isolated outcome ledgers", 1)[1].split("- name:", 1)[0]
+        self.assertIn("timeout-minutes: 20", generation)
+        self.assertIn("timeout-minutes: 5", settlement)
+
+    def test_failed_ledger_contract_does_not_rerun_entire_provider_pool(self) -> None:
+        workflow = OBSERVATION_WORKFLOW.read_text(encoding="utf-8")
+        failure_branch = workflow.split("if ((settlement_status != 0)); then", 1)[1].split("fi", 1)[0]
+        self.assertIn('exit "${settlement_status}"', failure_branch)
+        self.assertNotIn("continue", failure_branch)
+        # Git fetch/push and changed-cohort join conflicts retain bounded retries.
+        self.assertIn("for attempt in 1 2 3", workflow)
+        self.assertIn("Observation settlement join changed after rebase", workflow)
+
     def test_independent_ci_is_branch_protection_ready_and_never_publishes(self) -> None:
         self.assertTrue(CI_WORKFLOW.is_file())
         workflow = CI_WORKFLOW.read_text(encoding="utf-8")

@@ -75,6 +75,10 @@ class OpportunityOutcomeIntegrationTests(unittest.TestCase):
         self.assertEqual(len(compact["recent_outcomes"]), 3)
         self.assertEqual(len(compact["by_version"]), 4)
         self.assertTrue(compact["by_version_truncated"])
+        self.assertTrue(compact["ranking_evaluation_preview"])
+        self.assertNotIn("ranking_evaluation", compact)
+        self.assertTrue(all("ranking_evaluation" not in row for row in compact["by_version"]))
+        self.assertIn("ranking_evaluation", full["by_version"][0])
         self.assertEqual(len(full["recent_outcomes"]), 60)
 
 

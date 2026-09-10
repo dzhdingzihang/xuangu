@@ -17,16 +17,31 @@ from typing import Any, Mapping
 
 from event_pipeline import candidate_scan_coverage, event_is_auditable
 from market_calendar import expected_quote_session, market_local_date, session_dates
+from security_identity import assess_security
 
 
 CONTRACT_VERSION = "return-opportunities-v1"
-SCORE_VERSION = "return-opportunity-score-v2"
+SCORE_VERSION = "return-opportunity-score-v3"
+SUPPORTED_SCORE_VERSIONS = {None, "return-opportunity-score-v1", "return-opportunity-score-v2", SCORE_VERSION}
 SCORE_KIND = "RETURN_OPPORTUNITY_RULE_SCORE"
 WEIGHTS = {"momentum": 0.30, "relative_strength": 0.20, "acceleration": 0.15,
            "trend_volume": 0.20, "sector_strength": 0.10, "material_event": 0.05}
 MARKETS = ("a_share", "hk", "us")
 CURRENCIES = {"a_share": "CNY", "hk": "HKD", "us": "USD"}
 MIN_DAILY_VALUE = {"a_share": 20_000_000, "hk": 2_000_000, "us": 1_000_000}
+ENTRY_CONTRACT_VERSION = "return-opportunity-entry-v1"
+ENTRY_POLICY = {
+    "contract_version": ENTRY_CONTRACT_VERSION,
+    "timing": "NEXT_SESSION_OPEN_REVIEW",
+    "time_basis": "FIRST_TRADABLE_SESSION_AFTER_VERIFIED_PUBLICATION",
+    "data_mode": "DELAYED_SCHEDULED_SNAPSHOT",
+    "automatic_execution": False,
+    "execution_ready": False,
+    "required_checks": ["FRESH_EXECUTABLE_QUOTE", "SECURITY_TYPE_CONFIRMATION", "TRADABLE_NOT_LIMIT_LOCKED",
+                        "OPEN_GAP_SPREAD_AND_LIQUIDITY", "MATERIAL_NEWS_RECHECK"],
+    "penalty_method": "published_5d_10d_ma20_extension_v1",
+    "maximum_penalty_points": 24,
+}
 LIMITATIONS = [
     "机会分衡量近端收益证据，尚未通过样本外收益预测验证，不代表上涨概率或预期收益。",
     "排名仅覆盖本次召回且数据合格的股票；市场相对强度使用召回池横截面，不代表全市场指数超额收益。",
@@ -34,6 +49,8 @@ LIMITATIONS = [
     "公告扫描仅覆盖有限官方标题与申报元数据；未扫描、扫描失败及成功空结果均不代表已排除重大负面事件。",
     "历史波动情景不是预测分位数；仓位示例无法保证止损成交或最大亏损。",
     "成交成本与未来收益尚未校准，因此预期净收益和概率保持为空。",
+    "入场优先分为原证据分减去涨幅透支规则扣分，不是预测收益；高透支股票仅观察回调，不表示当前可买。",
+    "计划时点为确认发布之后下一可交易开盘的人工复核，必须重新核查可成交报价、跳空、点差、交易状态及重大消息，不按快照价自动成交。",
 ]
 
 
@@ -49,6 +66,44 @@ def _number(value: Any) -> float | None:
 
 def _bounded(value: float, low: float = 0, high: float = 100) -> float:
     return max(low, min(high, value))
+
+
+def _security_evidence(*collections) -> list:
+    # Declared classification must not replace contradictory frozen source
+    # evidence. Stable deduplication permits identical provider records from
+    # metadata and candidate snapshots without introducing order differences.
+    records = {}
+    for collection in collections:
+        for record in collection or []:
+            if isinstance(record, Mapping):
+                records[json.dumps(_json_safe(record), sort_keys=True, default=str)] = dict(record)
+    return [records[key] for key in sorted(records)]
+
+
+def entry_assessment(metrics: Mapping) -> dict:
+    """Deterministic extension overlay; no volatility or sector-name penalty.
+
+    These are explicit research priors, not fitted return coefficients. Published
+    rounded metrics are authoritative so an independent client can reproduce it.
+    Even a verified catalyst does not erase the price already paid for a trend.
+    """
+    values = [_number(metrics.get(key)) for key in ("return_5d_pct", "return_10d_pct", "distance_ma20_pct")]
+    if any(value is None for value in values):
+        raise ValueError("entry assessment requires finite observed return and MA20 metrics")
+    r5, r10, deviation = values
+    reasons = [reason for condition, reason in (
+        (r5 >= 12, "FIVE_DAY_RETURN_EXTENDED"),
+        (r10 >= 20, "TEN_DAY_RETURN_EXTENDED"),
+        (deviation >= 12, "MA20_DISTANCE_EXTENDED"),
+    ) if condition]
+    high = r5 >= 20 or r10 >= 30 or deviation >= 20
+    raw_penalty = max(0, r5 - 12) * .5 + max(0, r10 - 20) * .35 + max(0, deviation - 12) * .5
+    penalty = max(18, min(24, raw_penalty)) if high else max(6, min(16, raw_penalty)) if reasons else 0
+    return {"contract_version": ENTRY_CONTRACT_VERSION,
+            "status": "WAIT_FOR_PULLBACK" if high else "CAUTION" if reasons else "CONDITIONAL_REVIEW",
+            "chase_risk": "HIGH" if high else "ELEVATED" if reasons else "NORMAL",
+            "penalty_points": round(penalty, 2), "reason_codes": reasons,
+            "execution_ready": False}
 
 
 def _aware(value: Any) -> dt.datetime | None:
@@ -176,6 +231,13 @@ def _base_row(snapshot: Mapping, candidate: Mapping, market: str, metadata: Mapp
     quote_time = _aware(realtime.get("source_as_of"))
     price = _number(realtime.get("price")) or _number(realtime.get("current_price")) or _number(candidate.get("price"))
     blockers, flags = [], []
+    security = assess_security({**metadata, **candidate,
+        "security_as_of": generated.isoformat() if generated else None,
+        "security_type_evidence": _security_evidence(metadata.get("security_type_evidence"), candidate.get("security_type_evidence"))}, market)
+    if not security["eligible"]:
+        blockers.append("SECURITY_TYPE_EXCLUDED")
+    elif not security["verified"]:
+        flags.append("SECURITY_TYPE_UNVERIFIED")
     if price is None or price <= 0:
         blockers.append("INVALID_PRICE")
     if generated is None or expected is None:
@@ -267,6 +329,7 @@ def _base_row(snapshot: Mapping, candidate: Mapping, market: str, metadata: Mapp
     result = {
         "market": market, "code": _code(candidate), "name": str(candidate.get("name") or _code(candidate)),
         "sector": _sector(candidate, metadata, cutoff=generated), "qualification_blockers": blockers, "risk_flags": flags,
+        "security_classification": security,
         "event_coverage": event_coverage,
         "reference_quote": {"price": price, "currency": CURRENCIES[market], "source_as_of": realtime.get("source_as_of"),
                             "source": realtime.get("source"), "quote_status": realtime.get("quote_status")},
@@ -408,8 +471,13 @@ def build_return_opportunities(snapshot: Mapping, candidate_pools: Mapping,
                 "market_peer_count": len(peer_rows), "sector_strength_status": "OBSERVED" if len(peers) >= 3 else "NEUTRAL_INSUFFICIENT_COVERAGE"})
             row["components"] = {key: {"score": round(scores[key], 3), "weight": weight,
                                       "contribution": round(scores[key] * weight, 3)} for key, weight in WEIGHTS.items()}
-            row["opportunity_score"] = round(sum(scores[key] * weight for key, weight in WEIGHTS.items()), 2)
-            if row["opportunity_score"] < 60 or max(row["metrics"]["return_5d_pct"], row["metrics"]["return_10d_pct"]) <= 0:
+            row["evidence_score"] = round(sum(component["contribution"] for component in row["components"].values()), 2)
+            row["entry_assessment"] = entry_assessment(row["metrics"])
+            row["opportunity_score"] = round(max(0, row["evidence_score"] - row["entry_assessment"]["penalty_points"]), 2)
+            row["risk_flags"].append("ENTRY_REVIEW_REQUIRED")
+            if row["entry_assessment"]["chase_risk"] != "NORMAL":
+                row["risk_flags"].append("PRICE_EXTENSION_WAIT" if row["entry_assessment"]["chase_risk"] == "HIGH" else "PRICE_EXTENSION_CAUTION")
+            if row["evidence_score"] < 60 or max(row["metrics"]["return_5d_pct"], row["metrics"]["return_10d_pct"]) <= 0:
                 row["qualification_blockers"].append("RETURN_EVIDENCE_BELOW_THRESHOLD")
             row["reasons"] = [f"近5/10/20日收益 {row['metrics']['return_5d_pct']:+.1f}% / {row['metrics']['return_10d_pct']:+.1f}% / {row['metrics']['return_20d_pct']:+.1f}%",
                 f"本市场有效召回池相对强度第 {relative:.0f} 百分位，样本 {len(peer_rows)} 只",
@@ -430,7 +498,7 @@ def build_return_opportunities(snapshot: Mapping, candidate_pools: Mapping,
                 row.pop(key)
         if row["qualification_blockers"]:
             row["qualification_status"] = "EXCLUDED"
-            excluded.append({key: row.get(key) for key in ("market", "code", "name", "opportunity_score", "score_version", "qualification_status", "qualification_blockers", "event_coverage", "risk_flags", "sector")})
+            excluded.append({key: row.get(key) for key in ("market", "code", "name", "opportunity_score", "evidence_score", "entry_assessment", "security_classification", "score_version", "qualification_status", "qualification_blockers", "event_coverage", "risk_flags", "sector")})
         else:
             row["qualification_status"] = "RESEARCH_ELIGIBLE"
             eligible.append(row)
@@ -464,18 +532,22 @@ def build_return_opportunities(snapshot: Mapping, candidate_pools: Mapping,
             + [row["code"] for row in local]
         ))[:24]
         stats.update({"eligible_count": len(local), "excluded_count": stats["evaluated_count"] - len(local),
+                      "entry_status_counts": dict(Counter(row["entry_assessment"]["status"] for row in local)),
                       "primary": local[0] if local else None})
     result = {"contract_version": CONTRACT_VERSION, "status": "RESEARCH_READY" if eligible else "NO_OPPORTUNITY",
         "generated_at": snapshot.get("generated_at"), "horizon_trade_days": 10, "score_kind": SCORE_KIND, "score_version": SCORE_VERSION,
+        "feature_cutoff_at": snapshot.get("feature_cutoff_at") or snapshot.get("generated_at"),
         "calibrated": False, "production_eligible": False, "expected_net_return": None, "probability": None,
         "evaluated_count": len(all_rows), "eligible_count": len(eligible), "excluded_count": len(excluded),
         "primary": eligible[0] if eligible else None, "candidates": selected, "excluded_candidates": excluded,
         "market_summaries": market_stats, "weights": dict(WEIGHTS), "limitations": list(LIMITATIONS),
+        "entry_policy": copy.deepcopy(ENTRY_POLICY),
         "event_scan_targets_by_market": scan_targets,
-        "selection_policy": {"score_version": SCORE_VERSION, "minimum_score": 60, "maximum_displayed": 12, "soft_sector_cap": 4,
+        "selection_policy": {"score_version": SCORE_VERSION, "minimum_score": 0, "minimum_evidence_score": 60,
+                             "qualification_basis": "evidence_score_before_entry_penalty", "maximum_displayed": 12, "soft_sector_cap": 4,
                              "sector_evidence_policy": "fresh_sourced_classification_only",
                              "event_coverage_policy": "bounded_enrichment_with_explicit_unknown_negative_risk",
-                             "ranking_basis": "observed_return_evidence", "scenario_upside_used_in_ranking": False}}
+                             "ranking_basis": "observed_return_evidence_minus_entry_extension", "scenario_upside_used_in_ranking": False}}
     return _json_safe(result)
 
 
@@ -501,7 +573,7 @@ def validate_return_opportunities(contract: Any) -> list[str]:
     for key, expected in fixed.items():
         if key not in contract or contract[key] != expected or (expected is False and contract[key] is not False):
             errors.append(f"{prefix}.{key} is invalid")
-    if contract.get("score_version") not in {None, SCORE_VERSION}:
+    if contract.get("score_version") not in SUPPORTED_SCORE_VERSIONS:
         errors.append(prefix + ".score_version is invalid")
     def check_finite(value, path):
         if isinstance(value, float) and not math.isfinite(value):
@@ -513,7 +585,17 @@ def validate_return_opportunities(contract: Any) -> list[str]:
             for index, item in enumerate(value):
                 check_finite(item, path + f"[{index}]")
     check_finite(contract, prefix)
-    if contract.get("score_version") == SCORE_VERSION:
+    is_entry_version = contract.get("score_version") == SCORE_VERSION
+    if is_entry_version:
+        if contract.get("entry_policy") != ENTRY_POLICY or any((contract.get("entry_policy") or {}).get(key) is not False for key in ("automatic_execution", "execution_ready")):
+            errors.append(prefix + ".entry_policy is invalid")
+        policy = contract.get("selection_policy") or {}
+        expected_policy = {"score_version": SCORE_VERSION, "minimum_score": 0, "minimum_evidence_score": 60,
+                           "qualification_basis": "evidence_score_before_entry_penalty",
+                           "ranking_basis": "observed_return_evidence_minus_entry_extension"}
+        if any(policy.get(key) != value for key, value in expected_policy.items()):
+            errors.append(prefix + ".selection_policy entry qualification is invalid")
+    if contract.get("score_version") in {"return-opportunity-score-v2", SCORE_VERSION}:
         for collection in ("candidates", "excluded_candidates"):
             for index, row in enumerate(contract.get(collection) or []):
                 if not isinstance(row, Mapping):
@@ -538,7 +620,7 @@ def validate_return_opportunities(contract: Any) -> list[str]:
                     required_flags.append("OFFICIAL_EVENT_SCAN_ERROR" if status == "ERROR" else "OFFICIAL_EVENT_NOT_SCANNED")
                 if any(flag not in flags for flag in required_flags):
                     errors.append(path + ".risk_flags omit filing uncertainty")
-                if row.get("score_version") != SCORE_VERSION:
+                if row.get("score_version") != contract.get("score_version"):
                     errors.append(path + ".score_version mismatch")
     counts = [contract.get(key) for key in ("evaluated_count", "eligible_count", "excluded_count")]
     if not all(type(count) is int and count >= 0 for count in counts) or counts[0] != counts[1] + counts[2]:
@@ -571,10 +653,41 @@ def validate_return_opportunities(contract: Any) -> list[str]:
             errors.append(path + ".rank must increase")
         else:
             previous_rank = rank
-        if score is None or score < 60 or score > 100 or score > previous_score:
+        if score is None or score < (0 if is_entry_version else 60) or score > 100 or score > previous_score:
             errors.append(path + ".opportunity_score is invalid or out of order")
         else:
             previous_score = score
+        if is_entry_version:
+            try:
+                expected_entry = entry_assessment(row.get("metrics") or {})
+                if row.get("entry_assessment") != expected_entry or row["entry_assessment"].get("execution_ready") is not False or _number(row["entry_assessment"].get("penalty_points")) is None:
+                    raise ValueError("entry assessment differs from observed metrics")
+                security = row.get("security_classification") or {}
+                frozen_security = row.get("candidate_snapshot") or {}
+                security_cutoff = _aware(contract.get("feature_cutoff_at")) or _aware(contract.get("generated_at"))
+                security_input = {**frozen_security, "code": row.get("code"),
+                    "security_as_of": security_cutoff.isoformat() if security_cutoff else None,
+                    "name": row.get("name"), "security_type_evidence": _security_evidence(
+                        frozen_security.get("security_type_evidence"), security.get("evidence"))}
+                expected_security = assess_security(security_input, row.get("market"))
+                if security != expected_security or not security.get("eligible") or security.get("verified") is not expected_security["verified"]:
+                    raise ValueError("security classification is invalid or non-stock")
+                if not security["verified"] and "SECURITY_TYPE_UNVERIFIED" not in (row.get("risk_flags") or []):
+                    raise ValueError("unknown security type omitted")
+                components = row.get("components") or {}
+                if set(components) != set(WEIGHTS):
+                    raise ValueError("evidence components missing")
+                for key, weight in WEIGHTS.items():
+                    component = components[key]
+                    component_score = _number(component.get("score"))
+                    contribution = _number(component.get("contribution"))
+                    if component_score is None or not 0 <= component_score <= 100 or component.get("weight") != weight or contribution is None or abs(contribution - round(component_score * weight, 3)) > .00101:
+                        raise ValueError("evidence component arithmetic invalid")
+                evidence = round(sum(component["contribution"] for component in components.values()), 2)
+                if not 60 <= evidence <= 100 or row.get("evidence_score") != evidence or score != round(max(0, evidence - expected_entry["penalty_points"]), 2):
+                    raise ValueError("entry priority score arithmetic invalid")
+            except (TypeError, ValueError, KeyError, AttributeError):
+                errors.append(path + ".entry_assessment/evidence_score is invalid")
         frozen = row.get("candidate_snapshot")
         if frozen is not None and (not isinstance(frozen, Mapping) or _code(frozen) != row.get("code")):
             errors.append(path + ".candidate_snapshot identity mismatch")

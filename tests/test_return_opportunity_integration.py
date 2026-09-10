@@ -201,7 +201,7 @@ assert any('return_opportunities' in error for error in errors), errors
         self.assertIs(compact["production_eligible"], False)
         self.assertIsNone(compact["probability"])
         self.assertIsNone(compact["expected_net_return"])
-        self.assertEqual(compact["primary"], compact["candidates"][0])
+        self.assertEqual(compact["primary"], {key: compact["candidates"][0][key] for key in ("market", "code", "rank", "opportunity_score")})
         self.assertEqual([row["rank"] for row in compact["candidates"]],
                          [row["rank"] for row in original["candidates"]])
         self.assertEqual(bootstrap["production_decision"]["qualified_candidate_count"], 1)

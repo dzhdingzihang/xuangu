@@ -14,6 +14,7 @@ import event_pipeline
 import opportunity_outcome_ledger
 import return_opportunity
 import sector_metadata
+import security_identity
 from scripts import build_worker_assets as builder
 from scripts import verify_deployment
 
@@ -66,6 +67,24 @@ def full_coverage_capacity_fixture():
     return snapshot, tracking
 
 
+def overlay_entry_capacity_fields(snapshot):
+    """Size-only v3 shapes, not a recomputed ranking or historical registration."""
+    board = snapshot["return_opportunities"]
+    board["score_version"] = "return-opportunity-score-v3"
+    board["entry_policy"] = copy.deepcopy(return_opportunity.ENTRY_POLICY)
+    stamp = snapshot["feature_cutoff_at"]
+    for row in board["candidates"]:
+        row["score_version"] = board["score_version"]
+        row["evidence_score"] = row["opportunity_score"]
+        row["entry_assessment"] = return_opportunity.entry_assessment(row["metrics"])
+        identity = {"code": row["code"], "market": row["market"], "name": row["name"], "security_as_of": stamp,
+                    "security_type_evidence": [{"symbol": row["code"], "source": "yahoo_chart_meta",
+                        "field": "instrumentType", "raw_value": "EQUITY", "retrieved_at": stamp,
+                        "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/TEST_FIXTURE"}]}
+        row["security_classification"] = security_identity.assess_security(identity, row["market"])
+    board["primary"] = copy.deepcopy(board["candidates"][0])
+
+
 class OpportunitySummaryCapacityTests(unittest.TestCase):
     def test_real_board_with_full_new_coverage_and_recent_rows_fits_summary_budget(self):
         with mock.patch("requests.sessions.Session.request", side_effect=AssertionError("capacity fixture cannot request providers")):
@@ -88,10 +107,11 @@ class OpportunitySummaryCapacityTests(unittest.TestCase):
             self.assertEqual(len(bootstrap["opportunity_outcome_tracking"]["recent_outcomes"]), 3)
             compact = bootstrap["return_opportunities"]
             self.assertEqual(len(compact["candidates"]), 12)
-            self.assertEqual(compact["primary"], compact["candidates"][0])
+            self.assertEqual(compact["primary"], {key: compact["candidates"][0][key] for key in ("market", "code", "rank", "opportunity_score")})
             for original, row in zip(original_board["candidates"], compact["candidates"]):
-                for key in ("rank", "opportunity_score", "sector", "risk_flags"):
+                for key in ("rank", "opportunity_score", "risk_flags"):
                     self.assertEqual(row[key], original[key])
+                self.assertEqual({**compact.get("sector_policy", {}), **row["sector"]}, original["sector"])
                 self.assertEqual({**compact["event_scan_policy"], **row["event_coverage"]}, original["event_coverage"])
 
     def test_long_sector_names_and_four_score_versions_leave_capacity_headroom(self):
@@ -108,6 +128,7 @@ class OpportunitySummaryCapacityTests(unittest.TestCase):
             batch = opportunity_outcome_ledger.register_opportunity_snapshot(sample, published_at=sample["feature_cutoff_at"])
             batches[batch["snapshot_key"]] = batch
         snapshot["opportunity_outcome_tracking"] = opportunity_outcome_ledger.evaluate_opportunity_performance(batches)
+        overlay_entry_capacity_fields(snapshot)
         payload = builder.build_worker_ui_bootstrap(snapshot, {}, builder._stable_json_bytes(snapshot))
         self.assertEqual(len(payload["opportunity_outcome_tracking"]["by_version"]), 4)
         self.assertEqual(len(payload["opportunity_outcome_tracking"]["recent_outcomes"]), 3)
@@ -138,6 +159,7 @@ class OpportunitySummaryCapacityTests(unittest.TestCase):
 
     def test_compact_projection_keeps_exact_deployment_ranking_and_evidence_checks(self):
         snapshot, _ = full_coverage_capacity_fixture()
+        overlay_entry_capacity_fields(snapshot)
         spec = verify_deployment.UI_ASSET_SPECS["latest-summary"]
         payload = {"ok": True, "contract_version": spec["contract_version"],
                    "latest": {"return_opportunities": builder.summarize_return_opportunities(snapshot)}, "status": {}}
@@ -152,7 +174,7 @@ class OpportunitySummaryCapacityTests(unittest.TestCase):
                     source_snapshot_sha256="a" * 64, source_snapshot_byte_size=1)
 
             self.assertEqual(errors(payload), [])
-            for change in ("rank", "score", "coverage", "sector_source", "shared_policy"):
+            for change in ("rank", "score", "coverage", "sector_source", "shared_policy", "entry", "security"):
                 altered = copy.deepcopy(payload)
                 board = altered["latest"]["return_opportunities"]
                 row = board["candidates"][0]
@@ -164,6 +186,10 @@ class OpportunitySummaryCapacityTests(unittest.TestCase):
                     row["event_coverage"]["verified"] = False
                 elif change == "sector_source":
                     row["sector"]["source"] = "TEST_FIXTURE_tampered"
+                elif change == "entry":
+                    row["entry_assessment"]["execution_ready"] = True
+                elif change == "security":
+                    row["security_classification"]["verified"] = False
                 else:
                     board["event_scan_policy"]["limitations"] = []
                 with self.subTest(change=change):
