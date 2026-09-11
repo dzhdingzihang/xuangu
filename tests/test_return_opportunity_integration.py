@@ -170,7 +170,7 @@ assert any('return_opportunities' in error for error in errors), errors
         before_production = copy.deepcopy(snapshot["production_decision"])
         source_bytes = json.dumps(snapshot).encode()
 
-        detail = build_worker_assets.build_worker_ui_candidates(snapshot, source_bytes)
+        detail = build_worker_assets.build_worker_ui_candidates(snapshot, source_bytes, for_detail_assets=True)
         live = build_worker_assets.build_worker_live_index(snapshot, source_bytes)
         by_code = {row["code"]: row for row in detail["candidates"]}
         for row in opportunity["candidates"]:

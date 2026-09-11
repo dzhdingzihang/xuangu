@@ -1285,6 +1285,10 @@ def compact_ui_candidate(candidate: dict | None, market: str, *, detail: bool) -
         "risk_items",
         "decision_gates",
         "candidate_lineage",
+        "estimated_10d_range",
+        "risk_reward",
+        "currency",
+        "ten_day_trade_plan",
     )
     result = {key: copy.deepcopy(candidate[key]) for key in fields if key in candidate}
     lineage = result.get("candidate_lineage")
@@ -1781,7 +1785,7 @@ def build_worker_ui_bootstrap(
     return payload
 
 
-def build_worker_ui_candidates(snapshot: dict, source_snapshot_bytes: bytes) -> dict:
+def build_worker_ui_candidates(snapshot: dict, source_snapshot_bytes: bytes, *, for_detail_assets: bool = False) -> dict:
     roles, ranks, production_ranks = _candidate_role_maps(snapshot)
     candidates: dict[tuple[str, str], dict] = {}
     for market, raw_candidate in iter_live_candidates(snapshot):
@@ -1844,16 +1848,31 @@ def build_worker_ui_candidates(snapshot: dict, source_snapshot_bytes: bytes) -> 
         "qualified_candidate_ids": qualified_ids,
         "qualified_candidate_count": len(qualified_ids),
     }
+    if not for_detail_assets:
+        # Never ship the combined full research dossiers as the list fallback.
+        # Every full row is independently emitted below as a size-bounded,
+        # identity-bound detail asset, so richer/newer evidence cannot make
+        # the whole generation exceed this aggregate list budget.
+        list_rows = []
+        for row in rows:
+            compact = compact_ui_candidate(row, row["market"], detail=False)
+            compact.update({key: copy.deepcopy(row[key]) for key in (
+                "id", "role_contract_version", "decision_roles", "decision_role",
+                "legacy_rank", "production_rank", "production_qualification",
+            ) if key in row})
+            list_rows.append(compact)
+        rows = list_rows
     payload = {
         **_ui_identity_envelope(snapshot, source_snapshot_bytes, WORKER_UI_CANDIDATES_CONTRACT_VERSION),
         "role_contract_version": CANDIDATE_ROLE_CONTRACT_VERSION,
         "production_selection": production_selection,
         "candidates": rows,
         "candidate_count": len(rows),
+        "candidate_detail_mode": "ON_DEMAND" if not for_detail_assets else "FULL_INTERNAL",
         "dual_low_model": compact_runtime_value(((snapshot.get("analysis_models") or {}).get("dual_low") or {})),
     }
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-    if len(encoded) > MAX_WORKER_UI_CANDIDATES_BYTES:
+    if not for_detail_assets and len(encoded) > MAX_WORKER_UI_CANDIDATES_BYTES:
         raise ValueError(
             f"worker UI candidates byte-size limit exceeded: {len(encoded)} > {MAX_WORKER_UI_CANDIDATES_BYTES}"
         )
@@ -2354,8 +2373,13 @@ def build_data_manifest_assets(
 
     detail_keys: dict[str, str] = {}
     detail_meta: dict[str, dict] = {}
-    for compact, detail in zip(compact_rows, candidate_rows, strict=True):
+    full_candidates = build_worker_ui_candidates(snapshot, source_snapshot_bytes, for_detail_assets=True)
+    full_by_id = {row["id"]: row for row in full_candidates["candidates"]}
+    if set(full_by_id) != {row["id"] for row in compact_rows}:
+        raise ValueError("candidate detail identities differ from published list")
+    for compact in compact_rows:
         candidate_id = str(compact["id"])
+        detail = full_by_id[candidate_id]
         payload = {
             "contract_version": CANDIDATE_DETAIL_CONTRACT_VERSION,
             **identity,

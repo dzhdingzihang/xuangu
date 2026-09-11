@@ -1090,7 +1090,8 @@ class BuildWorkerAssetsTests(unittest.TestCase):
         self.assertEqual(candidates["contract_version"], "ui-candidates-v2")
         self.assertEqual(candidates["role_contract_version"], "candidate-role-v1")
         self.assertIn("PFE", {row["code"] for row in candidates["candidates"]})
-        self.assertTrue(any(row.get("kline") for row in candidates["candidates"]))
+        self.assertFalse(any(row.get("kline") for row in candidates["candidates"]))
+        self.assertEqual(candidates["candidate_detail_mode"], "ON_DEMAND")
         by_code = {row["code"]: row for row in candidates["candidates"]}
         self.assertEqual(by_code["PFE"]["decision_role"], "production_primary")
         self.assertEqual(
