@@ -3285,8 +3285,10 @@ const RETURN_OPPORTUNITY_RISK_LABELS = {
 
 function expandOpportunityProjection(source) {
   if (!source || source.primary_projection !== "rank-one-identity-v1") return source;
-  const rows = Array.isArray(source.candidates) ? source.candidates.map((row) => ({...row,
-    sector: {...(source.sector_policy || {}), ...(row.sector || {})}})) : [];
+  const rows = Array.isArray(source.candidates) ? source.candidates.map((row) => ({...(source.candidate_defaults || {}), ...row,
+    sector: {...(source.sector_policy || {}), ...(row.sector || {})},
+    ...(source.entry_assessment_defaults ? {entry_assessment: {...source.entry_assessment_defaults, ...(row.entry_assessment || {})}} : {}),
+    ...(source.metrics_defaults ? {metrics: {...source.metrics_defaults, ...(row.metrics || {})}} : {})})) : [];
   const reference = source.primary;
   const first = rows[0];
   const validReference = first && isRecord(reference)

@@ -1360,6 +1360,12 @@ def _production_ui_summary(snapshot: dict) -> dict | None:
         if not isinstance(row, dict) or row.get("market") not in LIVE_MARKETS:
             continue
         compact = compact_ui_candidate(row, str(row["market"]), detail=False)
+        if compact is not None:
+            # Qualification rows already carry the decision evidence. Repeating
+            # every recall route under both primary and qualified mirrors can
+            # grow the bootstrap with each successful qualification. The full
+            # lineage remains in the immutable per-security detail asset.
+            compact.pop("candidate_lineage", None)
         qualification_id = row.get("qualification_id")
         if compact is not None and isinstance(qualification_id, str):
             candidates_by_id[qualification_id] = compact
@@ -1705,6 +1711,30 @@ def summarize_return_opportunities(snapshot: dict) -> dict | None:
         key: result["candidates"][0][key]
         for key in ("market", "code", "rank", "opportunity_score")
     } if result["candidates"] else None
+    rows = result["candidates"]
+    if rows:
+        common = {key: copy.deepcopy(rows[0][key]) for key in (
+            "score_kind", "score_version", "calibrated", "production_eligible",
+            "probability", "expected_net_return", "qualification_status", "qualification_blockers",
+        ) if key in rows[0] and all(key in row and row[key] == rows[0][key] for row in rows)}
+        result["candidate_defaults"] = common
+        for row in rows:
+            for key in common:
+                row.pop(key, None)
+        for field, keys in (
+            ("entry_assessment", ("contract_version", "execution_ready")),
+            ("metrics", ("source_window_start_date", "source_window_end_date", "kline_count")),
+        ):
+            values = [row.get(field) for row in rows]
+            if not all(isinstance(value, dict) for value in values):
+                continue
+            shared = {key: copy.deepcopy(values[0][key]) for key in keys
+                      if key in values[0] and all(key in value and value[key] == values[0][key] for value in values)}
+            if shared:
+                result[field + "_defaults"] = shared
+                for value in values:
+                    for key in shared:
+                        value.pop(key, None)
     sectors = [row.get("sector") for row in result["candidates"]]
     if sectors and all(isinstance(row, dict) for row in sectors):
         common = {key: copy.deepcopy(sectors[0][key])

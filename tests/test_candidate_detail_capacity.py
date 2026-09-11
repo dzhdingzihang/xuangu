@@ -11,6 +11,19 @@ from tests.test_build_worker_assets import runtime_snapshot_fixture, runtime_quo
 
 
 class CandidateDetailCapacityTests(unittest.TestCase):
+    def test_bootstrap_qualification_does_not_repeat_recall_dossiers(self):
+        snapshot = runtime_snapshot_fixture()
+        for row in [snapshot["production_decision"]["primary"], *snapshot["production_decision"]["qualified_candidates"]]:
+            row["candidate_snapshot"]["candidate_lineage"] = {"recall_routes": [
+                {"route": "liquidity", "source": "TEST_FIXTURE", "reason": "x" * 8000}]}
+        source = json.dumps(snapshot).encode()
+        compact = builder.build_worker_ui_bootstrap(snapshot, {}, source)["production_decision"]
+        for row in [compact["primary"], *compact["qualified_candidates"]]:
+            self.assertNotIn("candidate_lineage", row["candidate_snapshot"])
+            self.assertEqual(row["candidate_snapshot"]["code"], row["code"])
+        full = builder.build_worker_ui_candidates(snapshot, source, for_detail_assets=True)
+        self.assertTrue(next(row for row in full["candidates"] if row["code"] == "PFE")["candidate_lineage"]["recall_routes"])
+
     def test_many_rich_dossiers_are_loaded_individually_without_losing_evidence(self):
         snapshot = runtime_snapshot_fixture()
         rows = []

@@ -8,12 +8,18 @@ class OpportunityEntryUiTests(unittest.TestCase):
         run_app_node("""
           const row = {market:'us',code:'AAA',rank:1,opportunity_score:75,sector:{name:'Technology',source_url:'https://example.test/AAA'}};
           const source = {primary_projection:'rank-one-identity-v1',primary:{market:'us',code:'AAA',rank:1,opportunity_score:75},
-            candidates:[row],sector_policy:{source:'provider',status:'KNOWN',verified:true}};
+            candidates:[row],sector_policy:{source:'provider',status:'KNOWN',verified:true},
+            candidate_defaults:{calibrated:false,score_version:'return-opportunity-score-v3'},
+            entry_assessment_defaults:{contract_version:'return-opportunity-entry-v1',execution_ready:false},
+            metrics_defaults:{source_window_start_date:'2026-08-01'}};
           const copy = JSON.stringify(source);
           const expanded = expandOpportunityProjection(source);
           assert.deepEqual(expanded.primary, expanded.candidates[0]);
           assert.equal(expanded.primary.sector.source,'provider');
           assert.equal(expanded.primary.sector.source_url,'https://example.test/AAA');
+          assert.equal(expanded.primary.calibrated,false);
+          assert.equal(expanded.primary.entry_assessment.execution_ready,false);
+          assert.equal(expanded.primary.metrics.source_window_start_date,'2026-08-01');
           assert.equal(JSON.stringify(source),copy);
           const invalid = expandOpportunityProjection({...source,primary:{...source.primary,code:'OTHER'}});
           assert.notDeepEqual(invalid.primary,invalid.candidates[0]);
