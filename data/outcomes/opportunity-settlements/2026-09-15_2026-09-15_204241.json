@@ -1,8 +1,8 @@
 {
   "authorizes_production": false,
-  "batch_sha256": "f450a32e4b1f53f3a9ddc5a2fdc1ba212f01d89c923cef77e08ff1697577d0fa",
+  "batch_sha256": "8708afdb30373cbdbeccf6ab64ad4db9d8b4f9a331bc10a15b3e1b66f33a9392",
   "calibrated": false,
-  "evaluated_at": "2026-09-15T12:49:34+00:00",
+  "evaluated_at": "2026-09-29T00:32:07.975839+00:00",
   "outcomes": [
     {
       "authorizes_production": false,
@@ -142,13 +142,13 @@
       "market_rank": 1,
       "name": "高通",
       "opportunity_score": 76.5,
-      "outcome_sha256": "0c434c57906fd32a49c18d6f0609cb24814d6ba795b602bad6b7eb9a4a1ec949",
+      "outcome_sha256": "b937ef7365ba64eb95bf61d6638c3bd163f492af946af338a344c8de2f103091",
       "prediction_id": "opppred_d97e0c0672bac72162aa2d0a",
       "prediction_sha256": "73402c06eb64fef2ca60f0c8d682ef8612b45cc17645fe2fa9e64d739bcc3b0f",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-09-15T12:49:34+00:00",
       "rank": 2,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": "COMPLETE_ADJUSTED_WINDOW_MISSING",
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -196,7 +196,7 @@
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
       "snapshot_key": "2026-09-15_2026-09-15_204241.json",
       "source_snapshot_sha256": "25e383cb705837233e4052ad9fecefae281f9a9351d3165186a9917ee19443fe",
-      "status": "PENDING_MATURITY",
+      "status": "PENDING_DATA",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -340,13 +340,13 @@
       "market_rank": 2,
       "name": "Equinor ASA ADR",
       "opportunity_score": 74.63,
-      "outcome_sha256": "d9293351f099d18f6113adad92277da38750d49f0663b3917a8965e90728c93e",
+      "outcome_sha256": "ae663f1d8353dd4b5ecd3cf557c7814dcd8d6d88d6fd0eb053d116efead7b12c",
       "prediction_id": "opppred_ab00717a7caf9e4ca97b25f2",
       "prediction_sha256": "cfab62039608813a96ae52f0fd563e75c7626d9e797c50544811c71cd8c2c2d9",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-09-15T12:49:34+00:00",
       "rank": 4,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": "COMPLETE_ADJUSTED_WINDOW_MISSING",
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -394,7 +394,7 @@
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
       "snapshot_key": "2026-09-15_2026-09-15_204241.json",
       "source_snapshot_sha256": "25e383cb705837233e4052ad9fecefae281f9a9351d3165186a9917ee19443fe",
-      "status": "PENDING_MATURITY",
+      "status": "PENDING_DATA",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -2405,9 +2405,10 @@
   "schema_version": "opportunity-outcome-batch-v1",
   "snapshot_key": "2026-09-15_2026-09-15_204241.json",
   "source_snapshot_sha256": "25e383cb705837233e4052ad9fecefae281f9a9351d3165186a9917ee19443fe",
-  "status": "PENDING_MATURITY",
+  "status": "PARTIAL",
   "status_counts": {
-    "PENDING_MATURITY": 12
+    "PENDING_DATA": 2,
+    "PENDING_MATURITY": 10
   },
   "track": "RETURN_OPPORTUNITY"
 }

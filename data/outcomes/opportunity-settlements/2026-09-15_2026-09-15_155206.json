@@ -1,8 +1,8 @@
 {
   "authorizes_production": false,
-  "batch_sha256": "3f185a6b5abfe20d59daaf1d36268e948ea10b2bc35f444bff483852f668402a",
+  "batch_sha256": "aea080366020155f5083a124082e8998fbf1e8d47db01aaade3e8d2e064a94ea",
   "calibrated": false,
-  "evaluated_at": "2026-09-15T07:58:10+00:00",
+  "evaluated_at": "2026-09-29T00:32:07.975839+00:00",
   "outcomes": [
     {
       "authorizes_production": false,
@@ -239,13 +239,13 @@
       "market_rank": 1,
       "name": "高通",
       "opportunity_score": 76.5,
-      "outcome_sha256": "392c80557010cfc7a232ffc8c89c990650d45a8724222cad961399a39e983abf",
+      "outcome_sha256": "bf40cdb67e6ff6a6dfd1a395b554d3e7e03ac9c764390ef15b62c82f98aee0a6",
       "prediction_id": "opppred_22e1c548076c7fc963f3033c",
       "prediction_sha256": "6edefda2f14b2ee3a2c6c6f7ffa77acc0a287ca936dbd01c3cb465f68963c8fa",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-09-15T07:58:10+00:00",
       "rank": 3,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": "COMPLETE_ADJUSTED_WINDOW_MISSING",
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -293,7 +293,7 @@
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
       "snapshot_key": "2026-09-15_2026-09-15_155206.json",
       "source_snapshot_sha256": "b0f2e30cae578c23dfbb044c9e2ff150f4a20021b34608b9723549cf4a14d06a",
-      "status": "PENDING_MATURITY",
+      "status": "PENDING_DATA",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -437,13 +437,13 @@
       "market_rank": 2,
       "name": "Equinor ASA ADR",
       "opportunity_score": 74.63,
-      "outcome_sha256": "32d2f4bb6d58974bfe559ffe9aa84c5ee7048433bb0f3af5b3d37d47ace29a7a",
+      "outcome_sha256": "f1a8095cc1a6664f092e2cbc2af2c784460dfadae26507590d8792e01d7e5ddd",
       "prediction_id": "opppred_1d630e05616fbe07df16357f",
       "prediction_sha256": "3b2d18e6944ddd34b8092f581d5a18d39f3391bb33db186c142b4036abf64f0d",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-09-15T07:58:10+00:00",
       "rank": 5,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": "COMPLETE_ADJUSTED_WINDOW_MISSING",
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -491,7 +491,7 @@
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
       "snapshot_key": "2026-09-15_2026-09-15_155206.json",
       "source_snapshot_sha256": "b0f2e30cae578c23dfbb044c9e2ff150f4a20021b34608b9723549cf4a14d06a",
-      "status": "PENDING_MATURITY",
+      "status": "PENDING_DATA",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -534,13 +534,13 @@
       "market_rank": 3,
       "name": "壳牌",
       "opportunity_score": 74.61,
-      "outcome_sha256": "673dd3ea0179c4a221b4a8e8d1b1a3a60a281c0beb3952fdf5441fe3e562651f",
+      "outcome_sha256": "bbc45814fcb1596f0069dad6b3cfcb318c6104e1e367ae7bab1a6ca47413cc8a",
       "prediction_id": "opppred_62eae03115e9ed91f894a2fb",
       "prediction_sha256": "d088d5ab886f69598011e558d45bac1b690bc8dd1a54fc18b56b33e6126e55f0",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-09-15T07:58:10+00:00",
       "rank": 6,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": "COMPLETE_ADJUSTED_WINDOW_MISSING",
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -588,7 +588,7 @@
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
       "snapshot_key": "2026-09-15_2026-09-15_155206.json",
       "source_snapshot_sha256": "b0f2e30cae578c23dfbb044c9e2ff150f4a20021b34608b9723549cf4a14d06a",
-      "status": "PENDING_MATURITY",
+      "status": "PENDING_DATA",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -2399,9 +2399,10 @@
   "schema_version": "opportunity-outcome-batch-v1",
   "snapshot_key": "2026-09-15_2026-09-15_155206.json",
   "source_snapshot_sha256": "b0f2e30cae578c23dfbb044c9e2ff150f4a20021b34608b9723549cf4a14d06a",
-  "status": "PENDING_MATURITY",
+  "status": "PARTIAL",
   "status_counts": {
-    "PENDING_MATURITY": 12
+    "PENDING_DATA": 3,
+    "PENDING_MATURITY": 9
   },
   "track": "RETURN_OPPORTUNITY"
 }
