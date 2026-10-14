@@ -1,8 +1,8 @@
 {
   "authorizes_production": false,
-  "batch_sha256": "0b3b4aff5305a8b0097033385c3de5ee06256a9b5c0e61479533fee4641d6d2e",
+  "batch_sha256": "6cc00775b0e48e803715102be822a21966861ce293b5bfe700c0ef9b6993dabc",
   "calibrated": false,
-  "evaluated_at": "2026-09-30T13:52:47+00:00",
+  "evaluated_at": "2026-10-14T23:20:54.924039+00:00",
   "outcomes": [
     {
       "authorizes_production": false,
@@ -204,6 +204,11 @@
     {
       "authorizes_production": false,
       "benchmark_code": "SPY",
+      "benchmark_entry_open": 764.35998535,
+      "benchmark_exit_close": 769.59997559,
+      "benchmark_gross_return": 0.0068554,
+      "benchmark_net_return": 0.0053554,
+      "benchmark_price_source": "yahoo_chart_adjusted_daily",
       "benchmark_transaction_cost": 0.0015,
       "benchmark_transaction_cost_version": "market-round-trip-cost-v1",
       "calendar_id": "XNYS",
@@ -211,6 +216,7 @@
       "calibrated": false,
       "candidate_evidence_sha256": "16f2a2d5df51564de235b24f0927539020be0755ecb41cc0053fe45841537ad7",
       "code": "NTAP",
+      "corporate_action_adjusted": true,
       "currency": "USD",
       "decision_time": "2026-09-30T13:52:47+00:00",
       "entry_assessment": {
@@ -226,26 +232,186 @@
         "return_10d_pct": 11.625,
         "return_5d_pct": 8.873
       },
+      "entry_open": 211.27343349,
       "entry_session_open_at": "2026-10-01T13:30:00+00:00",
       "entry_trade_date": "2026-10-01",
       "evidence_score": 74.47,
+      "exit_close": 222.19999695,
       "feature_cutoff_at": "2026-09-30T13:47:13.721664+00:00",
       "forecast_end_session_close_at": "2026-10-14T20:00:00+00:00",
       "forecast_end_trade_date": "2026-10-14",
       "generated_at": "2026-09-30T13:45:20+00:00",
+      "gross_total_return": 0.05171764,
       "horizon_sessions": 10,
       "information_cutoff_at": "2026-09-30T13:52:47+00:00",
       "market": "us",
       "market_rank": 1,
+      "maximum_adverse_excursion": -0.01756789,
+      "maximum_drawdown": -0.07458816,
       "name": "美国网存",
+      "net_excess_return": 0.04486224,
+      "net_total_return": 0.05021764,
       "opportunity_score": 74.47,
-      "outcome_sha256": "5e0e374a0e55f6aa1a61e323adf888399dc2960f867e2e705bd061037ed2da0c",
+      "outcome_sha256": "6eabdc4040a8164f508fbab54ed05aa865b56a58a3bb86bc76cdc785cbc705a3",
       "prediction_id": "opppred_4597ba2c9aa658e5cfd8a4ab",
       "prediction_sha256": "fb5042837cc45283b18e1c814ea954a2ccedf186bab426f6f69f970010e37306",
+      "price_evidence": {
+        "benchmark_rows": [
+          {
+            "close": 763.98999023,
+            "date": "2026-10-01",
+            "high": 765.65002441,
+            "low": 758.78997803,
+            "open": 764.35998535
+          },
+          {
+            "close": 769.64001465,
+            "date": "2026-10-02",
+            "high": 772.65002441,
+            "low": 767.15002441,
+            "open": 770.58001709
+          },
+          {
+            "close": 774.83001709,
+            "date": "2026-10-05",
+            "high": 776.60998535,
+            "low": 769.63000488,
+            "open": 769.69000244
+          },
+          {
+            "close": 779.09002686,
+            "date": "2026-10-06",
+            "high": 781.61999512,
+            "low": 777.96002197,
+            "open": 778.15002441
+          },
+          {
+            "close": 777.2199707,
+            "date": "2026-10-07",
+            "high": 779.09997559,
+            "low": 773.60998535,
+            "open": 775.77001953
+          },
+          {
+            "close": 773.92999268,
+            "date": "2026-10-08",
+            "high": 777.09002686,
+            "low": 770.44000244,
+            "open": 774.85998535
+          },
+          {
+            "close": 778.57000732,
+            "date": "2026-10-09",
+            "high": 779.41998291,
+            "low": 775.14001465,
+            "open": 776.23999023
+          },
+          {
+            "close": 778.09997559,
+            "date": "2026-10-12",
+            "high": 779.40002441,
+            "low": 777.04998779,
+            "open": 778.7800293
+          },
+          {
+            "close": 778.01000977,
+            "date": "2026-10-13",
+            "high": 778.75,
+            "low": 775.95001221,
+            "open": 777.34002686
+          },
+          {
+            "close": 769.59997559,
+            "date": "2026-10-14",
+            "high": 776.29998779,
+            "low": 766.71002197,
+            "open": 774.91998291
+          }
+        ],
+        "benchmark_source": "yahoo_chart_adjusted_daily",
+        "corporate_action_adjusted": true,
+        "evidence_sha256": "a84ea02524a394a13623b25f0c04d5b3aa9b6faaf0b0b40ef851f2f12e0527c0",
+        "schema_version": "opportunity-price-evidence-v1",
+        "stock_rows": [
+          {
+            "close": 214.56600952,
+            "date": "2026-10-01",
+            "high": 214.73562509,
+            "low": 207.56180454,
+            "open": 211.27343349
+          },
+          {
+            "close": 225.76075745,
+            "date": "2026-10-02",
+            "high": 231.37807613,
+            "low": 215.76330435,
+            "open": 215.94289193
+          },
+          {
+            "close": 223.26638794,
+            "date": "2026-10-05",
+            "high": 229.48236245,
+            "low": 217.79871026,
+            "open": 224.96255888
+          },
+          {
+            "close": 227.93585205,
+            "date": "2026-10-06",
+            "high": 229.97126939,
+            "low": 223.44597966,
+            "open": 224.29407276
+          },
+          {
+            "close": 235.23937988,
+            "date": "2026-10-07",
+            "high": 237.54417856,
+            "low": 230.31049542,
+            "open": 231.47786039
+          },
+          {
+            "close": 230.52999878,
+            "date": "2026-10-08",
+            "high": 235.52871772,
+            "low": 228.81386862,
+            "open": 233.4134939
+          },
+          {
+            "close": 237.1499939,
+            "date": "2026-10-09",
+            "high": 237.69999695,
+            "low": 229.5,
+            "open": 233.00999451
+          },
+          {
+            "close": 239.17999268,
+            "date": "2026-10-12",
+            "high": 239.80000305,
+            "low": 235.25,
+            "open": 237.41999817
+          },
+          {
+            "close": 239.00999451,
+            "date": "2026-10-13",
+            "high": 240.86999512,
+            "low": 232.52999878,
+            "open": 236.19000244
+          },
+          {
+            "close": 222.19999695,
+            "date": "2026-10-14",
+            "high": 233.33000183,
+            "low": 221.33999634,
+            "open": 231.72000122
+          }
+        ],
+        "stock_source": "yahoo_chart_adjusted_daily"
+      },
+      "price_evidence_sha256": "a84ea02524a394a13623b25f0c04d5b3aa9b6faaf0b0b40ef851f2f12e0527c0",
+      "price_source": "yahoo_chart_adjusted_daily",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-09-30T13:52:47+00:00",
       "rank": 3,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": null,
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -291,9 +457,10 @@
       },
       "score_version": "return-opportunity-score-v3",
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
+      "settled_at": "2026-10-14T23:20:54.924039+00:00",
       "snapshot_key": "2026-09-30_2026-09-30_214520.json",
       "source_snapshot_sha256": "b72d85ca69d5fea096b86068ad72a578ed7d9cbecfcd704390952814391eaa64",
-      "status": "PENDING_MATURITY",
+      "status": "SETTLED",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -596,6 +763,11 @@
     {
       "authorizes_production": false,
       "benchmark_code": "SPY",
+      "benchmark_entry_open": 764.35998535,
+      "benchmark_exit_close": 769.59997559,
+      "benchmark_gross_return": 0.0068554,
+      "benchmark_net_return": 0.0053554,
+      "benchmark_price_source": "yahoo_chart_adjusted_daily",
       "benchmark_transaction_cost": 0.0015,
       "benchmark_transaction_cost_version": "market-round-trip-cost-v1",
       "calendar_id": "XNYS",
@@ -603,6 +775,7 @@
       "calibrated": false,
       "candidate_evidence_sha256": "30932113b872b4daf41fad17c3ed6568e4d7132e7ec961d2c9470eb336a14545",
       "code": "RVTY",
+      "corporate_action_adjusted": true,
       "currency": "USD",
       "decision_time": "2026-09-30T13:52:47+00:00",
       "entry_assessment": {
@@ -618,26 +791,186 @@
         "return_10d_pct": 6.469,
         "return_5d_pct": 9.182
       },
+      "entry_open": 155.47999573,
       "entry_session_open_at": "2026-10-01T13:30:00+00:00",
       "entry_trade_date": "2026-10-01",
       "evidence_score": 73.41,
+      "exit_close": 152.11999512,
       "feature_cutoff_at": "2026-09-30T13:47:13.721664+00:00",
       "forecast_end_session_close_at": "2026-10-14T20:00:00+00:00",
       "forecast_end_trade_date": "2026-10-14",
       "generated_at": "2026-09-30T13:45:20+00:00",
+      "gross_total_return": -0.0216105,
       "horizon_sessions": 10,
       "information_cutoff_at": "2026-09-30T13:52:47+00:00",
       "market": "us",
       "market_rank": 2,
+      "maximum_adverse_excursion": -0.05647028,
+      "maximum_drawdown": -0.0923153,
       "name": "Revvity Inc",
+      "net_excess_return": -0.0284659,
+      "net_total_return": -0.0231105,
       "opportunity_score": 73.41,
-      "outcome_sha256": "f0a004f11f43cbf223e56aa749ceb73d2ffa5ef4a8058dc92601899550da91fc",
+      "outcome_sha256": "983d044bbd983c03b2d9e295c1533f58e0ba6003c22efa7fb5837367a077f2da",
       "prediction_id": "opppred_a70e98206daf19bc8c0df41e",
       "prediction_sha256": "72b795f1332ff10058700994030d417c3cf4a900a294cfe1e8f7fc5249cb3154",
+      "price_evidence": {
+        "benchmark_rows": [
+          {
+            "close": 763.98999023,
+            "date": "2026-10-01",
+            "high": 765.65002441,
+            "low": 758.78997803,
+            "open": 764.35998535
+          },
+          {
+            "close": 769.64001465,
+            "date": "2026-10-02",
+            "high": 772.65002441,
+            "low": 767.15002441,
+            "open": 770.58001709
+          },
+          {
+            "close": 774.83001709,
+            "date": "2026-10-05",
+            "high": 776.60998535,
+            "low": 769.63000488,
+            "open": 769.69000244
+          },
+          {
+            "close": 779.09002686,
+            "date": "2026-10-06",
+            "high": 781.61999512,
+            "low": 777.96002197,
+            "open": 778.15002441
+          },
+          {
+            "close": 777.2199707,
+            "date": "2026-10-07",
+            "high": 779.09997559,
+            "low": 773.60998535,
+            "open": 775.77001953
+          },
+          {
+            "close": 773.92999268,
+            "date": "2026-10-08",
+            "high": 777.09002686,
+            "low": 770.44000244,
+            "open": 774.85998535
+          },
+          {
+            "close": 778.57000732,
+            "date": "2026-10-09",
+            "high": 779.41998291,
+            "low": 775.14001465,
+            "open": 776.23999023
+          },
+          {
+            "close": 778.09997559,
+            "date": "2026-10-12",
+            "high": 779.40002441,
+            "low": 777.04998779,
+            "open": 778.7800293
+          },
+          {
+            "close": 778.01000977,
+            "date": "2026-10-13",
+            "high": 778.75,
+            "low": 775.95001221,
+            "open": 777.34002686
+          },
+          {
+            "close": 769.59997559,
+            "date": "2026-10-14",
+            "high": 776.29998779,
+            "low": 766.71002197,
+            "open": 774.91998291
+          }
+        ],
+        "benchmark_source": "yahoo_chart_adjusted_daily",
+        "corporate_action_adjusted": true,
+        "evidence_sha256": "904e5751941ab933c3e083fd0b28cf66d3add23ab9654e3829bf7b83bbfacada",
+        "schema_version": "opportunity-price-evidence-v1",
+        "stock_rows": [
+          {
+            "close": 149.05999756,
+            "date": "2026-10-01",
+            "high": 155.47999573,
+            "low": 148.30999756,
+            "open": 155.47999573
+          },
+          {
+            "close": 151.52999878,
+            "date": "2026-10-02",
+            "high": 153.38000488,
+            "low": 148.55000305,
+            "open": 149.94000244
+          },
+          {
+            "close": 157.36000061,
+            "date": "2026-10-05",
+            "high": 157.44999695,
+            "low": 150.38999939,
+            "open": 151.44999695
+          },
+          {
+            "close": 153.30000305,
+            "date": "2026-10-06",
+            "high": 166.25,
+            "low": 151.44999695,
+            "open": 161.61999512
+          },
+          {
+            "close": 153.6000061,
+            "date": "2026-10-07",
+            "high": 156.00999451,
+            "low": 149.25,
+            "open": 153.02999878
+          },
+          {
+            "close": 152.16000366,
+            "date": "2026-10-08",
+            "high": 152.53999329,
+            "low": 146.69999695,
+            "open": 152.03999329
+          },
+          {
+            "close": 154.17999268,
+            "date": "2026-10-09",
+            "high": 155.5,
+            "low": 152.3999939,
+            "open": 152.3999939
+          },
+          {
+            "close": 155.61000061,
+            "date": "2026-10-12",
+            "high": 156.33000183,
+            "low": 153.46000671,
+            "open": 153.74000549
+          },
+          {
+            "close": 155.08000183,
+            "date": "2026-10-13",
+            "high": 157.46000671,
+            "low": 153.1000061,
+            "open": 156.44000244
+          },
+          {
+            "close": 152.11999512,
+            "date": "2026-10-14",
+            "high": 157.97000122,
+            "low": 151.44999695,
+            "open": 154.25999451
+          }
+        ],
+        "stock_source": "yahoo_chart_adjusted_daily"
+      },
+      "price_evidence_sha256": "904e5751941ab933c3e083fd0b28cf66d3add23ab9654e3829bf7b83bbfacada",
+      "price_source": "yahoo_chart_adjusted_daily",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-09-30T13:52:47+00:00",
       "rank": 7,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": null,
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -683,9 +1016,10 @@
       },
       "score_version": "return-opportunity-score-v3",
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
+      "settled_at": "2026-10-14T23:20:54.924039+00:00",
       "snapshot_key": "2026-09-30_2026-09-30_214520.json",
       "source_snapshot_sha256": "b72d85ca69d5fea096b86068ad72a578ed7d9cbecfcd704390952814391eaa64",
-      "status": "PENDING_MATURITY",
+      "status": "SETTLED",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -693,6 +1027,11 @@
     {
       "authorizes_production": false,
       "benchmark_code": "SPY",
+      "benchmark_entry_open": 764.35998535,
+      "benchmark_exit_close": 769.59997559,
+      "benchmark_gross_return": 0.0068554,
+      "benchmark_net_return": 0.0053554,
+      "benchmark_price_source": "yahoo_chart_adjusted_daily",
       "benchmark_transaction_cost": 0.0015,
       "benchmark_transaction_cost_version": "market-round-trip-cost-v1",
       "calendar_id": "XNYS",
@@ -700,6 +1039,7 @@
       "calibrated": false,
       "candidate_evidence_sha256": "34396687c3e1125d09370e1f07a2520e25a4ebb02c11700c411f386aa6ba647c",
       "code": "NBIS",
+      "corporate_action_adjusted": true,
       "currency": "USD",
       "decision_time": "2026-09-30T13:52:47+00:00",
       "entry_assessment": {
@@ -715,26 +1055,186 @@
         "return_10d_pct": 15.957,
         "return_5d_pct": 7.136
       },
+      "entry_open": 236.17999268,
       "entry_session_open_at": "2026-10-01T13:30:00+00:00",
       "entry_trade_date": "2026-10-01",
       "evidence_score": 72.53,
+      "exit_close": 186.00999451,
       "feature_cutoff_at": "2026-09-30T13:47:13.721664+00:00",
       "forecast_end_session_close_at": "2026-10-14T20:00:00+00:00",
       "forecast_end_trade_date": "2026-10-14",
       "generated_at": "2026-09-30T13:45:20+00:00",
+      "gross_total_return": -0.21242273,
       "horizon_sessions": 10,
       "information_cutoff_at": "2026-09-30T13:52:47+00:00",
       "market": "us",
       "market_rank": 3,
+      "maximum_adverse_excursion": -0.22461677,
+      "maximum_drawdown": -0.26709886,
       "name": "Nebius Group NV-A",
+      "net_excess_return": -0.21927813,
+      "net_total_return": -0.21392273,
       "opportunity_score": 72.53,
-      "outcome_sha256": "7c434fdd95973fcc8038637d1d40fcb4ac8a07d2cfabc4e53bf5f5b4295df22b",
+      "outcome_sha256": "181395a41cb01745ada1d5e1f1c0791b74d592267d86abba49669cf772d8118a",
       "prediction_id": "opppred_6eae526203d0d3ac8b91919b",
       "prediction_sha256": "a008f122f3e62362a0e89c834e2b05a98bcbf8bfff94fcae402ec67e78f6f027",
+      "price_evidence": {
+        "benchmark_rows": [
+          {
+            "close": 763.98999023,
+            "date": "2026-10-01",
+            "high": 765.65002441,
+            "low": 758.78997803,
+            "open": 764.35998535
+          },
+          {
+            "close": 769.64001465,
+            "date": "2026-10-02",
+            "high": 772.65002441,
+            "low": 767.15002441,
+            "open": 770.58001709
+          },
+          {
+            "close": 774.83001709,
+            "date": "2026-10-05",
+            "high": 776.60998535,
+            "low": 769.63000488,
+            "open": 769.69000244
+          },
+          {
+            "close": 779.09002686,
+            "date": "2026-10-06",
+            "high": 781.61999512,
+            "low": 777.96002197,
+            "open": 778.15002441
+          },
+          {
+            "close": 777.2199707,
+            "date": "2026-10-07",
+            "high": 779.09997559,
+            "low": 773.60998535,
+            "open": 775.77001953
+          },
+          {
+            "close": 773.92999268,
+            "date": "2026-10-08",
+            "high": 777.09002686,
+            "low": 770.44000244,
+            "open": 774.85998535
+          },
+          {
+            "close": 778.57000732,
+            "date": "2026-10-09",
+            "high": 779.41998291,
+            "low": 775.14001465,
+            "open": 776.23999023
+          },
+          {
+            "close": 778.09997559,
+            "date": "2026-10-12",
+            "high": 779.40002441,
+            "low": 777.04998779,
+            "open": 778.7800293
+          },
+          {
+            "close": 778.01000977,
+            "date": "2026-10-13",
+            "high": 778.75,
+            "low": 775.95001221,
+            "open": 777.34002686
+          },
+          {
+            "close": 769.59997559,
+            "date": "2026-10-14",
+            "high": 776.29998779,
+            "low": 766.71002197,
+            "open": 774.91998291
+          }
+        ],
+        "benchmark_source": "yahoo_chart_adjusted_daily",
+        "corporate_action_adjusted": true,
+        "evidence_sha256": "2363cd55c62c77b3d525a8a82f7e420a747e0a1a7b78408d1068dc7fd3ff01b0",
+        "schema_version": "opportunity-price-evidence-v1",
+        "stock_rows": [
+          {
+            "close": 232.27999878,
+            "date": "2026-10-01",
+            "high": 239.63000488,
+            "low": 228.47000122,
+            "open": 236.17999268
+          },
+          {
+            "close": 242.80999756,
+            "date": "2026-10-02",
+            "high": 248.33999634,
+            "low": 235.34199524,
+            "open": 235.75999451
+          },
+          {
+            "close": 232.57000732,
+            "date": "2026-10-05",
+            "high": 244.49000549,
+            "low": 230.50999451,
+            "open": 244.1000061
+          },
+          {
+            "close": 249.86999512,
+            "date": "2026-10-06",
+            "high": 255.1000061,
+            "low": 237.0,
+            "open": 237.22000122
+          },
+          {
+            "close": 237.1499939,
+            "date": "2026-10-07",
+            "high": 243.61999512,
+            "low": 234.02999878,
+            "open": 242.33000183
+          },
+          {
+            "close": 219.71000671,
+            "date": "2026-10-08",
+            "high": 234.15499878,
+            "low": 217.72999573,
+            "open": 233.13000488
+          },
+          {
+            "close": 221.07000732,
+            "date": "2026-10-09",
+            "high": 225.30000305,
+            "low": 218.5,
+            "open": 222.30000305
+          },
+          {
+            "close": 210.05999756,
+            "date": "2026-10-12",
+            "high": 217.19500732,
+            "low": 206.8999939,
+            "open": 217.19500732
+          },
+          {
+            "close": 206.86000061,
+            "date": "2026-10-13",
+            "high": 207.91999817,
+            "low": 197.6000061,
+            "open": 200.5
+          },
+          {
+            "close": 186.00999451,
+            "date": "2026-10-14",
+            "high": 198.6000061,
+            "low": 183.13000488,
+            "open": 195.0
+          }
+        ],
+        "stock_source": "yahoo_chart_adjusted_daily"
+      },
+      "price_evidence_sha256": "2363cd55c62c77b3d525a8a82f7e420a747e0a1a7b78408d1068dc7fd3ff01b0",
+      "price_source": "yahoo_chart_adjusted_daily",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-09-30T13:52:47+00:00",
       "rank": 8,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": null,
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -780,9 +1280,10 @@
       },
       "score_version": "return-opportunity-score-v3",
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
+      "settled_at": "2026-10-14T23:20:54.924039+00:00",
       "snapshot_key": "2026-09-30_2026-09-30_214520.json",
       "source_snapshot_sha256": "b72d85ca69d5fea096b86068ad72a578ed7d9cbecfcd704390952814391eaa64",
-      "status": "PENDING_MATURITY",
+      "status": "SETTLED",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -2395,9 +2896,10 @@
   "schema_version": "opportunity-outcome-batch-v1",
   "snapshot_key": "2026-09-30_2026-09-30_214520.json",
   "source_snapshot_sha256": "b72d85ca69d5fea096b86068ad72a578ed7d9cbecfcd704390952814391eaa64",
-  "status": "PENDING_MATURITY",
+  "status": "PARTIAL",
   "status_counts": {
-    "PENDING_MATURITY": 12
+    "PENDING_MATURITY": 9,
+    "SETTLED": 3
   },
   "track": "RETURN_OPPORTUNITY"
 }
