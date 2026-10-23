@@ -1,7 +1,7 @@
 {
   "authorizes_production": false,
-  "batch_sha256": "8bfe568683ee3ac4db8bbfb9c9c3f791bf722f5870b33483e5c4769830b4ad40",
-  "evaluated_at": "2026-10-09T06:23:23+00:00",
+  "batch_sha256": "f5bb2d9df1c2be93b6e1d7c21d3730565ef0971e83a21da3ee454c922a7e595b",
+  "evaluated_at": "2026-10-23T17:22:43+00:00",
   "generated_at": "2026-10-09T14:14:46+08:00",
   "outcomes": [
     {
@@ -19,18 +19,18 @@
       "forecast_end_trade_date": "2026-10-23",
       "is_primary": true,
       "market": "a_share",
-      "outcome_sha256": "e57ee4980c7c6d9c5af20019a9001a0de39e15974d31791d02313192885283a8",
+      "outcome_sha256": "39da68d47f77de05175d942b70438953e8cf40243bcaf53c28b8bfd1990126e0",
       "prediction_id": "rulepred_95a3c2864d495115d55211b8",
       "prediction_sha256": "3ef2e855a46348b2fd89a1c271209879a31840c89634d56b86a5b76639a042e4",
       "qualification_id": "qual_b61f881be51574c2632b69f8",
       "qualification_score": 80.09,
       "qualification_track": "event_catalyst",
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": "COMPLETE_ADJUSTED_WINDOW_MISSING",
       "rule_model_id": "ten-day-audited-rule-ensemble-v4",
       "schema_version": "rule-outcome-v1",
       "signal_date": "2026-10-08",
       "snapshot_key": "2026-10-09_2026-10-08_141446.json",
-      "status": "PENDING_MATURITY",
+      "status": "PENDING_DATA",
       "track": "RULE_QUALIFICATION",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -143,9 +143,10 @@
   "schema_version": "rule-outcome-batch-v1",
   "signal_date": "2026-10-08",
   "snapshot_key": "2026-10-09_2026-10-08_141446.json",
-  "status": "PENDING_MATURITY",
+  "status": "PARTIAL",
   "status_counts": {
-    "PENDING_MATURITY": 2
+    "PENDING_DATA": 1,
+    "PENDING_MATURITY": 1
   },
   "track": "RULE_QUALIFICATION"
 }
