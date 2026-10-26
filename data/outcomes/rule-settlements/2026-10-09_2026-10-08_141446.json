@@ -1,7 +1,7 @@
 {
   "authorizes_production": false,
-  "batch_sha256": "b217a14fd8b30959f4dc4e21caec877c6621aad1657466088f83ad5558601b9e",
-  "evaluated_at": "2026-10-25T00:32:20+00:00",
+  "batch_sha256": "cbcd7a2bef6a327e5a9d9a5e4da9746fe9afe00c1e84532a2c572dc6b99e30e9",
+  "evaluated_at": "2026-10-26T10:28:14+00:00",
   "generated_at": "2026-10-09T14:14:46+08:00",
   "outcomes": [
     {
@@ -108,30 +108,100 @@
     {
       "authorizes_production": false,
       "benchmark_code": "2800.HK",
+      "benchmark_entry_open": 25.10000038,
+      "benchmark_exit_close": 23.87999916,
+      "benchmark_gross_return": -0.04860563,
+      "benchmark_net_return": -0.05160563,
+      "benchmark_price_source": "yahoo_chart_adjusted_daily",
       "benchmark_transaction_cost": 0.003,
       "benchmark_transaction_cost_version": "market-round-trip-cost-v1",
       "calendar_id": "XHKG",
       "calendar_version": "exchange-calendars-4.13.2",
       "code": "0836.HK",
+      "corporate_action_adjusted": true,
       "currency": "HKD",
+      "entry_open": 19.98999977,
       "entry_session_open_at": "2026-10-12T01:30:00+00:00",
       "entry_trade_date": "2026-10-12",
+      "exit_close": 18.88999939,
       "forecast_end_session_close_at": "2026-10-26T08:00:00+00:00",
       "forecast_end_trade_date": "2026-10-26",
+      "gross_total_return": -0.05502753,
       "is_primary": false,
       "market": "hk",
-      "outcome_sha256": "f7d5f89627b077680f3dc15615dd629b532460e9b3bdb79ea61fa39be88d2d56",
+      "maximum_adverse_excursion": -0.07353673,
+      "net_excess_return": -0.0064219,
+      "net_total_return": -0.05802753,
+      "outcome_sha256": "2150d1eef9c97480261e023a189cc1950d88391958cd5e955383ae2a301ef50e",
       "prediction_id": "rulepred_154720f957b62521ff7077a5",
       "prediction_sha256": "228d99c5b0fe6b09a2a5aad82c5a0e5cc2da59c8e6a4da6653b57c664299a779",
+      "price_evidence": {
+        "benchmark_entry_open": 25.10000038,
+        "benchmark_exit_close": 23.87999916,
+        "benchmark_source": "yahoo_chart_adjusted_daily",
+        "corporate_action_adjusted": true,
+        "entry_date": "2026-10-12",
+        "entry_open": 19.98999977,
+        "evidence_sha256": "4f4d374198ce11128dcbb6df378f98ab23c78d3c853d6f50709f3eaebbfc07b5",
+        "exit_close": 18.88999939,
+        "exit_date": "2026-10-26",
+        "schema_version": "rule-price-evidence-v1",
+        "session_lows": [
+          {
+            "date": "2026-10-12",
+            "low": 19.87000084
+          },
+          {
+            "date": "2026-10-13",
+            "low": 20.05999947
+          },
+          {
+            "date": "2026-10-14",
+            "low": 20.13999939
+          },
+          {
+            "date": "2026-10-15",
+            "low": 19.77000046
+          },
+          {
+            "date": "2026-10-16",
+            "low": 19.61000061
+          },
+          {
+            "date": "2026-10-20",
+            "low": 19.26000023
+          },
+          {
+            "date": "2026-10-21",
+            "low": 19.14999962
+          },
+          {
+            "date": "2026-10-22",
+            "low": 18.68000031
+          },
+          {
+            "date": "2026-10-23",
+            "low": 18.52000046
+          },
+          {
+            "date": "2026-10-26",
+            "low": 18.64999962
+          }
+        ],
+        "stock_source": "yahoo_chart_adjusted_daily"
+      },
+      "price_evidence_sha256": "4f4d374198ce11128dcbb6df378f98ab23c78d3c853d6f50709f3eaebbfc07b5",
+      "price_source": "yahoo_chart_adjusted_daily",
       "qualification_id": "qual_771eb6c11dfaab02ca5a7d97",
       "qualification_score": 73.33,
       "qualification_track": "quality_technical",
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": null,
       "rule_model_id": "ten-day-audited-rule-ensemble-v4",
       "schema_version": "rule-outcome-v1",
+      "settled_at": "2026-10-26T10:28:14+00:00",
       "signal_date": "2026-10-08",
       "snapshot_key": "2026-10-09_2026-10-08_141446.json",
-      "status": "PENDING_MATURITY",
+      "status": "SETTLED",
       "track": "RULE_QUALIFICATION",
       "transaction_cost": 0.003,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -213,10 +283,9 @@
   "schema_version": "rule-outcome-batch-v1",
   "signal_date": "2026-10-08",
   "snapshot_key": "2026-10-09_2026-10-08_141446.json",
-  "status": "PARTIAL",
+  "status": "SETTLED",
   "status_counts": {
-    "PENDING_MATURITY": 1,
-    "SETTLED": 1
+    "SETTLED": 2
   },
   "track": "RULE_QUALIFICATION"
 }
