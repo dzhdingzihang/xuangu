@@ -1,8 +1,8 @@
 {
   "authorizes_production": false,
-  "batch_sha256": "ffb44fa08444bbd67bd231331dbc6c3fe0963fe3b6d9b2ad32c66a3613dc35ab",
+  "batch_sha256": "4f742afbd805cb8bc6b6845bda3df59cda489e2c8e91b86367fd3e3e1bc62aaf",
   "calibrated": false,
-  "evaluated_at": "2026-10-22T17:29:53+00:00",
+  "evaluated_at": "2026-11-05T07:03:13.553849+00:00",
   "outcomes": [
     {
       "authorizes_production": false,
@@ -430,13 +430,13 @@
       "market_rank": 1,
       "name": "新北洋",
       "opportunity_score": 78.01,
-      "outcome_sha256": "c33ee2f30c3082789da34516e0a8b93d7cfaff0382f5052e8e5609afb6de6d1c",
+      "outcome_sha256": "811ad35a5e30954ebc329b0054c03bf795c6d3493f6826facb3683675a180045",
       "prediction_id": "opppred_13f5ad4fb8de67ab47e2aaa1",
       "prediction_sha256": "04d24db8f000fc4783db23204be8ca157ff8faf88b178edba2983e75649db69b",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-10-22T17:29:53+00:00",
       "rank": 5,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": "COMPLETE_ADJUSTED_WINDOW_MISSING",
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -484,7 +484,7 @@
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
       "snapshot_key": "2026-10-23_2026-10-22_011703.json",
       "source_snapshot_sha256": "13ee61e16acd4ee68be69414b5999f7e4e6a5b1c32943cb2b3cd4e409acf76df",
-      "status": "PENDING_MATURITY",
+      "status": "PENDING_DATA",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -624,13 +624,13 @@
       "market_rank": 2,
       "name": "大西洋",
       "opportunity_score": 77.04,
-      "outcome_sha256": "51a44d07aa8f03e67a476ef47c9883f87f7e91e8925ba11221526d208f8d27d8",
+      "outcome_sha256": "24dfed450764cde39762655e9f821c763eced3a0a8097f25d9ccc7b5080208f7",
       "prediction_id": "opppred_004f1697116fa379c1a9dd51",
       "prediction_sha256": "05d71c6eba0c7aa96622bfcbc5a5ac504bf75c13151aac4a0b7d36e25ffd13b8",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-10-22T17:29:53+00:00",
       "rank": 7,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": "COMPLETE_ADJUSTED_WINDOW_MISSING",
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -678,7 +678,7 @@
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
       "snapshot_key": "2026-10-23_2026-10-22_011703.json",
       "source_snapshot_sha256": "13ee61e16acd4ee68be69414b5999f7e4e6a5b1c32943cb2b3cd4e409acf76df",
-      "status": "PENDING_MATURITY",
+      "status": "PENDING_DATA",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -1012,13 +1012,13 @@
       "market_rank": 3,
       "name": "柳药集团",
       "opportunity_score": 74.66,
-      "outcome_sha256": "5d5ada4c476b1610fdbd2c0eef42cdd3a35276ae6490e0dbccc64792683ed715",
+      "outcome_sha256": "5e33c8c2ef571911d283f23812de184d0b365f5818180a6678141428170253fb",
       "prediction_id": "opppred_3d0c8c40ab4f99dc06bc0763",
       "prediction_sha256": "451968de4035376ba874a8d6ed9c3ef47058ebe210eb36e44b2d7789e649a11b",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-10-22T17:29:53+00:00",
       "rank": 11,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": "COMPLETE_ADJUSTED_WINDOW_MISSING",
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -1066,7 +1066,7 @@
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
       "snapshot_key": "2026-10-23_2026-10-22_011703.json",
       "source_snapshot_sha256": "13ee61e16acd4ee68be69414b5999f7e4e6a5b1c32943cb2b3cd4e409acf76df",
-      "status": "PENDING_MATURITY",
+      "status": "PENDING_DATA",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -2367,9 +2367,10 @@
   "schema_version": "opportunity-outcome-batch-v1",
   "snapshot_key": "2026-10-23_2026-10-22_011703.json",
   "source_snapshot_sha256": "13ee61e16acd4ee68be69414b5999f7e4e6a5b1c32943cb2b3cd4e409acf76df",
-  "status": "PENDING_MATURITY",
+  "status": "PARTIAL",
   "status_counts": {
-    "PENDING_MATURITY": 12
+    "PENDING_DATA": 3,
+    "PENDING_MATURITY": 9
   },
   "track": "RETURN_OPPORTUNITY"
 }
