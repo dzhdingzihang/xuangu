@@ -1,8 +1,8 @@
 {
   "authorizes_production": false,
-  "batch_sha256": "cb3e18f1cb49fed8cf26a1ecae66e90ec90d6f91e9fce0be985da3a416afbb18",
+  "batch_sha256": "4b98f1fb4d715e2fff038f26ba4cc215ab969443ab9113ff79edac954229a488",
   "calibrated": false,
-  "evaluated_at": "2026-10-27T14:45:20+00:00",
+  "evaluated_at": "2026-11-10T07:31:51.256976+00:00",
   "outcomes": [
     {
       "authorizes_production": false,
@@ -139,13 +139,13 @@
       "market_rank": 1,
       "name": "怡合达",
       "opportunity_score": 78.03,
-      "outcome_sha256": "04de2b37a64df0f871a57436bfff4cbc176fe87a4eaf1642d9394da6af1c654e",
+      "outcome_sha256": "da1ca2cf77dc8d4ceb4f0d8e39e9a47b67e38c5173eb20c6bf2c54aa8322ee1c",
       "prediction_id": "opppred_cd611dce72df69266509fbca",
       "prediction_sha256": "e15bb8e814cd4a03618b80c4bf02a89f00d272199a546a5de02bcfedab676116",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-10-27T14:45:20+00:00",
       "rank": 2,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": "COMPLETE_ADJUSTED_WINDOW_MISSING",
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -193,7 +193,7 @@
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
       "snapshot_key": "2026-10-27_2026-10-27_223149.json",
       "source_snapshot_sha256": "1bc388662a9e68d5a537971945d8f9da738b1e25710c9b2ac42437196ef818bc",
-      "status": "PENDING_MATURITY",
+      "status": "PENDING_DATA",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -1119,13 +1119,13 @@
       "market_rank": 2,
       "name": "汇嘉时代",
       "opportunity_score": 74.24,
-      "outcome_sha256": "5a684d6e90c10d65f3324604151b39bd8c87e2fae9ad7784e61bea4876826a97",
+      "outcome_sha256": "61200242977606ba4dcc39d5967a381e2a5578dc687255e6662a55f5312f9337",
       "prediction_id": "opppred_8c4afaf2d787054e71497750",
       "prediction_sha256": "b12f664d36d104b1b99b4f61bf1cce7aa28a7859f005aa48723b6d401c60da8e",
       "publication_time_basis": "FIRST_VERIFIED_PUBLICATION",
       "published_at": "2026-10-27T14:45:20+00:00",
       "rank": 12,
-      "reason_code": "FORECAST_WINDOW_OPEN",
+      "reason_code": "COMPLETE_ADJUSTED_WINDOW_MISSING",
       "schema_version": "opportunity-outcome-v1",
       "score_identity": {
         "contract_version": "return-opportunities-v1",
@@ -1173,7 +1173,7 @@
       "score_version_id": "oppscore_da86bf6dddb4d96e161a0277",
       "snapshot_key": "2026-10-27_2026-10-27_223149.json",
       "source_snapshot_sha256": "1bc388662a9e68d5a537971945d8f9da738b1e25710c9b2ac42437196ef818bc",
-      "status": "PENDING_MATURITY",
+      "status": "PENDING_DATA",
       "track": "RETURN_OPPORTUNITY",
       "transaction_cost": 0.0015,
       "transaction_cost_version": "market-round-trip-cost-v1"
@@ -2387,9 +2387,10 @@
   "schema_version": "opportunity-outcome-batch-v1",
   "snapshot_key": "2026-10-27_2026-10-27_223149.json",
   "source_snapshot_sha256": "1bc388662a9e68d5a537971945d8f9da738b1e25710c9b2ac42437196ef818bc",
-  "status": "PENDING_MATURITY",
+  "status": "PARTIAL",
   "status_counts": {
-    "PENDING_MATURITY": 12
+    "PENDING_DATA": 2,
+    "PENDING_MATURITY": 10
   },
   "track": "RETURN_OPPORTUNITY"
 }
